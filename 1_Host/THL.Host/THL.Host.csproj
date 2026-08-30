@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <AssemblyName>THL.Host</AssemblyName>
+    <RootNamespace>THL.Host</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\2_Core\THL.Contracts\THL.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\3_Plugins\**\bin\**\*.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

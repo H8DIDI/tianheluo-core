@@ -1,0 +1,8 @@
+## Build
+bin/
+obj/
+*.user
+.vs/
+
+## Revit
+*.addin
