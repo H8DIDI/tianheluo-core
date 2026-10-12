@@ -21,7 +21,7 @@ for pkg in sorted(dist.glob("*.thlp")):
         "size": f"{pkg.stat().st_size/1024:.0f} KB", "status": "beta",
         "download": f"/dl/{pkg.name}", "date": "2026-10-12",
         "glyph": m.get("glyph", ""), "color": m.get("color", ""),
-        "author": m.get("author", ""), "license": m.get("license", ""), "homepage": m.get("homepage", ""),
+        "tier": m.get("tier", "official"), "author": m.get("author", ""), "license": m.get("license", ""), "homepage": m.get("homepage", ""),
     })
 for f in dist.glob("THL-Host_*.zip"): shutil.copy(f, dl / f.name)
 json.dump({"revit": "2026", "plugins": plugins}, open(site / "plugins.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)

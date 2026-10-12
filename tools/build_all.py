@@ -35,7 +35,7 @@ else:
 # 3) 打包
 for f in (root / "dist").glob("*.thlp"):
     f.unlink()
-for script in ("pack.py", "pack_python.py", "pack_sendit.py", "make_installer.py", "build_site.py"):
+for script in ("pack.py", "pack_python.py", "pack_sendit.py", "pack_community.py", "make_installer.py", "build_site.py", "build_ai.py"):
     run([sys.executable, str(root / "tools" / script)])
 
 # 4) 部署签名后的 .NET 10 版到本机 Revit（可选）

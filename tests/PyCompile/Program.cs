@@ -1,11 +1,8 @@
 using IronPython.Hosting;
 var engine = Python.CreateEngine();
-var root = @"C:\Users\PCB\AppData\Roaming\pyRevit\Extensions\Sendit.extension";
-int bad = 0;
-var files = Directory.GetFiles(Path.Combine(root, "lib", "sendit"), "*.py").Concat(Directory.GetFiles(Path.Combine(root, "Sendit.tab"), "script.py", SearchOption.AllDirectories));
-foreach (var f in files)
+foreach (var d in new[] { "hello-world", "count-by-category", "set-comments" })
 {
-    try { engine.CreateScriptSourceFromFile(f, System.Text.Encoding.UTF8).Compile(); Console.WriteLine("OK   " + Path.GetFileName(Path.GetDirectoryName(f)) + "/" + Path.GetFileName(f)); }
-    catch (Exception e) { bad++; Console.WriteLine("FAIL " + f + " :: " + e.Message.Split('\n')[0]); }
+    var f = Path.Combine(@"C:\KAIFA\tianheluo-web\examples", d, "script.py");
+    try { engine.CreateScriptSourceFromFile(f, System.Text.Encoding.UTF8).Compile(); Console.WriteLine("IronPython 3.4 编译通过: " + d); }
+    catch (Exception e) { Console.WriteLine("FAIL " + d + " :: " + e.Message.Split('\n')[0]); }
 }
-Console.WriteLine(bad == 0 ? "ALL COMPILE" : bad + " failed");
