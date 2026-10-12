@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Revit 2026.5 (API 26.5) 运行在 .NET 10 -->
+    <TargetFrameworks>net8.0-windows;net10.0-windows</TargetFrameworks>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>THL.Host</RootNamespace>
+    <AssemblyName>THL.Host</AssemblyName>
+    <Company>didi</Company>
+    <Authors>didi</Authors>
+    <Product>天河落 THL</Product>
+    <Copyright>© 2026 didi · tianheluo.com</Copyright>
+    <Description>天河落 THL：Revit 插件宿主</Description>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <InformationalVersion>0.1.0</InformationalVersion>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+    <RevitVersion>2026</RevitVersion>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
+    <RevitAddinsDir>$(AppData)\Autodesk\Revit\Addins\$(RevitVersion)</RevitAddinsDir>
+  </PropertyGroup>
+
+  <!-- Revit 2026.5+ 运行在 .NET 10，2026.0 ~ 2026.4 运行在 .NET 8：各编译一份，安装脚本按 Revit 版本选择。
+       .NET 8 版本对着最早的 API（2026.0）编译，这样 2026.0~2026.4 都能加载（加载时只要求已加载的版本不低于引用版本）。 -->
+  <ItemGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
+    <Reference Include="RevitAPI"><HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="RevitAPIUI"><HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2026.0.4" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2026.0.4" PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="IronPython" Version="3.4.2" />
+    <PackageReference Include="IronPython.StdLib" Version="3.4.2" />
+    <EmbeddedResource Include="pyrevit_shim.py" LogicalName="THL.Host.pyrevit_shim.py" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+    <None Update="THL.addin" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- 构建后部署到 Revit 的用户插件目录。Revit 运行时会锁定 THL.Host.dll，请先关闭 Revit。 -->
+  <Target Name="DeployToRevit" AfterTargets="Build" Condition="'$(TargetFramework)'=='net10.0-windows'">
+    <ItemGroup>
+      <DeployFiles Include="$(TargetDir)*.dll;$(TargetDir)*.pdb;$(TargetDir)*.deps.json" />
+    </ItemGroup>
+    <Copy SourceFiles="$(TargetDir)THL.addin" DestinationFolder="$(RevitAddinsDir)" ContinueOnError="true" />
+    <ItemGroup>
+      <PyLib Include="$(TargetDir)lib\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(DeployFiles)" DestinationFolder="$(RevitAddinsDir)\THL" ContinueOnError="true" />
+    <Copy SourceFiles="@(PyLib)" DestinationFiles="@(PyLib->'$(RevitAddinsDir)\THL\lib\%(RecursiveDir)%(Filename)%(Extension)')" ContinueOnError="true" />
+    <Message Importance="high" Text="Deployed THL.Host to $(RevitAddinsDir)" />
+  </Target>
+
+</Project>

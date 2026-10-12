@@ -1,8 +1,16 @@
-## Build
+# 编译产物与临时文件
 bin/
 obj/
+_deploytest/
 *.user
 .vs/
 
-## Revit
-*.addin
+# 打包产物（由 tools/build_all.py 生成，发布在网站 tianheluo.com/dl/）
+dist/
+
+# 证书与私钥：绝不提交
+*.pfx
+*.p12
+*.snk
+*.cer
+secrets/

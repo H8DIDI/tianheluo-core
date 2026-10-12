@@ -1,0 +1,22 @@
+"""把每个插件打成 dist/<id>_<version>.thlp（zip：plugin.json + dll + pdb）。
+用法：python tools/pack.py   （先对每个插件执行 dotnet build -c Release）"""
+import json, zipfile, pathlib, sys
+root = pathlib.Path(__file__).resolve().parent.parent
+dist = root / "dist"; dist.mkdir(exist_ok=True)
+for mf in sorted((root / "plugins").glob("*/plugin.json")):
+    d = mf.parent
+    m = json.loads(mf.read_text(encoding="utf-8"))
+    out_dir = d / "bin" / "Release" / "net8.0-windows"
+    # 目录里的 DLL 被 Revit 占用时，退而用备用输出目录里较新的那份
+    alt = root / "_deploytest" / d.name
+    cands = [x for x in (out_dir / m["dll"], alt / m["dll"]) if x.exists()]
+    dll = max(cands, key=lambda x: x.stat().st_mtime) if cands else out_dir / m["dll"]
+    if not dll.exists():
+        print("缺少", dll, "- 请先 dotnet build -c Release"); sys.exit(1)
+    pkg = dist / f'{m["id"]}_{m["version"]}.thlp'
+    with zipfile.ZipFile(pkg, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(mf, "plugin.json")
+        z.write(dll, m["dll"])
+        pdb = dll.with_suffix(".pdb")
+        if pdb.exists(): z.write(pdb, pdb.name)
+    print(f'{pkg.name}  {pkg.stat().st_size/1024:.1f} KB')

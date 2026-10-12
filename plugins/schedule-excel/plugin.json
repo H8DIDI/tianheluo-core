@@ -1,0 +1,14 @@
+{
+  "id": "schedule-excel",
+  "name": "明细表Excel互导",
+  "version": "0.1.0",
+  "description": "把明细表导出成 Excel，在 Excel 里批量修改，再导回 Revit。导入前先预览改动，确认后才写入，Ctrl+Z 可整体撤销。",
+  "category": "数据处理",
+  "revit": "2026",
+  "dll": "ScheduleExcel.dll",
+  "entry": "THL.Plugins.ScheduleExcel.ScheduleExcelCommand",
+  "glyph": "表",
+  "author": "didi",
+  "license": "原创",
+  "homepage": "https://tianheluo.com"
+}

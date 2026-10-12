@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>ScheduleExcel</AssemblyName>
+    <RootNamespace>THL.Plugins.ScheduleExcel</RootNamespace>
+    <UseWPF>true</UseWPF>
+    <Company>didi</Company>
+    <Authors>didi</Authors>
+    <Product>天河落 THL</Product>
+    <Copyright>© 2026 didi · tianheluo.com</Copyright>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="System.IO" />
+  </ItemGroup>
+</Project>

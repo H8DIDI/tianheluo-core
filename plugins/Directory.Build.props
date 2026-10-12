@@ -1,0 +1,21 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RevitVersion>2026</RevitVersion>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Company>didi</Company>
+    <Authors>didi</Authors>
+    <Product>天河落 THL</Product>
+    <Copyright>© 2026 didi · tianheluo.com</Copyright>
+  </PropertyGroup>
+  <!-- 插件由宿主在自己的加载上下文里读入，.NET 8 编译的插件在 .NET 8 / .NET 10 的 Revit 里都能运行 -->
+  <ItemGroup>
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2026.0.4" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2026.0.4" PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+</Project>
