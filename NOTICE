@@ -1,0 +1,5 @@
+第三方内容 / Third-party notices
+
+- Sendit（图纸管理、视图管理、图纸签发管理插件）：MIT，作者 lewismconte，https://github.com/lewismconte/sendit ；许可文件随各插件包分发。
+- IronPython 3.4（Apache-2.0）、Nice3point Revit API 包（MIT，仅编译期引用）。
+- Revit 是 Autodesk, Inc. 的商标，本项目与 Autodesk 无关联。
