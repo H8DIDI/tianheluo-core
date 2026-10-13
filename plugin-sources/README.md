@@ -12,7 +12,7 @@
 | [`issue-manager`](issue-manager/) | 图纸签发管理 | 0.1.0 | Python | lewismconte (Sendit) | MIT |
 | [`pile-cleanup`](pile-cleanup/) | 清理重复松木桩垫层 | 0.1.0 | Python | didi | MIT |
 | [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.1.0 | Python | didi | MIT |
-| [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
+| [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`schedule-excel`](schedule-excel/) | 明细表Excel互导 | 0.1.0 | C#（源码在 `plugins/`） | didi | 原创 |
 | [`sheet-manager`](sheet-manager/) | 图纸管理 | 0.1.0 | Python | lewismconte (Sendit) | MIT |
 | [`view-manager`](view-manager/) | 视图管理 | 0.1.0 | Python | lewismconte (Sendit) | MIT |

@@ -20,21 +20,28 @@ public class BatchPlansCommand : IExternalCommand
     {
         var doc = commandData.Application.ActiveUIDocument.Document;
 
-        var types = new FilteredElementCollector(doc).OfClass(typeof(ViewFamilyType)).Cast<ViewFamilyType>()
-            .Where(t => t.ViewFamily == ViewFamily.FloorPlan)
-            .OrderBy(t => t.Name, StringComparer.CurrentCulture).ToList();
+        // left: the plan view templates in this model (the only plan view type in most models is "楼层平面")
+        var templates = new FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.View))
+            .Cast<Autodesk.Revit.DB.View>()
+            .Where(v => v.IsTemplate && v.ViewType == ViewType.FloorPlan)
+            .OrderBy(v => v.Name, StringComparer.CurrentCulture).ToList();
+        var floorType = new FilteredElementCollector(doc).OfClass(typeof(ViewFamilyType)).Cast<ViewFamilyType>()
+            .FirstOrDefault(t => t.ViewFamily == ViewFamily.FloorPlan);
         var levels = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>()
             .OrderBy(l => l.Elevation).ToList();
-        if (types.Count == 0 || levels.Count == 0)
+        if (floorType is null || levels.Count == 0)
         {
             TaskDialog.Show("批量生成平面图", "模型里没有找到平面视图类型或标高。");
             return Result.Cancelled;
         }
 
-        using var form = new PlanPickerForm(types.Select(t => t.Name).ToList(), levels.Select(l => l.Name).ToList());
+        // first row = no template; then one row per model template
+        var typeNames = new List<string> { "（不套用样板）" };
+        typeNames.AddRange(templates.Select(t => t.Name));
+        using var form = new PlanPickerForm(typeNames, levels.Select(l => l.Name).ToList());
         if (form.ShowDialog(new RevitOwner()) != System.Windows.Forms.DialogResult.OK) return Result.Cancelled;
 
-        var chosenTypes = form.TypeIndexes.Select(i => types[i]).ToList();
+        var chosenTemplates = form.TypeIndexes.Select(i => i == 0 ? null : templates[i - 1]).ToList();
         var chosenLevels = form.LevelIndexes.Select(i => levels[i]).ToList();
 
         // view names must be unique across all views in the model
@@ -49,20 +56,21 @@ public class BatchPlansCommand : IExternalCommand
         {
             tx.Start();
             foreach (var level in chosenLevels)
-            foreach (var type in chosenTypes)
+            foreach (var template in chosenTemplates)
             {
-                string name = $"{level.Name}_{type.Name}";
+                string name = template is null ? $"{level.Name}_平面" : $"{level.Name}_{template.Name}";
                 if (taken.Contains(name)) { skipped.Add(name); continue; }
                 try
                 {
-                    var view = ViewPlan.Create(doc, type.Id, level.Id);
+                    var view = ViewPlan.Create(doc, floorType.Id, level.Id);
                     try
                     {
+                        if (template is not null) view.ViewTemplateId = template.Id;
                         view.Name = name;
                     }
                     catch
                     {
-                        doc.Delete(view.Id);      // do not leave a view with Revit's default name behind
+                        doc.Delete(view.Id);      // do not leave a half-made view behind (wrong name or template failed)
                         throw;
                     }
                     taken.Add(name);
