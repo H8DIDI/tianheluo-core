@@ -74,6 +74,7 @@ public class OpenLauncher : IExternalCommand
     public Result Execute(ExternalCommandData data, ref string message, ElementSet elements)
     {
         var win = new LauncherWindow();
+        PyBridge.AttachToRevit(win);
         win.ShowDialog();
         App.SyncRibbon(); // 装/卸/停用后，功能区立刻跟上，不用重启
         if (win.RunTarget is { } p) return HotLoader.Run(p, data, ref message, elements);

@@ -1115,7 +1115,9 @@ def main():
                         "\n\n" + traceback.format_exc(),
                         title="底层API报错")
             t.Commit()
+            pb.close()
         except Exception as trans_e:
+            pb.close()
             if t.HasStarted() and not t.HasEnded():
                 t.RollBack()
             raise trans_e

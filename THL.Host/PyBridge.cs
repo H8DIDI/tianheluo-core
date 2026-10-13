@@ -13,15 +13,22 @@ public static class PyBridge
     public static UIApplication? UIApp => PyRunner.UIApp;
 
     static Brush B(string hex) => (Brush)new BrushConverter().ConvertFromString(hex)!;
+    /// <summary>Make the window belong to Revit: it stays above Revit, never hides behind it, and is not forced topmost.</summary>
+    internal static void AttachToRevit(Window win)
+    {
+        var h = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+        if (h != IntPtr.Zero) new System.Windows.Interop.WindowInteropHelper(win).Owner = h;
+    }
     static Window Base(string title, double w, double h)
     {
         var win = new Window
         {
             Title = title, Width = w, Height = h, WindowStartupLocation = WindowStartupLocation.CenterScreen,
-            Background = B("#0B0B0E"), Foreground = B("#F2F4F7"), ShowInTaskbar = false, Topmost = true,
+            Background = B("#0B0B0E"), Foreground = B("#F2F4F7"), ShowInTaskbar = false, Topmost = false,
             FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"), FontSize = 14, ResizeMode = ResizeMode.CanResizeWithGrip,
         };
         win.KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Escape) win.Close(); };
+        AttachToRevit(win);
         return win;
     }
 
@@ -184,7 +191,7 @@ public static class PyBridge
         internal Progress(string title, bool cancellable)
         {
             _title = title;
-            _win = Base("天河落", 520, 170); _win.Topmost = true;
+            _win = Base("天河落", 520, 170);
             _bar = new ProgressBar { Height = 10, Minimum = 0, Maximum = 100, Foreground = B("#3B9BFF"), Background = B("#1B1B22"), BorderThickness = new Thickness(0) };
             _txt = new TextBlock { Text = title.Replace("{value}", "0").Replace("{max_value}", "?"), Margin = new Thickness(0, 0, 0, 12), TextWrapping = TextWrapping.Wrap };
             var sp = new StackPanel { Margin = new Thickness(20) };
