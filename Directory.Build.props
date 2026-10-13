@@ -1,0 +1,7 @@
+<Project>
+  <!-- 可复现构建：不把 git 提交号写进 DLL 版本信息，否则每次提交后同样的源码会编出不同的 DLL -->
+  <PropertyGroup>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>
