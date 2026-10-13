@@ -121,6 +121,7 @@ public sealed class WellResult
     public WellStatus Status;
     public string Note = "";
     public int PipeCount => Hits.Count;
+    public bool HasGapPipe => Hits.Any(h => h.IsGap);   // a pipe end stops short of the well and was matched by distance
     public string PipeIds => string.Join(" ", Hits.Select(h => h.PipeId));
 }
 
@@ -423,8 +424,12 @@ public static class WellDepthEngine
 
     // ---- step 5: write -----------------------------------------------------------
 
-    /// <summary>Writes the new values. Call inside a Transaction. Returns an error text, or null if fine.</summary>
-    public static string? Apply(Document doc, WellResult w)
+    /// <summary>
+    /// Writes the bottom (and optionally the depth) in millimetres. Call inside a Transaction.
+    /// The values come from the review window, so the user's manual overrides are honoured.
+    /// Returns an error text, or null if fine.
+    /// </summary>
+    public static string? Apply(Document doc, WellResult w, double bottomMm, double? depthMm)
     {
         if (doc.GetElement(new ElementId(w.Id)) is not Element e) return "找不到图元";
 
@@ -433,17 +438,17 @@ public static class WellDepthEngine
             return "被他人借用，已跳过";
 
         var errors = new List<string>();
-        if (w.Status == WellStatus.Adjust)
+        if (depthMm is { } depth)
         {
             // "井内深度" drives the well geometry; "深度" exists only in some families (e.g. LV)
-            bool wrote = SetMm(e, ParamDepth, w.NewDepthMm, errors);
-            wrote |= SetMm(e, ParamDepth2, w.NewDepthMm, errors);
+            bool wrote = SetMm(e, ParamDepth, depth, errors);
+            wrote |= SetMm(e, ParamDepth2, depth, errors);
             if (!wrote) errors.Add("没有可写的深度参数");
         }
-        SetMm(e, ParamBottom, w.NewBottomMm, errors);
+        SetMm(e, ParamBottom, bottomMm, errors);
         // 井内底标高 is a hand-typed annotation value; only keep it in step if the user is already using it
         if (w.CurInnerBottomMm is { } ib && Math.Abs(ib) > 1)
-            SetMm(e, ParamInnerBottom, w.NewBottomMm, errors);
+            SetMm(e, ParamInnerBottom, bottomMm, errors);
 
         return errors.Count == 0 ? null : string.Join("；", errors);
     }

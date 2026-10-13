@@ -1,16 +1,20 @@
+using System.Diagnostics;
 using System.Text;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+using IWin32Window = System.Windows.Forms.IWin32Window;
+using TaskDialog = Autodesk.Revit.UI.TaskDialog;
 using KaifaTools.WellDepth;
 
 namespace KaifaTools.Commands;
 
 /// <summary>
-/// One-click "adjust well depth":
-///   1. analyse every electrical / telecom well (storm, sewage and valve wells are excluded)
-///   2. write a CSV list (old values, new values, matched pipe ids)
-///   3. ask once, then write all corrections in ONE transaction (Ctrl+Z undoes everything)
+/// "调整井深" with a review window:
+///   1. analyse every electrical / telecom / low-voltage well (storm, sewage and valve wells are excluded)
+///   2. show the review window: choose which wells to adjust, see old vs new values, edit values by hand,
+///      see why a well is uncertain, and jump to a well in Revit
+///   3. write the ticked wells in ONE transaction (Ctrl+Z undoes everything)
 /// If wells are selected before clicking, only those wells are processed.
 /// </summary>
 [Transaction(TransactionMode.Manual)]
@@ -22,163 +26,144 @@ public class AdjustWellDepthCommand : IExternalCommand
         var doc = uidoc.Document;
         var selection = uidoc.Selection.GetElementIds();
 
-        var results = WellDepthEngine.Analyse(doc, selection);
-        if (results.Count == 0)
+        List<WellRow>? rows = null;   // kept across the window's "export" and re-open, so the user's choices survive
+        string scope = "";
+
+        while (true)
         {
-            TaskDialog.Show("调整井深", "没有找到需要检查的井（雨水井、污水井、阀门井不在范围内）。");
+            if (rows is null)
+            {
+                var results = WellDepthEngine.Analyse(doc, selection);
+                if (results.Count == 0)
+                {
+                    TaskDialog.Show("调整井深", "没有找到需要检查的井（雨水井、污水井、阀门井不在范围内）。");
+                    return Result.Cancelled;
+                }
+                rows = results.Select(r => new WellRow(r)).ToList();
+                scope = selection.Count > 0 ? $"范围：选中的 {selection.Count} 个构件（检查 {rows.Count} 口井）" : $"范围：全模型（检查 {rows.Count} 口井）";
+            }
+
+            using var form = new ReviewForm(rows, WellDepthEngine.Rules, WellDepthEngine.RulesError, RulesFile.Path,
+                WellDepthEngine.UnmatchedPipes, WellDepthEngine.IgnoredAbovePipes, scope);
+            form.ShowDialog(new RevitOwner());
+
+            switch (form.Action)
+            {
+                case ReviewAction.Reanalyse:
+                    rows = null;          // rules changed: analyse again
+                    continue;
+                case ReviewAction.Export:
+                    string csv = ExportCsv(rows);
+                    TaskDialog.Show("调整井深", "清单已导出（含旧值、新值、手动修改、不确定原因）：\n" + csv);
+                    continue;              // back to the window with the same choices
+                case ReviewAction.Jump:
+                    return JumpTo(uidoc, form.JumpId);
+                case ReviewAction.Write:
+                    return WriteRows(doc, rows, scope);
+                default:
+                    return Result.Cancelled;
+            }
+        }
+    }
+
+    // ---- jump to a well so the user can edit it by hand -------------------------
+
+    private static Result JumpTo(UIDocument uidoc, long id)
+    {
+        var eid = new ElementId(id);
+        if (uidoc.Document.GetElement(eid) is null)
+        {
+            TaskDialog.Show("调整井深", "这口井已经不在模型里了，请重新检查。");
+            return Result.Cancelled;
+        }
+        uidoc.Selection.SetElementIds(new List<ElementId> { eid });
+        uidoc.ShowElements(eid);
+        var label = uidoc.Document.GetElement(eid).get_Parameter(BuiltInParameter.ALL_MODEL_MARK)?.AsString();
+        TaskDialog.Show("调整井深",
+            $"已定位到井 {(string.IsNullOrEmpty(label) ? id.ToString() : label)}。\n\n" +
+            "在 Revit 里用属性面板手动修改后，再点一次“调整井深”即可重新检查。");
+        return Result.Succeeded;
+    }
+
+    // ---- write the ticked wells in ONE transaction -----------------------------------
+
+    private static Result WriteRows(Document doc, List<WellRow> rows, string scope)
+    {
+        var todo = rows.Where(r => r.Write && r.CanWrite).ToList();
+        if (todo.Count == 0)
+        {
+            TaskDialog.Show("调整井深", "没有勾选可写入的井。");
             return Result.Cancelled;
         }
 
-        string csvPath = WriteCsv(doc, results);
-        var count = results.GroupBy(r => r.Status).ToDictionary(g => g.Key, g => g.Count());
-        int Get(WellStatus s) => count.TryGetValue(s, out var n) ? n : 0;
-        int toWrite = Get(WellStatus.Adjust) + Get(WellStatus.SyncOnly);
-
-        // ---- show the plan (rules + scope) and let the user decide -------------------
-        if (WellDepthEngine.Rules.ShowPlanFirst)
-        {
-            var choice = ShowPlan(doc, results, selection.Count > 0, count, csvPath);
-            if (choice == PlanChoice.Cancel) return Result.Cancelled;
-            if (choice == PlanChoice.ListOnly) return Result.Succeeded;
-        }
-
-        // ---- write everything in ONE transaction (Ctrl+Z undoes it all) -------------
         int written = 0;
         var failed = new List<string>();
-        if (toWrite > 0)
+        using (var tx = new Transaction(doc, "KAIFA 调整井深"))
         {
-            using var tx = new Transaction(doc, "KAIFA 调整井深");
             tx.Start();
-            foreach (var w in results.Where(r => r.Status is WellStatus.Adjust or WellStatus.SyncOnly))
+            foreach (var r in todo)
             {
-                string? error = WellDepthEngine.Apply(doc, w);
-                if (error is null) written++;
-                else failed.Add($"{w.Mark} ({w.Id}): {error}");
+                // a SyncOnly well keeps its depth unless the user typed one by hand
+                bool wantDepth = r.W.Status is not (WellStatus.SyncOnly or WellStatus.Ok) || !string.IsNullOrWhiteSpace(r.NewDepthInput);
+                string? err = WellDepthEngine.Apply(doc, r.W, r.NewBottom!.Value, wantDepth ? r.NewDepth : null);
+                if (err is null) written++;
+                else failed.Add($"{r.W.Mark} ({r.W.Id}): {err}");
             }
             tx.Commit();
         }
 
-        var summary = new StringBuilder();
-        summary.AppendLine(selection.Count > 0 ? $"范围：选中的构件（检查 {results.Count} 口井）" : $"范围：全模型（检查 {results.Count} 口井）");
-        summary.AppendLine($"规则：井底标高 = 最低排管底 - {WellDepthEngine.Rules.ClearanceMm:0}；井深 = 相对偏移 - 井底标高（规则文件：{RulesFile.Path}）");
-        summary.AppendLine();
-        summary.AppendLine($"本次写入：{written} 口（改井深 {Get(WellStatus.Adjust)}，仅同步井底标高 {Get(WellStatus.SyncOnly)}）");
-        summary.AppendLine($"原本合规：{Get(WellStatus.Ok)}");
-        summary.AppendLine($"需人工复核（未修改）：{Get(WellStatus.Review)}");
-        summary.AppendLine($"找不到排管：{Get(WellStatus.NoPipe)}");
-        summary.AppendLine($"临时电/无参数（跳过）：{Get(WellStatus.Temporary) + Get(WellStatus.NoParameter)}");
+        string csv = ExportCsv(rows);
+        var sb = new StringBuilder();
+        sb.AppendLine(scope);
+        sb.AppendLine($"规则文件：{RulesFile.Path}");
+        sb.AppendLine();
+        sb.AppendLine($"本次写入：{written} 口");
+        int manual = todo.Count(r => !string.IsNullOrWhiteSpace(r.NewBottomInput) || !string.IsNullOrWhiteSpace(r.NewDepthInput));
+        if (manual > 0) sb.AppendLine($"其中手动覆盖的：{manual} 口");
+        int review = todo.Count(r => r.Uncertain.Length > 0);
+        if (review > 0) sb.AppendLine($"写入的井里有 {review} 口带“不确定原因”，请回到 Revit 核对。");
         if (failed.Count > 0)
-            summary.AppendLine($"\n写入失败 {failed.Count} 口：\n" + string.Join("\n", failed.Take(10)) + (failed.Count > 10 ? "\n…" : ""));
-        summary.AppendLine($"\n清单（含旧值，可核对）：{csvPath}");
-        summary.AppendLine("不满意可按 Ctrl+Z 一次撤销。");
+            sb.AppendLine($"\n写入失败 {failed.Count} 口：\n" + string.Join("\n", failed.Take(10)) + (failed.Count > 10 ? "\n…" : ""));
+        sb.AppendLine($"\n清单（含写入前的旧值）：{csv}");
+        sb.AppendLine("不满意可按 Ctrl+Z 一次撤销。");
 
-        TaskDialog.Show("调整井深", summary.ToString());
+        TaskDialog.Show("调整井深", sb.ToString());
         return Result.Succeeded;
     }
 
-    private enum PlanChoice { Apply, ListOnly, Cancel }
+    // ---- CSV list (old values, new values, manual edits, uncertainty) -----------------
 
-    private static PlanChoice ShowPlan(Document doc, List<WellResult> results, bool selectionOnly,
-        Dictionary<WellStatus, int> count, string csvPath)
-    {
-        int Get(WellStatus s) => count.TryGetValue(s, out var n) ? n : 0;
-        int toWrite = Get(WellStatus.Adjust) + Get(WellStatus.SyncOnly);
-        var excluded = WellDepthEngine.CountExcluded(doc);
-
-        string SystemLine(WellSystem sys, string label)
-        {
-            int n = results.Count(r => r.System == sys && r.Status != WellStatus.Temporary && r.Status != WellStatus.NoParameter);
-            return $"  {label}：{n} 口";
-        }
-
-        var scope = new StringBuilder();
-        scope.AppendLine(selectionOnly ? "【范围】只处理你选中的井" : "【范围】全模型所有电力/电信/弱电/低压井");
-        scope.AppendLine(SystemLine(WellSystem.Em, "11KV/275KV 强电井 (ELE-EM1-I / EM2-L)"));
-        scope.AppendLine(SystemLine(WellSystem.Telco, "TELCO 电信井 (含室内井)"));
-        scope.AppendLine(SystemLine(WellSystem.Elv, "ELV 弱电井 (MANHOLE / PIT)"));
-        scope.AppendLine(SystemLine(WellSystem.Lv, "LV 低压拉线井"));
-        scope.AppendLine($"  不处理：雨水井 {excluded["雨水井"]}、污水/排水井 {excluded["污水/排水井"]}、阀门井 {excluded["阀门井"]}（始终排除）");
-        scope.AppendLine($"  跳过：注释含“临时”的井 {Get(WellStatus.Temporary)} 口");
-        scope.AppendLine();
-        scope.AppendLine("【预览】");
-        scope.AppendLine($"  需改井深 {Get(WellStatus.Adjust)}　仅同步井底标高 {Get(WellStatus.SyncOnly)}　已合规 {Get(WellStatus.Ok)}");
-        scope.AppendLine($"  需人工复核(不改) {Get(WellStatus.Review)}　找不到排管 {Get(WellStatus.NoPipe)}");
-
-        var rules = new StringBuilder();
-        rules.AppendLine($"1. 井底标高 = 最低接入排管底 - {WellDepthEngine.Rules.ClearanceMm:0} mm");
-        rules.AppendLine("2. 井深 = 相对标高的偏移 - 井底标高（写入“井内深度”，LV 井同时写“深度”，并同步“井底标高”）");
-        rules.AppendLine("3. 接入排管：同专业的排管/线管，碰到井的平面范围；管头没贴井壁时，" +
-                         $"距离 {WellDepthEngine.Rules.MaxGapMm:0} mm 内、且该井是最近的同专业井，也算接入");
-        rules.AppendLine("4. 排管取管底（底对正），线管取中心线减半径；斜管取进井处的标高");
-        rules.AppendLine($"5. 误差在 ±{WellDepthEngine.Rules.ToleranceMm:0} mm 内视为已合规，不修改");
-        rules.AppendLine($"6. 以下情况只列入清单、不自动修改：新井深大于 {WellDepthEngine.Rules.MaxDepthMm:0} 或小于 {WellDepthEngine.Rules.MinDepthMm:0} mm；" +
-                         $"最低排管比次低的还低 {WellDepthEngine.Rules.MaxSpreadMm:0} mm 以上");
-        rules.AppendLine("7. 被他人借用的井会跳过；全部修改在一个事务里，Ctrl+Z 可一次撤销");
-
-        var unmatchedLines = WellDepthEngine.UnmatchedPipes.Take(12).ToList();
-        var notes = new StringBuilder();
-        if (WellDepthEngine.RulesError is { } rerr) notes.AppendLine("⚠ " + rerr).AppendLine();
-        notes.AppendLine("【规则文件】" + RulesFile.Path);
-        notes.AppendLine($"【忽略】位于井顶以上、未接入的排管 {WellDepthEngine.IgnoredAbovePipes} 根");
-        if (unmatchedLines.Count > 0)
-        {
-            notes.AppendLine("【未识别的排管】以下排管没归入任何专业，请在规则文件的 Pipe… 关键字里补上：");
-            foreach (var l in unmatchedLines) notes.AppendLine("  " + l);
-            if (WellDepthEngine.UnmatchedPipes.Count > 12) notes.AppendLine($"  …另有 {WellDepthEngine.UnmatchedPipes.Count - 12} 种");
-        }
-
-        var dialog = new TaskDialog("调整井深 - 确认规则与范围")
-        {
-            MainInstruction = toWrite == 0 ? "没有需要自动修改的井" : $"准备调整 {toWrite} 口井",
-            MainContent = scope.ToString(),
-            ExpandedContent = "【规则】" + Environment.NewLine + rules + Environment.NewLine + notes + Environment.NewLine + "清单：" + csvPath,
-            CommonButtons = TaskDialogCommonButtons.Cancel,
-            DefaultButton = TaskDialogResult.Cancel,
-        };
-        if (toWrite > 0)
-            dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink1, $"开始调整（{toWrite} 口）", "按上面的规则和范围写入模型");
-        dialog.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, "只导出清单，不修改", "清单已保存，可用 Excel 核对后再来");
-
-        return dialog.Show() switch
-        {
-            TaskDialogResult.CommandLink1 => PlanChoice.Apply,
-            TaskDialogResult.CommandLink2 => PlanChoice.ListOnly,
-            _ => PlanChoice.Cancel,
-        };
-    }
-
-    private static string WriteCsv(Document doc, List<WellResult> rows)
+    private static string ExportCsv(List<WellRow> rows)
     {
         string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "KaifaTools");
         Directory.CreateDirectory(dir);
         string path = Path.Combine(dir, $"井深调整清单_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
 
-        string StatusText(WellStatus s) => s switch
-        {
-            WellStatus.Ok => "已合规",
-            WellStatus.Adjust => "需改井深",
-            WellStatus.SyncOnly => "仅同步井底标高",
-            WellStatus.Review => "需复核",
-            WellStatus.NoPipe => "无排管",
-            WellStatus.Temporary => "临时电跳过",
-            _ => "无参数",
-        };
         static string N(double? v) => v is null ? "" : v.Value.ToString("0");
         static string Q(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
 
         var sb = new StringBuilder();
-        sb.AppendLine("ElementId,标记,族,专业,状态,相对偏移mm,最低管底mm,当前井底标高mm,新井底标高mm,当前井深mm,新井深mm,井深变化mm,匹配管数,匹配管ID,说明");
-        foreach (var r in rows)
+        sb.AppendLine("ElementId,标记,族,专业,状态,写入,手动修改,相对偏移mm,最低管底mm,当前井底标高mm,新井底标高mm,当前井深mm,新井深mm,井深变化mm,匹配管数,匹配管ID,不确定原因");
+        foreach (var row in rows)
         {
-            bool hasNew = r.LowestPipeMm is not null;
-            double? change = hasNew && r.CurDepthMm is { } cd ? r.NewDepthMm - cd : null;
+            var r = row.W;
+            bool manual = !string.IsNullOrWhiteSpace(row.NewBottomInput) || !string.IsNullOrWhiteSpace(row.NewDepthInput);
+            double? nb = row.NewBottom, nd = row.NewDepth;
+            double? change = nd is { } d && r.CurDepthMm is { } cd ? d - cd : null;
             sb.AppendLine(string.Join(",",
-                r.Id, Q(r.Mark), Q(r.Family), r.System, StatusText(r.Status),
-                N(r.OffsetMm), N(r.LowestPipeMm), N(r.CurBottomMm), hasNew ? N(r.NewBottomMm) : "",
-                N(r.CurDepthMm), hasNew ? N(r.NewDepthMm) : "", N(change),
-                r.PipeCount, Q(r.PipeIds), Q(r.Note)));
+                r.Id, Q(r.Mark), Q(r.Family), row.SystemText, row.StatusText,
+                row.Write ? "是" : "否", manual ? "是" : "否",
+                N(r.OffsetMm), N(r.LowestPipeMm), N(r.CurBottomMm), N(nb),
+                N(r.CurDepthMm), N(nd), N(change),
+                r.PipeCount, Q(r.PipeIds), Q(row.Uncertain)));
         }
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
         return path;
+    }
+
+    /// <summary>Owner window for the review form, so it sits on top of Revit.</summary>
+    private sealed class RevitOwner : IWin32Window
+    {
+        public IntPtr Handle => Process.GetCurrentProcess().MainWindowHandle;
     }
 }

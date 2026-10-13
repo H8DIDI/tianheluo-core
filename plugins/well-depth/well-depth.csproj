@@ -2,5 +2,6 @@
   <PropertyGroup>
     <AssemblyName>WellDepth</AssemblyName>
     <RootNamespace>KaifaTools</RootNamespace>
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 </Project>

@@ -1,0 +1,403 @@
+using System.Text;
+using System.ComponentModel;
+using System.Globalization;
+using System.Windows.Forms;
+using KaifaTools.WellDepth;
+
+namespace KaifaTools.WellDepth;
+
+public enum ReviewAction { Cancel, Write, Jump, Export, Reanalyse }
+
+/// <summary>One row of the review grid. Wraps a WellResult and holds the user's choices for it.</summary>
+public sealed class WellRow
+{
+    public WellRow(WellResult w)
+    {
+        W = w;
+        Write = w.Status is WellStatus.Adjust or WellStatus.SyncOnly;
+        Uncertain = BuildUncertain(w);
+    }
+
+    public WellResult W { get; }
+    public string Mark => W.Mark;
+    public string Family => W.Family;
+    public bool Write { get; set; }
+    public string NewBottomInput { get; set; } = "";   // manual override (mm). blank = automatic
+    public string NewDepthInput { get; set; } = "";
+
+    public string Uncertain { get; }
+
+    public string SystemText => W.System switch
+    {
+        WellSystem.Em => "强电",
+        WellSystem.Telco => "电信",
+        WellSystem.Elv => "弱电",
+        _ => "低压",
+    };
+
+    public string StatusText => W.Status switch
+    {
+        WellStatus.Ok => "已合规",
+        WellStatus.Adjust => "需改井深",
+        WellStatus.SyncOnly => "仅同步井底",
+        WellStatus.Review => "需复核",
+        WellStatus.NoPipe => "无排管",
+        WellStatus.Temporary => "临时电",
+        _ => "无参数",
+    };
+
+    public string OffsetText => Fmt(W.OffsetMm);
+    public string LowestText => Fmt(W.LowestPipeMm);
+    public string CurBottomText => Fmt(W.CurBottomMm);
+    public string CurDepthText => Fmt(W.CurDepthMm);
+
+    /// <summary>Automatic value, or the manual override if one was typed.</summary>
+    public double? NewBottom => ParseOr(NewBottomInput, W.LowestPipeMm is null ? null : W.NewBottomMm);
+    public double? NewDepth => ParseOr(NewDepthInput, W.LowestPipeMm is null ? null : W.NewDepthMm);
+
+    public string NewBottomText => Fmt(NewBottom);
+    public string NewDepthText => Fmt(NewDepth);
+
+    public string ChangeText => NewDepth is { } nd && W.CurDepthMm is { } cd ? (nd - cd).ToString("+0;-0;0", CultureInfo.InvariantCulture) : "";
+
+    /// <summary>Only rows with a computed (or typed) value can be written.</summary>
+    public bool CanWrite => NewBottom is not null && W.Status is not (WellStatus.Temporary or WellStatus.NoParameter or WellStatus.NoPipe);
+
+    private static string BuildUncertain(WellResult w)
+    {
+        var reasons = new List<string>();
+        if (w.Status == WellStatus.NoPipe) reasons.Add("找不到排管");
+        if (w.Status == WellStatus.Review && !string.IsNullOrEmpty(w.Note)) reasons.Add(w.Note);
+        if (w.HasGapPipe) reasons.Add("有排管头未贴井壁，按距离归属");
+        if (w.PipeCount > 1) reasons.Add($"接入 {w.PipeCount} 根管");
+        return string.Join("；", reasons);
+    }
+
+    private static string Fmt(double? v) => v is null ? "" : v.Value.ToString("0", CultureInfo.InvariantCulture);
+
+    private static double? ParseOr(string input, double? fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(input) &&
+            double.TryParse(input.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
+            return v;
+        return fallback;
+    }
+}
+
+/// <summary>Review window: choose which wells to adjust, see the changes, edit values, jump to a well.</summary>
+public sealed class ReviewForm : Form
+{
+    private readonly List<WellRow> _all;
+    private readonly DepthRules _rules;
+    private readonly BindingList<WellRow> _shown = new();
+
+    private readonly DataGridView _grid = new();
+    private readonly Label _summary = new();
+    private readonly ComboBox _filter = new();
+    private readonly CheckBox[] _systemBoxes = new CheckBox[4];
+    private readonly Dictionary<string, NumericUpDown> _numbers = new();
+    private readonly Dictionary<string, TextBox> _keywords = new();
+    private readonly Label _notes = new();
+
+    private static readonly WellSystem[] Systems = { WellSystem.Em, WellSystem.Telco, WellSystem.Elv, WellSystem.Lv };
+    private static readonly string[] SystemNames = { "强电 11KV/275KV", "电信 TELCO", "弱电 ELV", "低压 LV" };
+
+    /// <summary>What the user chose. Read after the dialog closes.</summary>
+    public ReviewAction Action { get; private set; } = ReviewAction.Cancel;
+    public long JumpId { get; private set; }
+
+    public ReviewForm(List<WellRow> rows, DepthRules rules, string? rulesError, string rulesPath,
+        IReadOnlyList<string> unmatched, int ignoredAbove, string scopeText)
+    {
+        _all = rows;
+        _rules = rules;
+        Text = "调整井深 · 检查台";
+        StartPosition = FormStartPosition.CenterScreen;
+        Font = new Font("Microsoft YaHei UI", 9F);
+        MinimumSize = new Size(1100, 700);
+        Size = new Size(1280, 800);
+
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 5, ColumnCount = 1 };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));  // filters
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));  // summary
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); // grid
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 268)); // rules
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));  // buttons
+        Controls.Add(root);
+
+        // ---- row 1: scope + filter ----
+        var top = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(8, 6, 8, 2) };
+        top.Controls.Add(new Label { AutoSize = true, Text = "只调整：", Padding = new Padding(0, 6, 0, 0) });
+        for (int i = 0; i < Systems.Length; i++)
+        {
+            var sys = Systems[i];
+            var cb = new CheckBox { AutoSize = true, Text = SystemNames[i], Checked = true, Margin = new Padding(6, 4, 6, 0) };
+            cb.CheckedChanged += (_, _) => ApplySystemScope(sys, cb.Checked);
+            _systemBoxes[i] = cb;
+            top.Controls.Add(cb);
+        }
+        top.Controls.Add(new Label { AutoSize = true, Text = "    显示：", Padding = new Padding(0, 6, 0, 0) });
+        _filter.DropDownStyle = ComboBoxStyle.DropDownList;
+        _filter.Items.AddRange(new object[] { "全部", "只看需改", "只看不确定", "需复核", "无排管", "已合规" });
+        _filter.SelectedIndex = 0;
+        _filter.SelectedIndexChanged += (_, _) => RefreshShown();
+        _filter.Width = 130;
+        _filter.Margin = new Padding(0, 2, 0, 0);
+        top.Controls.Add(_filter);
+        root.Controls.Add(top, 0, 0);
+
+        // ---- row 2: summary ----
+        _summary.AutoSize = true;
+        _summary.Padding = new Padding(10, 2, 10, 4);
+        _summary.Text = scopeText;
+        root.Controls.Add(_summary, 0, 1);
+
+        // ---- row 3: grid ----
+        SetupGrid();
+        root.Controls.Add(_grid, 0, 2);
+
+        // ---- row 4: rules ----
+        root.Controls.Add(BuildRules(rulesError, rulesPath, unmatched, ignoredAbove), 0, 3);
+
+        // ---- row 5: buttons ----
+        var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 8) };
+        buttons.Controls.Add(Btn("写入勾选的井", ReviewAction.Write, true));
+        buttons.Controls.Add(Btn("定位到选中的井（去手动改）", ReviewAction.Jump, false));
+        buttons.Controls.Add(Btn("保存规则并重新分析", ReviewAction.Reanalyse, false));
+        buttons.Controls.Add(Btn("导出清单 CSV", ReviewAction.Export, false));
+        buttons.Controls.Add(Btn("取消", ReviewAction.Cancel, false));
+        root.Controls.Add(buttons, 0, 4);
+
+        AcceptButton = null;
+        CancelButton = (Button)buttons.Controls[buttons.Controls.Count - 1];
+
+        RefreshShown();
+    }
+
+    // ---------------- grid ----------------
+
+    private void SetupGrid()
+    {
+        _grid.Dock = DockStyle.Fill;
+        _grid.AutoGenerateColumns = false;
+        _grid.AllowUserToAddRows = false;
+        _grid.AllowUserToDeleteRows = false;
+        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _grid.MultiSelect = false;
+        _grid.RowHeadersVisible = false;
+        _grid.BackgroundColor = Color.White;
+        _grid.DataSource = _shown;
+        _grid.CellContentClick += (_, e) => { if (e.RowIndex >= 0) _grid.EndEdit(); };
+        _grid.CellValueChanged += (_, _) => UpdateSummary();
+        _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) Jump(); };
+        _grid.DataBindingComplete += (_, _) => ColourRows();
+
+        void Col(string header, string prop, int width, bool readOnly = true, bool isCheck = false)
+        {
+            if (isCheck)
+                _grid.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = header, DataPropertyName = prop, Width = width });
+            else
+                _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = header, DataPropertyName = prop, Width = width, ReadOnly = readOnly });
+        }
+        _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+        Col("写入", nameof(WellRow.Write), 46, false, true);
+        Col("标记", nameof(WellRow.Mark), 62);
+        Col("族", nameof(WellRow.Family), 180);
+        Col("专业", nameof(WellRow.SystemText), 50);
+        Col("状态", nameof(WellRow.StatusText), 96);
+        Col("偏移", nameof(WellRow.OffsetText), 56);
+        Col("最低管底", nameof(WellRow.LowestText), 70);
+        Col("当前井底", nameof(WellRow.CurBottomText), 70);
+        Col("新井底", nameof(WellRow.NewBottomText), 66);
+        Col("手动井底", nameof(WellRow.NewBottomInput), 70, false);
+        Col("当前井深", nameof(WellRow.CurDepthText), 70);
+        Col("新井深", nameof(WellRow.NewDepthText), 66);
+        Col("手动井深", nameof(WellRow.NewDepthInput), 70, false);
+        Col("变化", nameof(WellRow.ChangeText), 62);
+        Col("不确定原因", nameof(WellRow.Uncertain), 300);
+        _grid.Columns[_grid.Columns.Count - 1].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+    }
+
+    private void ColourRows()
+    {
+        foreach (DataGridViewRow r in _grid.Rows)
+        {
+            if (r.DataBoundItem is not WellRow row) continue;
+            r.DefaultCellStyle.BackColor = row.W.Status switch
+            {
+                WellStatus.Review => Color.FromArgb(255, 243, 205),
+                WellStatus.NoPipe => Color.FromArgb(235, 235, 235),
+                WellStatus.Temporary or WellStatus.NoParameter => Color.FromArgb(235, 235, 235),
+                WellStatus.Adjust or WellStatus.SyncOnly => Color.FromArgb(232, 245, 255),
+                _ => Color.White,
+            };
+        }
+    }
+
+    private void RefreshShown()
+    {
+        string f = _filter.SelectedItem as string ?? "全部";
+        IEnumerable<WellRow> q = _all;
+        q = f switch
+        {
+            "只看需改" => q.Where(r => r.W.Status is WellStatus.Adjust or WellStatus.SyncOnly),
+            "只看不确定" => q.Where(r => r.Uncertain.Length > 0),
+            "需复核" => q.Where(r => r.W.Status == WellStatus.Review),
+            "无排管" => q.Where(r => r.W.Status == WellStatus.NoPipe),
+            "已合规" => q.Where(r => r.W.Status == WellStatus.Ok),
+            _ => q,
+        };
+        _shown.RaiseListChangedEvents = false;
+        _shown.Clear();
+        foreach (var r in q) _shown.Add(r);
+        _shown.RaiseListChangedEvents = true;
+        _shown.ResetBindings();
+        UpdateSummary();
+    }
+
+    /// <summary>Checks/unchecks the writable wells of one system.</summary>
+    private void ApplySystemScope(WellSystem sys, bool include)
+    {
+        foreach (var r in _all)
+            if (r.W.System == sys && r.CanWrite && r.W.Status is WellStatus.Adjust or WellStatus.SyncOnly or WellStatus.Review)
+                r.Write = include;
+        _grid.Refresh();
+        UpdateSummary();
+    }
+
+    private void UpdateSummary()
+    {
+        int Count(WellStatus s) => _all.Count(r => r.W.Status == s);
+        int picked = _all.Count(r => r.Write && r.CanWrite);
+        int uncertain = _all.Count(r => r.Uncertain.Length > 0);
+        _summary.Text =
+            $"共 {_all.Count} 口井：需改井深 {Count(WellStatus.Adjust)}　仅同步井底 {Count(WellStatus.SyncOnly)}　" +
+            $"已合规 {Count(WellStatus.Ok)}　需复核 {Count(WellStatus.Review)}　无排管 {Count(WellStatus.NoPipe)}　" +
+            $"有不确定原因 {uncertain} 口\n" +
+            $"当前勾选写入 {picked} 口（双击行或点“定位”可跳到构件手动修改，手动井底/井深列可直接输入 mm 覆盖自动值）";
+    }
+
+    // ---------------- rules ----------------
+
+    private Control BuildRules(string? rulesError, string rulesPath, IReadOnlyList<string> unmatched, int ignoredAbove)
+    {
+        var box = new GroupBox { Text = "规则（改完点“保存规则并重新分析”，立刻生效）", Dock = DockStyle.Fill, Padding = new Padding(8) };
+        var panel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown };
+        box.Controls.Add(panel);
+        panel.AutoScroll = true;
+
+        if (rulesError != null)
+            panel.Controls.Add(new Label { AutoSize = true, ForeColor = Color.Firebrick, Text = "⚠ " + rulesError });
+
+        var numbers = new TableLayoutPanel { AutoSize = true, ColumnCount = 4 };
+        void Num(string key, string label, double value, double max)
+        {
+            var nud = new NumericUpDown { Minimum = 0, Maximum = (decimal)max, DecimalPlaces = 0, Increment = 10, Width = 72, Value = (decimal)Math.Min(value, max) };
+            _numbers[key] = nud;
+            numbers.Controls.Add(new Label { AutoSize = true, Text = label, Padding = new Padding(10, 6, 2, 0), MaximumSize = new Size(230, 0) });
+            numbers.Controls.Add(nud);
+        }
+        Num("ClearanceMm", "井底低于管底 (mm)", _rules.ClearanceMm, 5000);
+        Num("ToleranceMm", "误差视为合规 (mm)", _rules.ToleranceMm, 1000);
+        Num("TightMm", "管压井边缘容差 (mm)", _rules.TightMm, 1000);
+        Num("MaxGapMm", "管头距井的最大间距 (mm)", _rules.MaxGapMm, 10000);
+        Num("MaxDepthMm", "井深超过此值→复核 (mm)", _rules.MaxDepthMm, 30000);
+        Num("MinDepthMm", "井深小于此值→复核 (mm)", _rules.MinDepthMm, 30000);
+        Num("MaxSpreadMm", "最低管比次低管低超过→复核 (mm)", _rules.MaxSpreadMm, 30000);
+        Num("MaxRefGapMm", "井顶与偏移不一致→复核 (mm)", _rules.MaxRefGapMm, 30000);
+        panel.Controls.Add(numbers);
+
+        var keys = new TableLayoutPanel { AutoSize = true, ColumnCount = 4 };
+        void Key(string key, string label, string[] value)
+        {
+            var tb = new TextBox { Width = 210, Text = string.Join(", ", value) };
+            _keywords[key] = tb;
+            keys.Controls.Add(new Label { AutoSize = true, Text = label, Padding = new Padding(10, 6, 2, 0), MaximumSize = new Size(120, 0) });
+            keys.Controls.Add(tb);
+        }
+        Key("PipeEm", "强电排管关键字", _rules.PipeEm);
+        Key("PipeTelco", "电信排管关键字", _rules.PipeTelco);
+        Key("PipeElv", "弱电排管关键字", _rules.PipeElv);
+        Key("PipeLv", "低压排管关键字", _rules.PipeLv);
+        Key("Exclude", "永不处理的关键字", _rules.Exclude);
+        panel.Controls.Add(keys);
+
+        _notes.AutoSize = true;
+        _notes.MaximumSize = new Size(900, 0);
+        var noteText = new StringBuilder();
+        noteText.AppendLine("规则文件：" + rulesPath + "（关键字用英文逗号分隔）");
+        noteText.AppendLine($"位于井顶以上、未接入的排管：{ignoredAbove} 根");
+        noteText.AppendLine(unmatched.Count == 0
+            ? "未识别的排管：无（所有排管都归入了专业）"
+            : "未识别的排管（请把族名里的关键字加进上面的排管关键字，再保存重新分析）：\n  " + string.Join("\n  ", unmatched.Take(15)));
+        _notes.Text = noteText.ToString();
+        panel.Controls.Add(_notes);
+
+        var save = new Button { Text = "保存规则并重新分析", AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+        save.Click += (_, _) => { SaveRules(); Finish(ReviewAction.Reanalyse); };
+        panel.Controls.Add(save);
+        return box;
+    }
+
+    private void SaveRules()
+    {
+        _rules.ClearanceMm = (double)_numbers["ClearanceMm"].Value;
+        _rules.ToleranceMm = (double)_numbers["ToleranceMm"].Value;
+        _rules.TightMm = (double)_numbers["TightMm"].Value;
+        _rules.MaxGapMm = (double)_numbers["MaxGapMm"].Value;
+        _rules.MaxDepthMm = (double)_numbers["MaxDepthMm"].Value;
+        _rules.MinDepthMm = (double)_numbers["MinDepthMm"].Value;
+        _rules.MaxSpreadMm = (double)_numbers["MaxSpreadMm"].Value;
+        _rules.MaxRefGapMm = (double)_numbers["MaxRefGapMm"].Value;
+        _rules.PipeEm = Split(_keywords["PipeEm"].Text);
+        _rules.PipeTelco = Split(_keywords["PipeTelco"].Text);
+        _rules.PipeElv = Split(_keywords["PipeElv"].Text);
+        _rules.PipeLv = Split(_keywords["PipeLv"].Text);
+        _rules.Exclude = Split(_keywords["Exclude"].Text);
+        RulesFile.Save(_rules);
+    }
+
+    private static string[] Split(string s) =>
+        s.Split(new[] { ',', '，' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    // ---------------- buttons ----------------
+
+    private Button Btn(string text, ReviewAction action, bool primary)
+    {
+        var b = new Button { Text = text, AutoSize = true, Padding = new Padding(10, 4, 10, 4), Margin = new Padding(0, 0, 10, 0) };
+        if (primary) { b.BackColor = Color.FromArgb(47, 140, 255); b.ForeColor = Color.White; b.FlatStyle = FlatStyle.Flat; }
+        b.Click += (_, _) =>
+        {
+            switch (action)
+            {
+                case ReviewAction.Jump: Jump(); break;
+                case ReviewAction.Reanalyse: SaveRules(); Finish(ReviewAction.Reanalyse); break;
+                case ReviewAction.Write:
+                    if (_all.Any(r => r.Write && r.CanWrite) &&
+                        MessageBox.Show(this, $"确定写入勾选的 {_all.Count(r => r.Write && r.CanWrite)} 口井吗？\n写入后可用 Ctrl+Z 一次撤销。",
+                            "确认写入", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                        return;
+                    Finish(ReviewAction.Write); break;
+                default: Finish(action); break;
+            }
+        };
+        return b;
+    }
+
+    private void Jump()
+    {
+        if (_grid.CurrentRow?.DataBoundItem is not WellRow row) { MessageBox.Show(this, "先在表格里点一口井。"); return; }
+        JumpId = row.W.Id;
+        Finish(ReviewAction.Jump);
+    }
+
+    private void Finish(ReviewAction action)
+    {
+        Action = action;
+        DialogResult = action == ReviewAction.Cancel ? DialogResult.Cancel : DialogResult.OK;
+        Close();
+    }
+
+    /// <summary>Rows as shown in the grid (the same objects the caller keeps, so edits survive a re-open).</summary>
+    public List<WellRow> Rows => _all;
+}

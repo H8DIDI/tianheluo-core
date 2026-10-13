@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\plugins\well-depth\ReviewForm.cs" Link="ReviewForm.cs" />
+    <Reference Include="WellDepth">
+      <HintPath>..\..\plugins\well-depth\bin\Release\net8.0-windows\WellDepth.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>
