@@ -3,6 +3,7 @@
 - file：静态文件的真实路径（服务端据此取文件）
 - date：版本没变就沿用上次的日期，有新版本才更新成今天（商店里的“更新日期”才有意义）"""
 import datetime
+import hashlib
 import json
 import pathlib
 import re
@@ -38,7 +39,7 @@ for pkg in sorted(dist.glob("*.thlp")):
         "summary": summary[:80], "description": desc, "features": feats,
         "version": m["version"], "revit": m.get("revit", "2026"),
         "size": f"{pkg.stat().st_size/1024:.0f} KB", "status": "beta",
-        "download": f"/api/dl/{m['id']}", "file": f"/dl/{pkg.name}", "date": date,
+        "download": f"/api/dl/{m['id']}", "file": f"/dl/{pkg.name}", "sha256": hashlib.sha256(pkg.read_bytes()).hexdigest(), "hostApi": m.get("hostApi", 1), "date": date,
         "glyph": m.get("glyph", ""), "color": m.get("color", ""),
         "tier": m.get("tier", "official"), "author": m.get("author", ""), "license": m.get("license", ""), "homepage": m.get("homepage", ""),
     })

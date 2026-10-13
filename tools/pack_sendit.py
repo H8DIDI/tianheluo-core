@@ -1,6 +1,7 @@
 """把 Sendit（MIT，作者 lewismconte）的三个工具各打成一个天河落插件包。
 每个包都带 sendit/ 公共库、原作者的 MIT 许可和署名。输出 dist/<id>_<ver>.thlp"""
-import json, zipfile, pathlib
+import json, pathlib
+import detzip
 
 SRC = pathlib.Path(r"C:\Users\PCB\AppData\Roaming\pyRevit\Extensions\Sendit.extension")
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
@@ -24,16 +25,16 @@ TOOLS = {
 for folder, (pid, name, cat, glyph, desc) in TOOLS.items():
     d = SRC / "Sendit.tab" / "Tools.panel" / f"{folder}.pushbutton"
     mf = {"id": pid, "name": name, "version": VERSION, "description": desc, "category": cat, "revit": "2026",
-          "type": "python", "script": "script.py", "glyph": glyph,
+          "hostApi": 1, "type": "python", "script": "script.py", "glyph": glyph,
           "author": "lewismconte (Sendit)", "license": "MIT", "homepage": "https://github.com/lewismconte/sendit"}
     pkg = OUT / f"{pid}_{VERSION}.thlp"
-    with zipfile.ZipFile(pkg, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("plugin.json", json.dumps(mf, ensure_ascii=False, indent=2))
-        z.write(d / "script.py", "script.py")
-        for f in (SRC / "lib" / "sendit").glob("*.py"):
-            z.write(f, f"sendit/{f.name}")
+    with detzip.create(pkg) as z:
+        detzip.writestr(z, "plugin.json", json.dumps(mf, ensure_ascii=False, indent=2))
+        detzip.write(z, d / "script.py", "script.py")
+        for f in sorted((SRC / "lib" / "sendit").glob("*.py")):
+            detzip.write(z, f, f"sendit/{f.name}")
         if (d / "icon.png").exists():
-            z.write(d / "icon.png", "icon.png")
-        z.writestr("LICENSE-Sendit.txt", LICENSE)
-        z.writestr("NOTICE.txt", NOTICE)
+            detzip.write(z, d / "icon.png", "icon.png")
+        detzip.writestr(z, "LICENSE-Sendit.txt", LICENSE)
+        detzip.writestr(z, "NOTICE.txt", NOTICE)
     print(f"{pkg.name:28} {pkg.stat().st_size/1024:6.1f} KB  {name}")

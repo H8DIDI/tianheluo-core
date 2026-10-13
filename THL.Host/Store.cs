@@ -14,6 +14,8 @@ public sealed class Manifest
     [JsonPropertyName("description")] public string Description { get; set; } = "";
     [JsonPropertyName("category")] public string Category { get; set; } = "";
     [JsonPropertyName("revit")] public string Revit { get; set; } = "2026";
+    /// <summary>插件所需的宿主接口版本（缺省 1）。高于宿主支持的版本时拒绝安装/运行，而不是悄悄出错。</summary>
+    [JsonPropertyName("hostApi")] public int HostApi { get; set; } = 1;
     /// <summary>主 DLL 文件名（在插件目录内）</summary>
     [JsonPropertyName("dll")] public string Dll { get; set; } = "";
     /// <summary>入口类的完整类型名，必须实现 IExternalCommand</summary>
@@ -50,11 +52,21 @@ public sealed class CatalogItem
     [JsonPropertyName("download")] public string Download { get; set; } = "";
     [JsonPropertyName("glyph")] public string Glyph { get; set; } = "";
     [JsonPropertyName("color")] public string Color { get; set; } = "";
+    /// <summary>安装包的 SHA256（小写十六进制）。有就校验，不符拒绝安装。</summary>
+    [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
+    [JsonPropertyName("hostApi")] public int HostApi { get; set; } = 1;
+    /// <summary>official（官方）/ community（社区投稿）</summary>
+    [JsonPropertyName("tier")] public string Tier { get; set; } = "";
+    [JsonPropertyName("author")] public string Author { get; set; } = "";
+    public bool IsCommunity => string.Equals(Tier, "community", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>用户数据目录 + 已安装插件管理（安装 / 卸载 / 启用 / 停用）</summary>
 public static class Store
 {
+    /// <summary>本宿主支持的插件接口版本。改动插件接口（破坏兼容）时加 1，并在发布说明里写明。</summary>
+    public const int HostApiVersion = 1;
+
     /// <summary>用户数据目录。可用环境变量 THL_HOME 覆盖（测试用）。</summary>
     public static readonly string Root =
         Environment.GetEnvironmentVariable("THL_HOME")
@@ -155,6 +167,7 @@ public static class Store
         Manifest m;
         using (var s = mfEntry.Open()) m = JsonSerializer.Deserialize<Manifest>(s, Json) ?? throw new InvalidDataException("plugin.json 无法解析");
         if (!ValidId(m.Id)) throw new InvalidDataException("插件 id 只能包含字母、数字、- 和 _");
+        if (m.HostApi > HostApiVersion) throw new InvalidDataException($"「{m.Name}」需要更新的宿主（插件接口 v{m.HostApi}，当前宿主支持 v{HostApiVersion}）。请先在插件中心更新宿主。");
         if (m.IsPython) { if (string.IsNullOrWhiteSpace(m.Script)) throw new InvalidDataException("plugin.json 缺少 script"); }
         else if (string.IsNullOrWhiteSpace(m.Dll) || string.IsNullOrWhiteSpace(m.Entry)) throw new InvalidDataException("plugin.json 缺少 dll 或 entry");
 
@@ -293,6 +306,12 @@ public static class Store
         {
             var du = new Uri(item.Download);
             var bytes = du.IsFile ? await File.ReadAllBytesAsync(du.LocalPath) : await WithRetry(c => c.GetByteArrayAsync(item.Download));
+            if (!string.IsNullOrWhiteSpace(item.Sha256))
+            {
+                var got = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+                if (!string.Equals(got, item.Sha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("下载的文件校验失败（SHA256 与商店清单不一致），已拒绝安装。请稍后重试；若反复出现请联系维护者。");
+            }
             await File.WriteAllBytesAsync(tmp, bytes);
             return InstallPackage(tmp);
         }

@@ -1,6 +1,7 @@
 """把每个插件打成 dist/<id>_<version>.thlp（zip：plugin.json + dll + pdb）。
 用法：python tools/pack.py   （先对每个插件执行 dotnet build -c Release）"""
-import json, zipfile, pathlib, sys
+import json, pathlib, sys
+import detzip
 root = pathlib.Path(__file__).resolve().parent.parent
 dist = root / "dist"; dist.mkdir(exist_ok=True)
 for mf in sorted((root / "plugins").glob("*/plugin.json")):
@@ -14,9 +15,9 @@ for mf in sorted((root / "plugins").glob("*/plugin.json")):
     if not dll.exists():
         print("缺少", dll, "- 请先 dotnet build -c Release"); sys.exit(1)
     pkg = dist / f'{m["id"]}_{m["version"]}.thlp'
-    with zipfile.ZipFile(pkg, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(mf, "plugin.json")
-        z.write(dll, m["dll"])
+    with detzip.create(pkg) as z:
+        detzip.write(z, mf, "plugin.json")
+        detzip.write(z, dll, m["dll"])
         pdb = dll.with_suffix(".pdb")
-        if pdb.exists(): z.write(pdb, pdb.name)
+        if pdb.exists(): detzip.write(z, pdb, pdb.name)
     print(f'{pkg.name}  {pkg.stat().st_size/1024:.1f} KB')

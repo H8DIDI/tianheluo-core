@@ -89,6 +89,7 @@ my-plugin_0.1.0.thlp  (zip)
 | `glyph` | 建议 | 图标上显示的 1–3 个字符（如「桩」「DWG」） |
 | `color` | 可选 | 图标主色，`#RRGGBB`；默认按分类配色 |
 | `homepage` | 可选 | 项目主页 |
+| `hostApi` | 可选 | 插件所需的宿主接口版本，整数，默认 `1`（目前宿主支持 `1`）。写 `1` 即可；宿主以后若升级了接口，会在发布说明里写明，旧插件不会被破坏 |
 | `network` | 可选 | 默认 `false`。需要联网才填 `true`，并在 README 里说明访问了哪些地址、为什么（见第 9 节） |
 
 JSON Schema：<https://tianheluo.com/schema/plugin.schema.json>

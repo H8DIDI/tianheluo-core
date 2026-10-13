@@ -180,6 +180,10 @@ public sealed class LauncherWindow : Window
             var btn = MakeButton(label, primary); btn.IsEnabled = can;
             btn.Click += async (_, _) =>
             {
+                if (c.IsCommunity && label == "安装" && System.Windows.MessageBox.Show(
+                        "「" + c.Name + "」是社区投稿的插件（作者：" + (string.IsNullOrWhiteSpace(c.Author) ? "未署名" : c.Author) + "）。\n\n"
+                        + "它经过维护者审核源码，但插件会以你的 Windows 账号权限运行。确认来源可信再安装。\n\n继续安装吗？",
+                        "社区插件", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning) != System.Windows.MessageBoxResult.Yes) return;
                 btn.IsEnabled = false; Flash("正在下载「" + c.Name + "」…");
                 try { var m = await Store.InstallFromCatalogAsync(c); Flash($"已安装「{m.Name}」v{m.Version}，现在就能用，无需重启。"); }
                 catch (Exception ex) { Flash("安装失败：" + Store.Describe(ex)); }

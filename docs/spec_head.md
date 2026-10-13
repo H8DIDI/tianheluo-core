@@ -1,6 +1,7 @@
 # 天河落 THL —— Revit 插件开发说明书（专门给 AI 阅读）
 
 > 版本 1.1（2026-10）· 官网 https://tianheluo.com · 投稿与联系邮箱 jiajiabimer@gmail.com
+> 宿主与工具源码（公开，MIT）：https://github.com/H8DIDI/tianheluo-core · 网站源码：https://github.com/H8DIDI/tianheluo-web
 > 本说明书是**自包含**的：规则、接口、完整示例代码都在里面，不需要访问任何链接。
 
 ## 0. 先读这个（30 秒版）

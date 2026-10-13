@@ -14,6 +14,7 @@ internal static class HotLoader
 {
     public static Result Run(Installed p, ExternalCommandData data, ref string message, ElementSet elements)
     {
+        if (p.Manifest.HostApi > Store.HostApiVersion) { message = $"「{p.Manifest.Name}」需要更新的宿主（插件接口 v{p.Manifest.HostApi}）。请在插件中心更新宿主。"; return Result.Failed; }
         if (p.Manifest.IsPython) return PyRunner.Run(p, data, ref message);
         if (!File.Exists(p.DllPath)) { message = "找不到 " + p.DllPath; return Result.Failed; }
 

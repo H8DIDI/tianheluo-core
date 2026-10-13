@@ -1,6 +1,7 @@
 """把 Antigravity.extension 里的 pyRevit 按钮，原样复制打成天河落插件包（不改原文件）。
 输出：dist/<id>_<version>.thlp（zip：plugin.json + script.py [+ icon.png]）"""
-import json, zipfile, pathlib, re, ast
+import json, pathlib, re, ast
+import detzip
 
 SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\Antigravity.tab\工具箱.panel")
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
@@ -50,13 +51,13 @@ for folder, (pid, cat, glyph) in PLUGINS.items():
     desc = doc_of(text) or folder
     if folder in EXPERIMENTAL: desc = "【实验功能，仍在优化】" + desc
     mf = {"id": pid, "name": folder, "version": VERSION, "description": desc, "category": cat,
-          "revit": "2026", "type": "python", "script": "script.py", "glyph": glyph}
+          "revit": "2026", "hostApi": 1, "type": "python", "script": "script.py", "glyph": glyph}
     pkg = OUT / f"{pid}_{VERSION}.thlp"
-    with zipfile.ZipFile(pkg, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("plugin.json", json.dumps(mf, ensure_ascii=False, indent=2))
-        z.writestr("script.py", text)          # 除界面文字补丁外，逻辑一字不改
+    with detzip.create(pkg) as z:
+        detzip.writestr(z, "plugin.json", json.dumps(mf, ensure_ascii=False, indent=2))
+        detzip.writestr(z, "script.py", text)          # 除界面文字补丁外，逻辑一字不改
         icon = d / "icon.png"
-        if icon.exists(): z.write(icon, "icon.png")
+        if icon.exists(): detzip.write(z, icon, "icon.png")
     catalog.append((pid, folder, cat, desc, pkg.stat().st_size))
     print(f"{pkg.name:34} {pkg.stat().st_size/1024:6.1f} KB  {folder}")
 json.dump([{"id":a,"name":b,"category":c,"desc":d,"size":e} for a,b,c,d,e in catalog],

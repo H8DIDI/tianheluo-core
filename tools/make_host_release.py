@@ -9,7 +9,7 @@ import json
 import pathlib
 import re
 import shutil
-import zipfile
+import detzip
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SITE = pathlib.Path(r"C:\KAIFA\tianheluo-web")
@@ -19,6 +19,10 @@ version = re.search(r"<InformationalVersion>([\d.]+)</InformationalVersion>", (R
 notes_file = ROOT / "docs" / "host_notes.txt"
 notes = notes_file.read_text(encoding="utf-8").strip().split("\n\n")[0].replace("\n", " ") if notes_file.exists() else ""
 
+try:
+    _prev = json.loads((SITE / "host.json").read_text(encoding="utf-8"))
+except Exception:
+    _prev = {}
 out_dir = SITE / "dl" / "host"
 if out_dir.exists():
     shutil.rmtree(out_dir)          # 只保留最新版（历史版本在 git 里）
@@ -29,21 +33,21 @@ for key, tfm in BUILDS.items():
     rel = ROOT / "THL.Host/bin/Release" / tfm
     name = f"THL-Host-{key}_{version}.zip"
     pkg = out_dir / name
-    with zipfile.ZipFile(pkg, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(rel / "THL.addin", "THL.addin")
-        for f in list(rel.glob("*.dll")) + list(rel.glob("*.deps.json")):
-            z.write(f, f"THL/{f.name}")
+    with detzip.create(pkg) as z:
+        detzip.write(z, rel / "THL.addin", "THL.addin")
+        for f in sorted(list(rel.glob("*.dll")) + list(rel.glob("*.deps.json"))):
+            detzip.write(z, f, f"THL/{f.name}")
         lib = rel / "lib"
-        for f in lib.rglob("*"):
+        for f in sorted(lib.rglob("*")):
             if f.is_file() and "__pycache__" not in f.parts:
-                z.write(f, f"THL/lib/{f.relative_to(lib).as_posix()}")
+                detzip.write(z, f, f"THL/lib/{f.relative_to(lib).as_posix()}")
     sha = hashlib.sha256(pkg.read_bytes()).hexdigest()
     assets[key] = {"url": f"/api/dl/host-{key}", "file": f"/dl/host/{name}", "sha256": sha, "size": pkg.stat().st_size}
     print(f"{name:34} {pkg.stat().st_size/1024/1024:5.1f} MB  sha256 {sha[:16]}…")
 
 host = {
     "version": version,
-    "released": datetime.date.today().isoformat(),
+    "released": _prev["released"] if _prev.get("version") == version and _prev.get("released") else datetime.date.today().isoformat(),
     "notes": notes,
     "assets": assets,
     "installer": {"file": "/dl/THL-Host.zip"},

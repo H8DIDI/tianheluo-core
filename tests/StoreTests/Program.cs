@@ -58,6 +58,28 @@ using (var z = ZipFile.Open(badId, ZipArchiveMode.Create))
 threw = false; try { Store.InstallPackage(badId); } catch (InvalidDataException) { threw = true; }
 Check("非法 id 被拒绝", threw);
 
+// hostApi 高于宿主支持的版本 → 拒绝，且不留残余
+var future = Path.Combine(tmp, "future.thlp");
+using (var z = ZipFile.Open(future, ZipArchiveMode.Create))
+{
+    var e = z.CreateEntry("plugin.json");
+    using (var w = new StreamWriter(e.Open())) w.Write("{\"id\":\"future-plugin\",\"name\":\"f\",\"version\":\"1.0.0\",\"hostApi\":" + (Store.HostApiVersion + 1) + ",\"type\":\"python\",\"script\":\"s.py\"}");
+    z.CreateEntry("s.py");
+}
+string apiMsg = ""; threw = false; try { Store.InstallPackage(future); } catch (InvalidDataException ex) { threw = true; apiMsg = ex.Message; }
+Check("hostApi 过高的包被拒绝", threw && apiMsg.Contains("更新的宿主"));
+Check("hostApi 被拒绝后不留残余", !Directory.Exists(Path.Combine(Store.PluginsDir, "future-plugin")));
+
+// SHA256 校验：清单里的校验值不符 → 拒绝安装；正确 → 安装成功
+var good = pkgs[0];
+var goodHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(good))).ToLowerInvariant();
+var goodId = System.Text.Json.JsonDocument.Parse(new StreamReader(ZipFile.OpenRead(good).GetEntry("plugin.json")!.Open()).ReadToEnd()).RootElement.GetProperty("id").GetString()!;
+Store.Uninstall(goodId);
+threw = false; try { await Store.InstallFromCatalogAsync(new CatalogItem { Id = goodId, Download = new Uri(good).AbsoluteUri, Sha256 = new string('0', 64) }); } catch (InvalidDataException) { threw = true; }
+Check("SHA256 不符被拒绝", threw && !Directory.Exists(Path.Combine(Store.PluginsDir, goodId)));
+await Store.InstallFromCatalogAsync(new CatalogItem { Id = goodId, Download = new Uri(good).AbsoluteUri, Sha256 = goodHash.ToUpperInvariant() });
+Check("SHA256 正确可安装（大小写不敏感）", Directory.Exists(Path.Combine(Store.PluginsDir, goodId)));
+
 Check("版本比较 0.2.0 > 0.1.0", Store.IsNewer("0.2.0", "0.1.0"));
 Check("版本比较 0.1.0 不大于 0.1.0", !Store.IsNewer("0.1.0", "0.1.0"));
 
