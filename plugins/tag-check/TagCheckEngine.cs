@@ -71,7 +71,14 @@ public static class TagCheckEngine
     static string FamilyOf(Document doc, ElementId typeId) =>
         (doc.GetElement(typeId) as ElementType)?.FamilyName ?? "";
 
-    /// <summary>Checks the given view. Returns every target element with its status.</summary>
+    static string GroupKey(string category, string family) => category + "|" + family;
+
+    /// <summary>
+    /// Checks the given view. Elements are grouped by (category, element family) so that, for example,
+    /// sewage wells tagged with "常规模型标记1" are compared with the other wells of their own family,
+    /// not with every generic model in the model. A tag family is "acceptable" for a group when it is used
+    /// by at least 5% of that group in the whole model; the standard file (family name first, then category name) overrides this.
+    /// </summary>
     public static List<TagRow> Check(Document doc, Autodesk.Revit.DB.View view, out string summary)
     {
         var standard = LoadStandard(out _);
@@ -88,22 +95,23 @@ public static class TagCheckEngine
             }
         }
 
-        // 2) the usual tag family per category, across the whole model (used when no standard is set)
-        var counts = new Dictionary<string, Dictionary<string, int>>();
+        // 2) model-wide usage: group (category|element family) -> tag family -> count
+        var usage = new Dictionary<string, Dictionary<string, int>>();
+        var totals = new Dictionary<string, int>();
         foreach (IndependentTag tag in new FilteredElementCollector(doc).OfClass(typeof(IndependentTag)).Cast<IndependentTag>())
         {
             string fam = FamilyOf(doc, tag.GetTypeId());
             if (fam.Length == 0) continue;
             foreach (var id in tag.GetTaggedLocalElementIds())
             {
-                string cat = doc.GetElement(id)?.Category?.Name ?? "";
-                if (cat.Length == 0) continue;
-                if (!counts.TryGetValue(cat, out var c)) counts[cat] = c = new Dictionary<string, int>();
+                var el = doc.GetElement(id);
+                if (el == null) continue;
+                string g = GroupKey(el.Category?.Name ?? "", FamilyOf(doc, el.GetTypeId()));
+                if (!usage.TryGetValue(g, out var c)) usage[g] = c = new Dictionary<string, int>();
                 c[fam] = c.TryGetValue(fam, out var n) ? n + 1 : 1;
+                totals[g] = totals.TryGetValue(g, out var t) ? t + 1 : 1;
             }
         }
-        string Majority(string cat) =>
-            counts.TryGetValue(cat, out var c) && c.Count > 0 ? c.OrderByDescending(kv => kv.Value).First().Key : "";
 
         // 3) every target element in the view
         var rows = new List<TagRow>();
@@ -114,13 +122,20 @@ public static class TagCheckEngine
                 string catName = e.Category?.Name ?? label;
                 string family = FamilyOf(doc, e.GetTypeId());
                 string mark = e.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)?.AsString() ?? "";
+                string g = GroupKey(catName, family);
 
-                string expected = standard.Categories.TryGetValue(catName, out var allowed) && allowed.Count > 0
-                    ? string.Join(" 或 ", allowed)
-                    : Majority(catName);
-                var allowedSet = standard.Categories.TryGetValue(catName, out var a2) && a2.Count > 0
-                    ? new HashSet<string>(a2)
-                    : new HashSet<string> { Majority(catName) };
+                List<string> allowed;
+                if (standard.Categories.TryGetValue(family, out var byFamily) && byFamily.Count > 0) allowed = byFamily;
+                else if (standard.Categories.TryGetValue(catName, out var byCat) && byCat.Count > 0) allowed = byCat;
+                else
+                {
+                    // the tag families this group really uses (5% of the group or more)
+                    allowed = new List<string>();
+                    if (usage.TryGetValue(g, out var c) && totals.TryGetValue(g, out var total))
+                        allowed = c.Where(kv => kv.Value * 20 >= total).OrderByDescending(kv => kv.Value).Select(kv => kv.Key).ToList();
+                }
+                var allowedSet = new HashSet<string>(allowed);
+                string expected = allowed.Count == 0 ? "（模型里没有这类构件的标记，请在标准文件里指定）" : string.Join("、", allowed);
 
                 tagsOnElement.TryGetValue(e.Id.Value, out var tags);
                 string status, current = tags == null ? "" : string.Join("、", tags);
