@@ -8,14 +8,13 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"well-sheets": "0.2.5", "well-annotate": "0.2.0", "duct-annotate": "0.2.0"}
+VERSION_OVERRIDE = {"well-sheets": "0.2.5", "well-annotate": "0.3.0"}
 OUT.mkdir(exist_ok=True)
 
 # 文件夹名 -> (id, 分类, 图标上的字)
 PLUGINS = {
     "一键井展开图":       ("well-sheets",     "出图打印", "展"),
     "一键井大样标注":     ("well-annotate",   "出图打印", "标"),
-    "一键排管标注":       ("duct-annotate",   "出图打印", "管"),
     "一键布置松木桩垫层": ("pile-cushion",    "市政管线", "桩"),
     "清理重复松木桩垫层": ("pile-cleanup",    "市政管线", "清"),
     "一键编号":           ("well-number",     "数据处理", "号"),
@@ -41,7 +40,7 @@ TEXT_PATCHES = {
     "一键井展开图": [("正在批量生成井大样图及尺寸标注...", "正在批量生成井大样图...")],
 }
 # 标注类功能仍在优化，商店里标为实验功能
-EXPERIMENTAL = {"一键井大样标注", "一键排管标注"}
+EXPERIMENTAL = {"一键井大样标注"}
 
 catalog = []
 for folder, (pid, cat, glyph) in PLUGINS.items():

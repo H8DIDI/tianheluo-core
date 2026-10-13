@@ -5,7 +5,6 @@
 
 | 插件 id | 名称 | 版本 | 类型 | 作者 | 许可 |
 |---|---|---|---|---|---|
-| [`duct-annotate`](duct-annotate/) | 一键排管标注 | 0.2.0 | Python | didi | MIT |
 | [`elv-merge`](elv-merge/) | 强电井清洗合并 | 0.1.0 | Python | didi | MIT |
 | [`export-dwg`](export-dwg/) | 一键导出井大样DWG | 0.1.0 | Python | didi | MIT |
 | [`export-nwc`](export-nwc/) | 一键导出NWC | 0.1.0 | Python | didi | MIT |
@@ -17,7 +16,7 @@
 | [`sheet-manager`](sheet-manager/) | 图纸管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |
 | [`tag-check`](tag-check/) | 标注检查 | 0.2.0 | C#（源码在 `plugins/`） | didi | MIT |
 | [`view-manager`](view-manager/) | 视图管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |
-| [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.2.0 | Python | didi | MIT |
+| [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.0 | Python | didi | MIT |
 | [`well-clear-marks`](well-clear-marks/) | 一键清除井标记 | 0.1.0 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.2 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-number`](well-number/) | 一键编号 | 0.1.0 | Python | didi | MIT |
