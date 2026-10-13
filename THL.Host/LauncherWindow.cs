@@ -23,6 +23,13 @@ public sealed class LauncherWindow : Window
     readonly Button _tabInstalled = new(), _tabStore = new();
     bool _storeTab;
     List<CatalogItem>? _catalog;
+    Dictionary<string, long> _counts = new();
+    HostRelease? _hostRelease;
+    readonly Border _banner = new();
+    readonly TextBlock _bannerText = new();
+    readonly Button _bannerBtn = MakeButton("下载更新", true);
+    readonly Button _checkBtn = MakeButton("检查更新", false), _updateAll = MakeButton("全部更新", true);
+    bool _busy;
 
     public LauncherWindow()
     {
@@ -54,6 +61,17 @@ public sealed class LauncherWindow : Window
         top.Child = topRow;
         DockPanel.SetDock(top, Dock.Top); root.Children.Add(top);
 
+        // 宿主更新横幅（默认隐藏）
+        _banner.Background = B("#10263A"); _banner.BorderBrush = B("#1F4A73"); _banner.BorderThickness = new Thickness(0, 0, 0, 1);
+        _banner.Padding = new Thickness(20, 9, 20, 9); _banner.Visibility = Visibility.Collapsed;
+        var bannerRow = new DockPanel();
+        DockPanel.SetDock(_bannerBtn, Dock.Right);
+        _bannerText.Foreground = B("#BFE0FF"); _bannerText.VerticalAlignment = VerticalAlignment.Center; _bannerText.TextWrapping = TextWrapping.Wrap; _bannerText.FontSize = 13;
+        _bannerBtn.Click += async (_, _) => await StageHostAsync();
+        bannerRow.Children.Add(_bannerBtn); bannerRow.Children.Add(_bannerText);
+        _banner.Child = bannerRow;
+        DockPanel.SetDock(_banner, Dock.Top); root.Children.Add(_banner);
+
         // 标签
         var tabs = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(20, 10, 20, 0) };
         StyleTab(_tabInstalled, "已安装"); StyleTab(_tabStore, "商店");
@@ -68,8 +86,12 @@ public sealed class LauncherWindow : Window
         var install = MakeButton("安装插件包…", false);
         install.Click += (_, _) => InstallFromFile();
         DockPanel.SetDock(install, Dock.Right);
+        _checkBtn.Click += async (_, _) => await CheckAllAsync(false);
+        _updateAll.Visibility = Visibility.Collapsed;
+        _updateAll.Click += async (_, _) => await UpdateAllAsync();
+        DockPanel.SetDock(_updateAll, Dock.Right); DockPanel.SetDock(_checkBtn, Dock.Right);
         _status.Foreground = Mute; _status.VerticalAlignment = VerticalAlignment.Center; _status.TextTrimming = TextTrimming.CharacterEllipsis;
-        bar.Children.Add(install); bar.Children.Add(_status);
+        bar.Children.Add(install); bar.Children.Add(_updateAll); bar.Children.Add(_checkBtn); bar.Children.Add(_status);
         bottom.Child = bar;
         DockPanel.SetDock(bottom, Dock.Bottom); root.Children.Add(bottom);
 
@@ -79,7 +101,12 @@ public sealed class LauncherWindow : Window
         Content = root;
 
         KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
-        Loaded += (_, _) => { _search.Focus(); Render(); };
+        Loaded += (_, _) =>
+        {
+            _search.Focus(); Render(); UpdateBanner();
+            Flash($"天河落 v{HostUpdater.Current}　·　正在检查更新…");
+            _ = CheckAllAsync(true);
+        };
     }
 
     // ---------- 渲染 ----------
@@ -93,6 +120,10 @@ public sealed class LauncherWindow : Window
     void Render()
     {
         _tabInstalled.Foreground = _storeTab ? Mute : Fg; _tabStore.Foreground = _storeTab ? Fg : Mute;
+        var updateCount = PluginUpdates().Count;
+        _tabInstalled.Content = updateCount > 0 ? $"已安装 · {updateCount} 个可更新" : "已安装";
+        _updateAll.Visibility = updateCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+        _updateAll.Content = $"全部更新 ({updateCount})";
         _list.Children.Clear();
         if (_storeTab) RenderStore(); else RenderInstalled();
     }
@@ -119,7 +150,17 @@ public sealed class LauncherWindow : Window
                 try { Store.Uninstall(p.Manifest.Id); Flash("已卸载「" + p.Manifest.Name + "」"); } catch (Exception ex) { Flash("卸载失败：" + ex.Message); }
                 Render();
             };
-            _list.Children.Add(Row(Icons.ForPlugin(p, 96), p.Manifest.Name, "v" + p.Manifest.Version, p.Manifest.Description, p.Manifest.Category, p.Enabled, run, toggle, del));
+            var upd = UpdateFor(p);
+            var buttons = new List<Button>();
+            if (upd != null)
+            {
+                var ub = MakeButton("更新到 v" + upd.Version, true);
+                ub.Click += async (_, _) => await UpdateOneAsync(upd, ub);
+                buttons.Add(ub);
+            }
+            buttons.AddRange(new[] { run, toggle, del });
+            var verText = upd != null ? $"v{p.Manifest.Version} → v{upd.Version}" : "v" + p.Manifest.Version;
+            _list.Children.Add(Row(Icons.ForPlugin(p, 96), p.Manifest.Name, verText, p.Manifest.Description, p.Manifest.Category, p.Enabled, buttons.ToArray()));
         }
     }
 
@@ -144,7 +185,7 @@ public sealed class LauncherWindow : Window
                 catch (Exception ex) { Flash("安装失败：" + Store.Describe(ex)); }
                 Render();
             };
-            _list.Children.Add(Row(Icons.Generate(new Manifest { Name = c.Name, Category = c.Category, Glyph = c.Glyph, Color = c.Color }, 96), c.Name, "v" + c.Version, c.Summary, c.Category, true, btn));
+            _list.Children.Add(Row(Icons.Generate(new Manifest { Name = c.Name, Category = c.Category, Glyph = c.Glyph, Color = c.Color }, 96), c.Name, "v" + c.Version + (_counts.TryGetValue(c.Id, out var dl) && dl > 0 ? $"  ·  ⬇ {dl}" : ""), c.Summary, c.Category, true, btn));
         }
     }
 
@@ -154,6 +195,102 @@ public sealed class LauncherWindow : Window
         try { _catalog = await Store.FetchCatalogAsync(); Flash("商店已更新，共 " + _catalog.Count + " 个可安装插件。"); }
         catch (Exception ex) { _catalog = new(); Flash("连接商店失败：" + Store.Describe(ex)); }
         if (_storeTab) Render();
+    }
+
+
+    // ---------- 更新 ----------
+    List<CatalogItem> PluginUpdates()
+    {
+        var list = new List<CatalogItem>();
+        if (_catalog == null) return list;
+        foreach (var p in Store.List())
+        {
+            var u = UpdateFor(p);
+            if (u != null) list.Add(u);
+        }
+        return list;
+    }
+
+    CatalogItem? UpdateFor(Installed p)
+        => _catalog?.FirstOrDefault(c => c.Id == p.Manifest.Id && Store.IsNewer(c.Version, p.Manifest.Version));
+
+    /// <summary>同时检查宿主和插件的新版本。silent=自动检查（出错不打扰）。</summary>
+    async Task CheckAllAsync(bool silent)
+    {
+        if (_busy) return;
+        _busy = true; _checkBtn.IsEnabled = false;
+        try
+        {
+            if (!silent) Flash("正在检查更新…");
+            var tCat = Task.Run(async () =>
+            {
+                try { _catalog = await Store.FetchCatalogAsync(); _counts = await Store.FetchDownloadCountsAsync(); return (string?)null; }
+                catch (Exception ex) { return Store.Describe(ex); }
+            });
+            var tHost = Task.Run(async () =>
+            {
+                try { _hostRelease = await HostUpdater.CheckAsync(); return (string?)null; }
+                catch (Exception ex) { return Store.Describe(ex); }
+            });
+            var catErr = await tCat; var hostErr = await tHost;
+            UpdateBanner(); Render();
+            var n = PluginUpdates().Count;
+            var hostNew = _hostRelease != null && HostUpdater.IsNewer(_hostRelease.Version);
+            if (catErr != null && hostErr != null) Flash("检查更新失败（无法连接网站）：" + catErr);
+            else if (n == 0 && !hostNew) Flash($"已是最新：宿主 v{HostUpdater.Current}，插件无可用更新。");
+            else Flash((hostNew ? "宿主有新版本；" : "") + (n > 0 ? $"{n} 个插件可更新。" : ""));
+        }
+        finally { _busy = false; _checkBtn.IsEnabled = true; }
+    }
+
+    void UpdateBanner()
+    {
+        var pending = HostUpdater.Pending();
+        if (pending != null)
+        {
+            _bannerText.Text = $"宿主更新 v{pending.Version} 已下载，关闭 Revit 后会自动安装（当前 v{HostUpdater.Current}）。";
+            _bannerBtn.Visibility = Visibility.Collapsed; _banner.Visibility = Visibility.Visible; return;
+        }
+        if (_hostRelease != null && HostUpdater.IsNewer(_hostRelease.Version))
+        {
+            var notes = string.IsNullOrWhiteSpace(_hostRelease.Notes) ? "" : "　" + _hostRelease.Notes;
+            _bannerText.Text = $"宿主有新版本 v{_hostRelease.Version}（当前 v{HostUpdater.Current}）。{notes}";
+            _bannerBtn.Visibility = Visibility.Visible; _bannerBtn.IsEnabled = true; _banner.Visibility = Visibility.Visible; return;
+        }
+        _banner.Visibility = Visibility.Collapsed;
+    }
+
+    async Task StageHostAsync()
+    {
+        if (_hostRelease == null) return;
+        _bannerBtn.IsEnabled = false;
+        try { await HostUpdater.DownloadAndStageAsync(_hostRelease, Flash); }
+        catch (Exception ex) { Flash("宿主更新失败：" + Store.Describe(ex)); }
+        UpdateBanner();
+    }
+
+    async Task UpdateOneAsync(CatalogItem c, Button btn)
+    {
+        btn.IsEnabled = false; Flash("正在更新「" + c.Name + "」…");
+        try { var m = await Store.InstallFromCatalogAsync(c); Flash($"已更新「{m.Name}」到 v{m.Version}，现在就能用，无需重启。"); }
+        catch (Exception ex) { Flash("更新失败：" + Store.Describe(ex)); }
+        Render();
+    }
+
+    async Task UpdateAllAsync()
+    {
+        var todo = PluginUpdates();
+        int ok = 0; var failed = new List<string>();
+        _updateAll.IsEnabled = false;
+        foreach (var c in todo)
+        {
+            Flash($"正在更新 {ok + failed.Count + 1}/{todo.Count}：{c.Name}…");
+            try { await Store.InstallFromCatalogAsync(c); ok++; }
+            catch (Exception ex) { failed.Add($"{c.Name}（{Store.Describe(ex)}）"); }
+        }
+        _updateAll.IsEnabled = true;
+        Flash(failed.Count == 0 ? $"已更新 {ok} 个插件，无需重启。" : $"已更新 {ok} 个，{failed.Count} 个失败：" + string.Join("；", failed));
+        Render();
     }
 
     // ---------- 操作 ----------

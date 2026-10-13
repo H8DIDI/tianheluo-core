@@ -2,7 +2,7 @@
 同时包含 .NET 8 版（Revit 2026.0~2026.4）和 .NET 10 版（Revit 2026.5+），安装脚本自动选择。"""
 import zipfile, pathlib
 root = pathlib.Path(__file__).resolve().parent.parent
-out = root / "dist/THL-Host_0.1.0.zip"
+out = root / "dist/THL-Host.zip"
 BUILDS = {"net8": "net8.0-windows", "net10": "net10.0-windows"}
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for key, tfm in BUILDS.items():

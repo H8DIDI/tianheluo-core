@@ -37,6 +37,8 @@ Revit 2026
 | 运行方式 | 点击按钮 → 宿主读取 `script.py` → 在**新的** IronPython 引擎里以 `__main__` 执行 → 结束后释放。脚本之间互相隔离，没有持久进程状态 |
 | 线程 | 脚本在 **Revit 主线程**里同步执行，可以直接读写模型（写模型必须开 Transaction）；执行期间 Revit 界面被阻塞，耗时操作请用进度条并允许取消 |
 | 功能区刷新 | 在插件中心里安装/卸载/停用后，关闭插件中心窗口，功能区立刻同步（无需重启） |
+| 更新 | 插件中心打开时会自动对比商店清单：已装插件的 `version` 低于商店里的版本，就在「已安装」页显示「更新到 vX」，用户一键更新（无需重启 Revit）。**所以插件要更新，只需递增 `version` 后重新投稿。** 宿主本身的更新信息在 `https://tianheluo.com/host.json`，更新包会先校验 SHA256，Revit 关闭后自动安装，失败自动回滚。 |
+| 下载计数 | 商店下载走 `https://tianheluo.com/api/dl/<id>`，每个访客对同一插件 1 小时内只计 1 次，不保存个人信息；官网首页显示热门插件榜，数据来自 `https://tianheluo.com/api/stats`。 |
 | 商店清单 | `GET https://tianheluo.com/plugins.json` → `{"revit":"2026","plugins":[...]}`，每项含 `id/name/version/summary/category/download/author/license...` |
 | 下载地址 | `https://tianheluo.com/dl/<id>_<version>.thlp` |
 
@@ -260,7 +262,7 @@ if __name__ == "__main__":
 | 自查校验脚本 | <https://tianheluo.com/tools/validate.py> |
 | 示例插件 | <https://tianheluo.com/examples/hello-world/script.py> 等 |
 | 投稿邮箱 | jiajiabimer@gmail.com |
-| 宿主安装包 | <https://tianheluo.com/dl/THL-Host_0.1.0.zip> |
+| 宿主安装包 | <https://tianheluo.com/dl/THL-Host.zip> |
 
 ## 12. AI 工作流程（请照此执行）
 

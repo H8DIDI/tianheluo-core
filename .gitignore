@@ -14,3 +14,6 @@ dist/
 *.snk
 *.cer
 secrets/
+
+# 端到端测试素材（本地生成）
+_e2e/

@@ -49,6 +49,7 @@ public class App : IExternalApplication
     Result StartupCore(UIControlledApplication app)
     {
         try { Directory.CreateDirectory(Store.PluginsDir); } catch { }
+        try { HostUpdater.CleanupIfApplied(); } catch { }
         _asmPath = Assembly.GetExecutingAssembly().Location;
 
         app.CreateRibbonTab(TabName);
@@ -66,7 +67,12 @@ public class App : IExternalApplication
     }
 
 
-    public Result OnShutdown(UIControlledApplication app) => Result.Succeeded;
+    public Result OnShutdown(UIControlledApplication app)
+    {
+        // 有已下载的宿主更新：Revit 退出后由独立脚本替换文件（运行中的 DLL 无法替换自己）
+        if (HostUpdater.LaunchApplierIfPending()) Log("已启动宿主更新程序，Revit 退出后将自动安装更新。");
+        return Result.Succeeded;
+    }
 
     /// <summary>让功能区和磁盘上的已安装插件一致：新装的补按钮，卸载/停用的隐藏。</summary>
     public static void SyncRibbon()

@@ -67,6 +67,8 @@ public static class Store
     public sealed class Config
     {
         [JsonPropertyName("catalogUrl")] public string CatalogUrl { get; set; } = "https://tianheluo.com/plugins.json";
+        /// <summary>宿主最新版本信息（可改成本地路径或内网地址，便于离线/测试）。</summary>
+        [JsonPropertyName("hostUpdateUrl")] public string HostUpdateUrl { get; set; } = "https://tianheluo.com/host.json";
         [JsonPropertyName("disabled")] public List<string> Disabled { get; set; } = new();
         /// <summary>功能区槽位 → 插件 id。装卸插件后槽位保持稳定，按钮不会串。</summary>
         [JsonPropertyName("slots")] public Dictionary<string, string> Slots { get; set; } = new();
@@ -220,6 +222,47 @@ public static class Store
         for (var e = ex; e != null; e = e.InnerException)
             if (!string.IsNullOrWhiteSpace(e.Message) && !parts.Contains(e.Message)) parts.Add(e.Message);
         return string.Join(" ← ", parts);
+    }
+
+
+    // ---------- 通用读取（支持 http(s) 地址、本地路径、file:// ；带重试）----------
+    static string ToUrl(string urlOrPath) => urlOrPath.Contains("://") ? urlOrPath : new Uri(Path.GetFullPath(urlOrPath)).AbsoluteUri;
+
+    public static async Task<string> ReadTextAsync(string urlOrPath)
+    {
+        var u = new Uri(ToUrl(urlOrPath));
+        return u.IsFile ? await File.ReadAllTextAsync(u.LocalPath) : await WithRetry(c => c.GetStringAsync(u));
+    }
+
+    public static async Task<byte[]> ReadBytesAsync(string urlOrPath)
+    {
+        var u = new Uri(ToUrl(urlOrPath));
+        return u.IsFile ? await File.ReadAllBytesAsync(u.LocalPath) : await WithRetry(c => c.GetByteArrayAsync(u));
+    }
+
+    /// <summary>把相对地址（/dl/x、/api/dl/x）按基准地址补全；本地清单里的 /xxx 相对清单所在目录。</summary>
+    public static string ResolveUrl(string baseUrlOrPath, string relative)
+    {
+        if (relative.Contains("://")) return relative;
+        var b = new Uri(ToUrl(baseUrlOrPath));
+        return new Uri(b, b.IsFile ? relative.TrimStart('/') : relative).ToString();
+    }
+
+    /// <summary>各插件的下载数（来自网站 /api/stats）。本地清单或联网失败时返回空，不影响商店。</summary>
+    public static async Task<Dictionary<string, long>> FetchDownloadCountsAsync()
+    {
+        var result = new Dictionary<string, long>();
+        try
+        {
+            var cat = ToUrl(LoadConfig().CatalogUrl);
+            if (new Uri(cat).IsFile) return result;
+            var json = await ReadTextAsync(ResolveUrl(cat, "/api/stats"));
+            using var doc = JsonDocument.Parse(json);
+            foreach (var p in doc.RootElement.GetProperty("plugins").EnumerateObject())
+                result[p.Name] = p.Value.GetProperty("total").GetInt64();
+        }
+        catch { }
+        return result;
     }
 
     public static async Task<List<CatalogItem>> FetchCatalogAsync()
