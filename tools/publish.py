@@ -146,6 +146,7 @@ def main():
     print("== 1/5 构建 ==")
     run([sys.executable, "tools/build_all.py"], quiet=True)
     run([sys.executable, str(SITE / "tools" / "build_seo.py")], quiet=True)  # 插件详情页、导航页脚、sitemap
+    run([sys.executable, str(SITE / "tools" / "check_site.py")], quiet=True)  # 链接/JSON/标签静态检查，有问题就停在这里
     if not a.skip_tests:
         print("== 2/5 单元测试 ==")
         for t in ("tests/StoreTests", "tests/UpdateTests"):
@@ -185,6 +186,8 @@ def main():
             print("  ✗ 线上与本地不一致：", name, f)
         sys.exit("线上文件在 5 分钟内没有更新成功。Cloudflare Pages 有时会发布失败，请到控制台重试部署后再运行本脚本核对。")
     print("  线上文件全部与本地一致。发布完成。")
+    print("== 通知搜索引擎（IndexNow / 百度，失败不影响发布）==")
+    run([sys.executable, str(SITE / "tools" / "indexnow.py")], check=False)
 
 
 if __name__ == "__main__":
