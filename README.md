@@ -46,7 +46,8 @@ Revit MCP 让 AI 直接操作模型；天河落让 AI 写好的脚本沉淀成�
 ## 仓库结构
 
 - `THL.Host/`  宿主（同时编译 .NET 8 / .NET 10；Revit 2026.0~2026.4 用 .NET 8，2026.5+ 用 .NET 10）
-- `plugins/`   C# 插件示例（井深调整、明细表 Excel 互导）
+- `plugins/`   C# 插件源码（井深调整、明细表 Excel 互导）
+- `plugin-sources/`  **每个已上架插件发布出去的源码**（Python 脚本等，自动展开自发布包，[索引](plugin-sources/README.md)）
 - `setup/`     安装脚本（`install.bat` 纯 ASCII 外壳，真正逻辑在 `install.ps1`）
 - `tools/`     打包与发布脚本（可复现构建；`publish.py` 一键发布）
 - `tests/`     离线测试（商店逻辑、更新逻辑、应用更新脚本、校验器、Excel 读写、兼容层）

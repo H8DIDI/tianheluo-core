@@ -1,0 +1,12 @@
+{
+  "id": "pile-cushion",
+  "name": "一键布置松木桩垫层",
+  "version": "0.1.0",
+  "description": "框选排管或井等构件，自动在其下方依据真实几何轮廓居中布置 100mm 厚垫层（外挑100mm）与 Φ75@500 L=6m 松木桩。已内置防重复布置智能覆盖机制。",
+  "category": "市政管线",
+  "revit": "2026",
+  "hostApi": 1,
+  "type": "python",
+  "script": "script.py",
+  "glyph": "桩"
+}

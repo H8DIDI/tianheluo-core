@@ -1,0 +1,12 @@
+{
+  "id": "well-sheets",
+  "name": "一键井展开图",
+  "version": "0.1.0",
+  "description": "选中一个井，自动生成平面及四面剖面排版到图纸上（本按钮不再自动标注，标注请用「一键井大样标注」）。",
+  "category": "出图打印",
+  "revit": "2026",
+  "hostApi": 1,
+  "type": "python",
+  "script": "script.py",
+  "glyph": "展"
+}

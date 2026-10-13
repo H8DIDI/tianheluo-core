@@ -24,6 +24,11 @@ try:
 except Exception:
     pass
 
+REPO = "https://github.com/H8DIDI/tianheluo-core/tree/main/"
+cs_dirs = {}
+for mf in (root / "plugins").glob("*/plugin.json"):
+    cs_dirs[json.loads(mf.read_text(encoding="utf-8-sig"))["id"]] = mf.parent.name
+
 plugins = []
 for pkg in sorted(dist.glob("*.thlp")):
     m = json.loads(zipfile.ZipFile(pkg).read("plugin.json"))
@@ -39,7 +44,7 @@ for pkg in sorted(dist.glob("*.thlp")):
         "summary": summary[:80], "description": desc, "features": feats,
         "version": m["version"], "revit": m.get("revit", "2026"),
         "size": f"{pkg.stat().st_size/1024:.0f} KB", "status": "beta",
-        "download": f"/api/dl/{m['id']}", "file": f"/dl/{pkg.name}", "sha256": hashlib.sha256(pkg.read_bytes()).hexdigest(), "hostApi": m.get("hostApi", 1), "date": date,
+        "download": f"/api/dl/{m['id']}", "file": f"/dl/{pkg.name}", "sha256": hashlib.sha256(pkg.read_bytes()).hexdigest(), "hostApi": m.get("hostApi", 1), "source": REPO + (f"plugins/{cs_dirs[m['id']]}" if m["id"] in cs_dirs else f"plugin-sources/{m['id']}"), "date": date,
         "glyph": m.get("glyph", ""), "color": m.get("color", ""),
         "tier": m.get("tier", "official"), "author": m.get("author", ""), "license": m.get("license", ""), "homepage": m.get("homepage", ""),
     })

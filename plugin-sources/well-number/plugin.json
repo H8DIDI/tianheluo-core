@@ -1,0 +1,12 @@
+{
+  "id": "well-number",
+  "name": "一键编号",
+  "version": "0.1.0",
+  "description": "支持先选中再运行。给常规模型按空间坐标全自动排号。",
+  "category": "数据处理",
+  "revit": "2026",
+  "hostApi": 1,
+  "type": "python",
+  "script": "script.py",
+  "glyph": "号"
+}

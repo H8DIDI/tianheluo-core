@@ -1,0 +1,12 @@
+{
+  "id": "pile-cleanup",
+  "name": "清理重复松木桩垫层",
+  "version": "0.1.0",
+  "description": "清理重复松木桩垫层",
+  "category": "市政管线",
+  "revit": "2026",
+  "hostApi": 1,
+  "type": "python",
+  "script": "script.py",
+  "glyph": "清"
+}

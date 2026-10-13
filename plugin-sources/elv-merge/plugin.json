@@ -1,0 +1,12 @@
+{
+  "id": "elv-merge",
+  "name": "强电井清洗合并",
+  "version": "0.1.0",
+  "description": "强电井清洗合并",
+  "category": "数据处理",
+  "revit": "2026",
+  "hostApi": 1,
+  "type": "python",
+  "script": "script.py",
+  "glyph": "并"
+}

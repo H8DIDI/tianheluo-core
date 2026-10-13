@@ -1,0 +1,12 @@
+{
+  "id": "export-nwc",
+  "name": "一键导出NWC",
+  "version": "0.1.0",
+  "description": "一键导出NWC",
+  "category": "导出",
+  "revit": "2026",
+  "hostApi": 1,
+  "type": "python",
+  "script": "script.py",
+  "glyph": "NWC"
+}
