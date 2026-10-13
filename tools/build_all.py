@@ -23,7 +23,7 @@ for d in [root / "THL.Host", *(root / "plugins").glob("*")]:
         shutil.rmtree(d / sub, ignore_errors=True)
 shutil.rmtree(root / "_deploytest", ignore_errors=True)
 run(["dotnet", "build", "-c", "Release", "-p:RevitAddinsDir=" + str(root / "_deploytest")], cwd=root / "THL.Host")
-for proj in ("well-depth", "schedule-excel", "plan-batch"):
+for proj in ("well-depth", "schedule-excel", "plan-batch", "tag-check"):
     run(["dotnet", "build", "-c", "Release"], cwd=root / "plugins" / proj)
 
 # 2) 签名（可选，默认不签：见上面的说明）
