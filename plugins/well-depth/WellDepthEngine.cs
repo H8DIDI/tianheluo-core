@@ -1,26 +1,84 @@
+using System.Text;
+using System.Text.Json;
 using Autodesk.Revit.DB;
 
 namespace KaifaTools.WellDepth;
 
 // ---------------------------------------------------------------------------
-// Rule (set by the user):
-//   well bottom elevation = lowest connected duct-bank bottom - 300 mm
+// Rule (set by the user, editable in Documents\KaifaTools\井深规则.json):
+//   well bottom elevation = lowest connected duct-bank bottom - ClearanceMm
 //   well depth            = well top offset (相对标高的偏移) - well bottom elevation
-// Storm wells, sewage wells and valve wells are never touched: only the families
-// listed in GetWellSystem() are processed (a whitelist is safer than a blacklist).
+// Only the families listed in the rules file are processed. Storm / sewage / valve wells are never touched.
 // ---------------------------------------------------------------------------
 
-/// <summary>Tunable numbers. Change them here, rebuild, done.</summary>
-public static class DepthSettings
+/// <summary>User-editable rules. The file is read on every click, so edits take effect without rebuilding.</summary>
+public sealed class DepthRules
 {
-    public const double ClearanceMm = 300;    // well bottom sits this far below the lowest pipe
-    public const double ToleranceMm = 50;     // a well within this error is treated as "already correct"
-    public const double TightMm = 50;         // pipe must touch the well footprint (+ this margin) to count as "connected"
-    public const double MaxGapMm = 1000;      // a pipe END that stops short of a well still counts if closer than this
-    public const double MaxDepthMm = 6000;    // deeper than this -> needs a human review, not auto-written
-    public const double MinDepthMm = 500;     // shallower than this -> needs review
-    public const bool ShowPlanFirst = true;      // true = show rules + scope and ask before writing
-    public const double MaxSpreadMm = 2000;   // lowest pipe is this much below the next one -> suspicious, review
+    // ---- numbers (mm) ----
+    public double ClearanceMm { get; set; } = 300;   // well bottom sits this far below the lowest pipe
+    public double ToleranceMm { get; set; } = 50;    // within this error the well counts as already correct
+    public double TightMm { get; set; } = 50;        // pipe must touch the well footprint (+ this margin)
+    public double MaxGapMm { get; set; } = 1000;     // a pipe END that stops short of a well still counts if closer than this
+    public double MaxDepthMm { get; set; } = 6000;   // deeper than this -> needs a human review, not auto-written
+    public double MinDepthMm { get; set; } = 500;    // shallower than this -> needs review
+    public double MaxSpreadMm { get; set; } = 2000;  // lowest pipe is this much below the next one -> suspicious, review
+    public double MaxRefGapMm { get; set; } = 1000;  // |well top - offset - reference| above this -> the well's levels look wrong, review
+    public bool ShowPlanFirst { get; set; } = true;  // true = show rules + scope and ask before writing
+
+    // ---- which wells we may touch (family name prefixes) ----
+    public string[] WellLv { get; set; } = { "LV-低压拉线井" };
+    public string[] WellEm { get; set; } = { "ELE-EM" };
+    public string[] WellTelco { get; set; } = { "ELE-TELCO", "TELCO" };
+    public string[] WellElv { get; set; } = { "ELV PIT", "ELV-MANHOLE" };
+
+    // ---- which pipes belong to which system (keywords, matched inside family name or instance name) ----
+    public string[] PipeEm { get; set; } = { "11KV", "275KV" };
+    public string[] PipeTelco { get; set; } = { "TELCO" };
+    public string[] PipeElv { get; set; } = { "ELV" };
+    public string[] PipeLv { get; set; } = { "LV" };
+
+    // ---- never touched (checked first, for wells and pipes alike) ----
+    public string[] Exclude { get; set; } = { "雨水", "排水", "污水", "阀门", "井盖", "mold_" };
+}
+
+/// <summary>Reads and writes the rules file in Documents\KaifaTools.</summary>
+public static class RulesFile
+{
+    public static string Path => System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "KaifaTools", "井深规则.json");
+
+    static readonly JsonSerializerOptions Opt = new()
+    {
+        WriteIndented = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true,
+    };
+
+    /// <summary>Returns the rules from the file. Creates the file with defaults if missing. On a broken file, falls back to defaults and reports why.</summary>
+    public static DepthRules Load(out string? error)
+    {
+        error = null;
+        try
+        {
+            if (!File.Exists(Path))
+            {
+                Save(new DepthRules());
+                return new DepthRules();
+            }
+            return JsonSerializer.Deserialize<DepthRules>(File.ReadAllText(Path, Encoding.UTF8), Opt) ?? new DepthRules();
+        }
+        catch (Exception ex)
+        {
+            error = "井深规则.json 格式有误，已临时使用默认规则：" + ex.Message;
+            return new DepthRules();
+        }
+    }
+
+    public static void Save(DepthRules rules)
+    {
+        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
+        File.WriteAllText(Path, JsonSerializer.Serialize(rules, Opt), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+    }
 }
 
 public enum WellSystem { Lv, Em, Telco, Elv }
@@ -36,7 +94,7 @@ public enum WellStatus
     NoParameter,    // family has no depth parameter we can read
 }
 
-/// <summary>One duct bank (structural framing) or conduit, in millimetres.</summary>
+/// <summary>One duct bank (structural framing) or conduit, in millimetres (absolute model coordinates).</summary>
 internal sealed record PipeInfo(long Id, WellSystem System, double X0, double Y0, double Z0, double X1, double Y1, double Z1);
 
 internal sealed record PipeHit(long PipeId, double BottomZ, bool IsGap, double GapMm);
@@ -48,16 +106,17 @@ public sealed class WellResult
     public string Mark = "";
     public string Family = "";
     public WellSystem System;
-    public double OffsetMm;
-    public double LevelMm;
+    public double OffsetMm;          // parameter "相对标高的偏移"
+    public double TopMm;             // real top of the well (absolute, from its bounding box)
+    public double RefMm;             // TopMm - OffsetMm: the height the offset is measured from (normally ~0)
     public double? CurBottomMm;      // parameter "井底标高"
     public double? CurDepthMm;       // parameter "井内深度" (or "深度")
     public double? CurInnerBottomMm; // parameter "井内底标高" (manual annotation value)
     public double MinX, MinY, MaxX, MaxY;
     internal List<PipeHit> Hits = new();
 
-    public double? LowestPipeMm;
-    public double NewBottomMm;
+    public double? LowestPipeMm;     // absolute
+    public double NewBottomMm;       // parameter value (relative to RefMm)
     public double NewDepthMm;
     public WellStatus Status;
     public string Note = "";
@@ -74,6 +133,15 @@ public static class WellDepthEngine
     private const string ParamOffsetA = "相对标高的偏移";
     private const string ParamOffsetB = "相对主体的偏移";
 
+    /// <summary>Rules used by the last Analyse call.</summary>
+    public static DepthRules Rules { get; private set; } = new();
+    /// <summary>Problem with the rules file (null = fine).</summary>
+    public static string? RulesError { get; private set; }
+    /// <summary>Pipes that matched no system: "族 | 实例名 : 数量". Shown to the user so missing keywords can be added.</summary>
+    public static List<string> UnmatchedPipes { get; } = new();
+    /// <summary>Pipes ignored because they lie above the well top.</summary>
+    public static int IgnoredAbovePipes { get; private set; }
+
     private static double ToMm(double feet) => UnitUtils.ConvertFromInternalUnits(feet, UnitTypeId.Millimeters);
     public static double ToFeet(double mm) => UnitUtils.ConvertToInternalUnits(mm, UnitTypeId.Millimeters);
 
@@ -81,14 +149,11 @@ public static class WellDepthEngine
 
     public static WellSystem? GetWellSystem(string family)
     {
-        // explicit deny list, in case a family name ever contains a whitelisted word
-        string[] deny = { "雨水", "排水", "污水", "阀门", "井盖", "mold_" };
-        if (deny.Any(family.Contains)) return null;
-
-        if (family == "LV-低压拉线井") return WellSystem.Lv;
-        if (family.StartsWith("ELE-EM")) return WellSystem.Em;
-        if (family.StartsWith("ELE-TELCO") || family == "TELCO" || family.StartsWith("TELCO-")) return WellSystem.Telco;
-        if (family == "ELV PIT" || family == "ELV-MANHOLE") return WellSystem.Elv;
+        if (Rules.Exclude.Any(k => family.Contains(k))) return null;
+        if (Rules.WellLv.Any(p => family.StartsWith(p))) return WellSystem.Lv;
+        if (Rules.WellEm.Any(p => family.StartsWith(p))) return WellSystem.Em;
+        if (Rules.WellTelco.Any(p => family.StartsWith(p))) return WellSystem.Telco;
+        if (Rules.WellElv.Any(p => family.StartsWith(p))) return WellSystem.Elv;
         return null;
     }
 
@@ -107,18 +172,25 @@ public static class WellDepthEngine
         return counts;
     }
 
-    // Which system does a pipe belong to? A well only accepts pipes of its own system.
-    private static WellSystem? GetPipeSystem(string family, string typeName)
+    // Which system does one string (family name or instance name) belong to?
+    private static WellSystem? ClassifyPipeText(string text)
     {
-        string both = family + "|" + typeName;
-        if (both.Contains("雨水") || both.Contains("排水")) return null;
-        if (both.Contains("TELCO")) return WellSystem.Telco;
-        if (both.Contains("11KV") || both.Contains("275KV")) return WellSystem.Em;
-        if (family.StartsWith("ELV")) return WellSystem.Elv;
-        // family decides for LV (one LV family has a type that is misnamed "ELV-...")
-        if (family.StartsWith("LV") || typeName.Contains("ELE-LV")) return WellSystem.Lv;
+        if (Rules.PipeEm.Any(k => text.Contains(k))) return WellSystem.Em;
+        if (Rules.PipeTelco.Any(k => text.Contains(k))) return WellSystem.Telco;
+        if (Rules.PipeElv.Any(k => text.Contains(k))) return WellSystem.Elv;
+        if (Rules.PipeLv.Any(k => text.Contains(k))) return WellSystem.Lv;
         return null;
     }
+
+    // The family name decides first; the instance name is only a fallback.
+    // (A low-voltage duct bank can be named "ELV-..." on the instance while its family is "LV-...")
+    private static WellSystem? GetPipeSystem(string family, string instanceName)
+    {
+        return ClassifyPipeText(family) ?? ClassifyPipeText(instanceName);
+    }
+
+    private static bool IsExcludedPipe(string family, string instanceName) =>
+        Rules.Exclude.Any(k => (family + "|" + instanceName).Contains(k));
 
     private static bool IsTemporary(Element e)
     {
@@ -138,6 +210,11 @@ public static class WellDepthEngine
     /// <param name="onlyIds">If not null/empty, only these elements are analysed.</param>
     public static List<WellResult> Analyse(Document doc, ICollection<ElementId>? onlyIds)
     {
+        Rules = RulesFile.Load(out var err);
+        RulesError = err;
+        UnmatchedPipes.Clear();
+        IgnoredAbovePipes = 0;
+
         var pipes = CollectPipes(doc);
         var wells = CollectWells(doc, onlyIds, out var skippedTemporary);
 
@@ -152,14 +229,23 @@ public static class WellDepthEngine
     private static List<PipeInfo> CollectPipes(Document doc)
     {
         var list = new List<PipeInfo>();
+        var unmatched = new Dictionary<string, int>();
         foreach (var cat in new[] { BuiltInCategory.OST_StructuralFraming, BuiltInCategory.OST_Conduit })
         {
             foreach (var e in new FilteredElementCollector(doc).OfCategory(cat).WhereElementIsNotElementType())
             {
                 if (e.Location is not LocationCurve lc) continue;
                 string family = (doc.GetElement(e.GetTypeId()) as ElementType)?.FamilyName ?? "";
-                var system = GetPipeSystem(family, e.Name);
-                if (system is null || IsTemporary(e)) continue;
+                string name = e.Name;
+                if (IsExcludedPipe(family, name) || IsTemporary(e)) continue;
+
+                var system = GetPipeSystem(family, name);
+                if (system is null)
+                {
+                    string key = family + " | " + name;
+                    unmatched[key] = unmatched.TryGetValue(key, out var n) ? n + 1 : 1;
+                    continue;
+                }
 
                 XYZ a = lc.Curve.GetEndPoint(0), b = lc.Curve.GetEndPoint(1);
 
@@ -178,6 +264,8 @@ public static class WellDepthEngine
                     ToMm(b.X), ToMm(b.Y), ToMm(b.Z) + zOffset));
             }
         }
+        foreach (var kv in unmatched.OrderByDescending(kv => kv.Value))
+            UnmatchedPipes.Add($"{kv.Key} : {kv.Value} 根");
         return list;
     }
 
@@ -206,13 +294,14 @@ public static class WellDepthEngine
                 Mark = fi.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)?.AsString() ?? "",
                 Family = family,
                 System = system.Value,
-                LevelMm = doc.GetElement(fi.LevelId) is Level lvl ? ToMm(lvl.Elevation) : 0,
             };
 
             if (IsTemporary(fi)) { w.Status = WellStatus.Temporary; w.Note = "注释含“临时”"; temporary.Add(w); continue; }
             if (bb is null || offset is null) { w.Status = WellStatus.NoParameter; w.Note = "没有包围盒或偏移参数"; temporary.Add(w); continue; }
 
             w.OffsetMm = ToMm(offset.AsDouble());
+            w.TopMm = ToMm(bb.Max.Z);
+            w.RefMm = w.TopMm - w.OffsetMm;
             w.MinX = ToMm(bb.Min.X); w.MinY = ToMm(bb.Min.Y); w.MaxX = ToMm(bb.Max.X); w.MaxY = ToMm(bb.Max.Y);
             w.CurBottomMm = DoubleParam(fi, ParamBottom) is { } pb ? ToMm(pb.AsDouble()) : null;
             w.CurInnerBottomMm = DoubleParam(fi, ParamInnerBottom) is { } pi ? ToMm(pi.AsDouble()) : null;
@@ -237,7 +326,7 @@ public static class WellDepthEngine
             // (a) the pipe touches / crosses the well footprint
             foreach (var w in candidates)
             {
-                if (!Clip(p, w.MinX - DepthSettings.TightMm, w.MinY - DepthSettings.TightMm, w.MaxX + DepthSettings.TightMm, w.MaxY + DepthSettings.TightMm, out double t0, out double t1))
+                if (!Clip(p, w.MinX - Rules.TightMm, w.MinY - Rules.TightMm, w.MaxX + Rules.TightMm, w.MaxY + Rules.TightMm, out double t0, out double t1))
                     continue;
                 double za = p.Z0 + (p.Z1 - p.Z0) * t0, zb = p.Z0 + (p.Z1 - p.Z0) * t1;
                 AddHit(w, new PipeHit(p.Id, Math.Min(za, zb), false, 0));
@@ -254,7 +343,7 @@ public static class WellDepthEngine
                     double d = DistanceToBox(x, y, w);
                     if (d < bestDist) { bestDist = d; best = w; }
                 }
-                if (best != null && bestDist <= DepthSettings.MaxGapMm && bestDist > DepthSettings.TightMm && !touched.Contains(best.Id))
+                if (best != null && bestDist <= Rules.MaxGapMm && bestDist > Rules.TightMm && !touched.Contains(best.Id))
                     AddHit(best, new PipeHit(p.Id, z, true, bestDist));
             }
         }
@@ -262,8 +351,8 @@ public static class WellDepthEngine
 
     private static void AddHit(WellResult w, PipeHit hit)
     {
-        // ignore pipes that are not buried below the well top (bad data, not a real connection)
-        if (hit.BottomZ >= w.LevelMm + w.OffsetMm) return;
+        // a pipe whose bottom is above the well top is not buried in this well -> not a real connection
+        if (hit.BottomZ >= w.TopMm) { IgnoredAbovePipes++; return; }
         w.Hits.Add(hit);
     }
 
@@ -294,24 +383,33 @@ public static class WellDepthEngine
 
     private static void Evaluate(WellResult w)
     {
-        if (w.Hits.Count == 0) { w.Status = WellStatus.NoPipe; w.Note = $"{DepthSettings.MaxGapMm:0} mm 内没有同专业排管"; return; }
+        if (w.Hits.Count == 0) { w.Status = WellStatus.NoPipe; w.Note = $"{Rules.MaxGapMm:0} mm 内没有同专业排管"; return; }
         if (w.CurDepthMm is null) { w.Status = WellStatus.NoParameter; w.Note = "族里没有“井内深度/深度”参数"; return; }
+
+        // the offset must be measured from a sensible height; a big gap means the family or its levels are wrong
+        if (Math.Abs(w.RefMm) > Rules.MaxRefGapMm)
+        {
+            w.Status = WellStatus.Review;
+            w.Note = $"井顶与偏移不一致（差 {w.RefMm:0} mm），请人工核对";
+            return;
+        }
 
         var bottoms = w.Hits.Select(h => h.BottomZ).OrderBy(z => z).ToList();
         w.LowestPipeMm = bottoms[0];
-        w.NewBottomMm = Math.Round(bottoms[0] - DepthSettings.ClearanceMm - w.LevelMm);
+        // parameters are measured from the same reference as the offset: parameter = absolute - RefMm
+        w.NewBottomMm = Math.Round(bottoms[0] - Rules.ClearanceMm - w.RefMm);
         w.NewDepthMm = Math.Round(w.OffsetMm - w.NewBottomMm);
 
-        bool depthWrong = Math.Abs(w.NewDepthMm - w.CurDepthMm.Value) > DepthSettings.ToleranceMm;
-        bool bottomStale = w.CurBottomMm is { } cb && Math.Abs(w.NewBottomMm - cb) > DepthSettings.ToleranceMm;
+        bool depthWrong = Math.Abs(w.NewDepthMm - w.CurDepthMm.Value) > Rules.ToleranceMm;
+        bool bottomStale = w.CurBottomMm is { } cb && Math.Abs(w.NewBottomMm - cb) > Rules.ToleranceMm;
 
         if (!depthWrong && !bottomStale) { w.Status = WellStatus.Ok; return; }
 
         // numbers that look odd: do not auto-write, let the user decide
         var warnings = new List<string>();
-        if (w.NewDepthMm > DepthSettings.MaxDepthMm) warnings.Add($"井深 {w.NewDepthMm:0} 超过 {DepthSettings.MaxDepthMm:0}");
-        if (w.NewDepthMm < DepthSettings.MinDepthMm) warnings.Add($"井深 {w.NewDepthMm:0} 小于 {DepthSettings.MinDepthMm:0}");
-        if (bottoms.Count > 1 && bottoms[1] - bottoms[0] > DepthSettings.MaxSpreadMm) warnings.Add($"最低管比次低管还低 {bottoms[1] - bottoms[0]:0}，疑似异常管");
+        if (w.NewDepthMm > Rules.MaxDepthMm) warnings.Add($"井深 {w.NewDepthMm:0} 超过 {Rules.MaxDepthMm:0}");
+        if (w.NewDepthMm < Rules.MinDepthMm) warnings.Add($"井深 {w.NewDepthMm:0} 小于 {Rules.MinDepthMm:0}");
+        if (bottoms.Count > 1 && bottoms[1] - bottoms[0] > Rules.MaxSpreadMm) warnings.Add($"最低管比次低管还低 {bottoms[1] - bottoms[0]:0}，疑似异常管");
         if (w.Hits.Any(h => h.IsGap)) w.Note = "含有未贴井壁的排管(间距" + string.Join("/", w.Hits.Where(h => h.IsGap).Select(h => h.GapMm.ToString("0"))) + ")";
 
         if (warnings.Count > 0 && depthWrong)

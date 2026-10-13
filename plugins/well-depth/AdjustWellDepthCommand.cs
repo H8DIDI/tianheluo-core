@@ -35,7 +35,7 @@ public class AdjustWellDepthCommand : IExternalCommand
         int toWrite = Get(WellStatus.Adjust) + Get(WellStatus.SyncOnly);
 
         // ---- show the plan (rules + scope) and let the user decide -------------------
-        if (DepthSettings.ShowPlanFirst)
+        if (WellDepthEngine.Rules.ShowPlanFirst)
         {
             var choice = ShowPlan(doc, results, selection.Count > 0, count, csvPath);
             if (choice == PlanChoice.Cancel) return Result.Cancelled;
@@ -60,7 +60,7 @@ public class AdjustWellDepthCommand : IExternalCommand
 
         var summary = new StringBuilder();
         summary.AppendLine(selection.Count > 0 ? $"范围：选中的构件（检查 {results.Count} 口井）" : $"范围：全模型（检查 {results.Count} 口井）");
-        summary.AppendLine("规则：井底标高 = 最低排管底 - 300；井深 = 相对偏移 - 井底标高");
+        summary.AppendLine($"规则：井底标高 = 最低排管底 - {WellDepthEngine.Rules.ClearanceMm:0}；井深 = 相对偏移 - 井底标高（规则文件：{RulesFile.Path}）");
         summary.AppendLine();
         summary.AppendLine($"本次写入：{written} 口（改井深 {Get(WellStatus.Adjust)}，仅同步井底标高 {Get(WellStatus.SyncOnly)}）");
         summary.AppendLine($"原本合规：{Get(WellStatus.Ok)}");
@@ -105,21 +105,33 @@ public class AdjustWellDepthCommand : IExternalCommand
         scope.AppendLine($"  需人工复核(不改) {Get(WellStatus.Review)}　找不到排管 {Get(WellStatus.NoPipe)}");
 
         var rules = new StringBuilder();
-        rules.AppendLine($"1. 井底标高 = 最低接入排管底 - {DepthSettings.ClearanceMm:0} mm");
+        rules.AppendLine($"1. 井底标高 = 最低接入排管底 - {WellDepthEngine.Rules.ClearanceMm:0} mm");
         rules.AppendLine("2. 井深 = 相对标高的偏移 - 井底标高（写入“井内深度”，LV 井同时写“深度”，并同步“井底标高”）");
         rules.AppendLine("3. 接入排管：同专业的排管/线管，碰到井的平面范围；管头没贴井壁时，" +
-                         $"距离 {DepthSettings.MaxGapMm:0} mm 内、且该井是最近的同专业井，也算接入");
+                         $"距离 {WellDepthEngine.Rules.MaxGapMm:0} mm 内、且该井是最近的同专业井，也算接入");
         rules.AppendLine("4. 排管取管底（底对正），线管取中心线减半径；斜管取进井处的标高");
-        rules.AppendLine($"5. 误差在 ±{DepthSettings.ToleranceMm:0} mm 内视为已合规，不修改");
-        rules.AppendLine($"6. 以下情况只列入清单、不自动修改：新井深大于 {DepthSettings.MaxDepthMm:0} 或小于 {DepthSettings.MinDepthMm:0} mm；" +
-                         $"最低排管比次低的还低 {DepthSettings.MaxSpreadMm:0} mm 以上");
+        rules.AppendLine($"5. 误差在 ±{WellDepthEngine.Rules.ToleranceMm:0} mm 内视为已合规，不修改");
+        rules.AppendLine($"6. 以下情况只列入清单、不自动修改：新井深大于 {WellDepthEngine.Rules.MaxDepthMm:0} 或小于 {WellDepthEngine.Rules.MinDepthMm:0} mm；" +
+                         $"最低排管比次低的还低 {WellDepthEngine.Rules.MaxSpreadMm:0} mm 以上");
         rules.AppendLine("7. 被他人借用的井会跳过；全部修改在一个事务里，Ctrl+Z 可一次撤销");
+
+        var unmatchedLines = WellDepthEngine.UnmatchedPipes.Take(12).ToList();
+        var notes = new StringBuilder();
+        if (WellDepthEngine.RulesError is { } rerr) notes.AppendLine("⚠ " + rerr).AppendLine();
+        notes.AppendLine("【规则文件】" + RulesFile.Path);
+        notes.AppendLine($"【忽略】位于井顶以上、未接入的排管 {WellDepthEngine.IgnoredAbovePipes} 根");
+        if (unmatchedLines.Count > 0)
+        {
+            notes.AppendLine("【未识别的排管】以下排管没归入任何专业，请在规则文件的 Pipe… 关键字里补上：");
+            foreach (var l in unmatchedLines) notes.AppendLine("  " + l);
+            if (WellDepthEngine.UnmatchedPipes.Count > 12) notes.AppendLine($"  …另有 {WellDepthEngine.UnmatchedPipes.Count - 12} 种");
+        }
 
         var dialog = new TaskDialog("调整井深 - 确认规则与范围")
         {
             MainInstruction = toWrite == 0 ? "没有需要自动修改的井" : $"准备调整 {toWrite} 口井",
             MainContent = scope.ToString(),
-            ExpandedContent = "【规则】" + Environment.NewLine + rules + Environment.NewLine + "清单：" + csvPath,
+            ExpandedContent = "【规则】" + Environment.NewLine + rules + Environment.NewLine + notes + Environment.NewLine + "清单：" + csvPath,
             CommonButtons = TaskDialogCommonButtons.Cancel,
             DefaultButton = TaskDialogResult.Cancel,
         };
