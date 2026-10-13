@@ -154,8 +154,17 @@ public static class TagCheckEngine
             }
         }
 
+        // layout: a correctly tagged element whose tag overlaps another tag is shown as 重叠
+        var overlapping = TagLayout.OverlappingElements(doc, view);
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (rows[i].Status == "已标" && overlapping.Contains(rows[i].ElementId))
+                rows[i] = new TagRow { ElementId = rows[i].ElementId, Mark = rows[i].Mark, Category = rows[i].Category,
+                    Family = rows[i].Family, Status = "重叠", Current = rows[i].Current, Expected = rows[i].Expected };
+        }
+        int overlap = rows.Count(r => r.Status == "重叠");
         int missing = rows.Count(r => r.Status == "漏标"), wrong = rows.Count(r => r.Status == "用错"), ok = rows.Count(r => r.Status == "已标");
-        summary = $"视图「{view.Name}」：共 {rows.Count} 个构件，漏标 {missing}，用错 {wrong}，已标 {ok}。";
+        summary = $"视图「{view.Name}」：共 {rows.Count} 个构件，漏标 {missing}，用错 {wrong}，标注重叠 {overlap}，已标 {ok}。";
         return rows.OrderBy(r => r.Status == "已标").ThenBy(r => r.Status == "用错" ? 0 : 1).ThenBy(r => r.Category).ThenBy(r => r.Mark, StringComparer.Ordinal).ToList();
     }
 

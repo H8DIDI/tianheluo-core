@@ -6,7 +6,7 @@ using KaifaTools.TagCheck;
 
 namespace KaifaTools.TagCheck;
 
-public enum TagRequestKind { Jump, Recheck }
+public enum TagRequestKind { Jump, Recheck, Arrange }
 
 public sealed record TagRequest(TagRequestKind Kind, long Id = 0);
 
@@ -44,7 +44,7 @@ public sealed class TagCheckForm : Form
         var top = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(8, 6, 8, 2) };
         top.Controls.Add(new Label { AutoSize = true, Text = "显示：", Padding = new Padding(0, 6, 0, 0) });
         _filter.DropDownStyle = ComboBoxStyle.DropDownList;
-        _filter.Items.AddRange(new object[] { "需处理（漏标+用错）", "只看漏标", "只看用错", "全部", "只看已标" });
+        _filter.Items.AddRange(new object[] { "需处理（漏标/用错/重叠）", "只看漏标", "只看用错", "只看重叠", "全部", "只看已标" });
         _filter.SelectedIndex = 0;
         _filter.Width = 170;
         _filter.SelectedIndexChanged += (_, _) => RefreshShown();
@@ -97,6 +97,7 @@ public sealed class TagCheckForm : Form
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 8) };
         buttons.Controls.Add(Btn("定位到选中的构件", () => Jump()));
         buttons.Controls.Add(Btn("重新检查", () => Requested?.Invoke(new TagRequest(TagRequestKind.Recheck))));
+        buttons.Controls.Add(Btn("整理标注位置…", ArrangeWithConfirm));
         buttons.Controls.Add(Btn("打开标准文件", OpenStandard));
         buttons.Controls.Add(Btn("导出 CSV", ExportCsv));
         buttons.Controls.Add(Btn("关闭", Close));
@@ -127,6 +128,7 @@ public sealed class TagCheckForm : Form
         {
             "只看漏标" => q.Where(r => r.Status == "漏标"),
             "只看用错" => q.Where(r => r.Status == "用错"),
+            "只看重叠" => q.Where(r => r.Status == "重叠"),
             "只看已标" => q.Where(r => r.Status == "已标"),
             "全部" => q,
             _ => q.Where(r => r.Status != "已标"),
@@ -148,6 +150,7 @@ public sealed class TagCheckForm : Form
             {
                 "漏标" => Color.FromArgb(255, 235, 230),
                 "用错" => Color.FromArgb(255, 243, 205),
+                "重叠" => Color.FromArgb(235, 240, 255),
                 _ => Color.White,
             };
         }
@@ -157,6 +160,14 @@ public sealed class TagCheckForm : Form
     {
         if (_grid.CurrentRow?.DataBoundItem is not TagRow row) { MessageBox.Show(this, "先在表格里点一个构件。", "标注检查"); return; }
         Requested?.Invoke(new TagRequest(TagRequestKind.Jump, row.ElementId));
+    }
+
+    private void ArrangeWithConfirm()
+    {
+        string text = "将把本视图里的单构件标注移到构件旁边（保留引线），并尽量避开重叠。\n"
+            + "这会修改标注位置，可以用 Ctrl+Z 一次撤销。\n\n继续吗？";
+        var r = MessageBox.Show(this, text, "整理标注位置", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (r == DialogResult.Yes) Requested?.Invoke(new TagRequest(TagRequestKind.Arrange));
     }
 
     private void OpenStandard()

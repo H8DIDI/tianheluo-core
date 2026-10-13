@@ -15,7 +15,7 @@
 | [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`schedule-excel`](schedule-excel/) | 明细表Excel互导 | 0.1.0 | C#（源码在 `plugins/`） | didi | 原创 |
 | [`sheet-manager`](sheet-manager/) | 图纸管理 | 0.1.0 | Python | lewismconte (Sendit) | MIT |
-| [`tag-check`](tag-check/) | 标注检查 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`tag-check`](tag-check/) | 标注检查 | 0.1.2 | C#（源码在 `plugins/`） | didi | MIT |
 | [`view-manager`](view-manager/) | 视图管理 | 0.1.0 | Python | lewismconte (Sendit) | MIT |
 | [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.1.0 | Python | didi | MIT |
 | [`well-clear-marks`](well-clear-marks/) | 一键清除井标记 | 0.1.0 | Python | didi | MIT |
