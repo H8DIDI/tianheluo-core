@@ -21,7 +21,7 @@ from pyrevit import revit, DB, forms, script
 from System.Collections.ObjectModel import ObservableCollection
 from System.Collections.Generic import List
 
-from sendit import theme, dialogs, views
+from sendit import theme, dialogs, views, bulk
 from sendit.bindable import Notifiable
 
 doc    = revit.doc
@@ -80,7 +80,7 @@ class TemplateRow(Notifiable):
 
     def is_dirty(self):
         return (self._name != views._safe_name(self.template)
-                or self._scale != views.scale_of(self.template))
+                or _text_differs(self._scale, views.scale_of(self.template)))
 
     @property
     def Selected(self):
@@ -111,28 +111,78 @@ class TemplateRow(Notifiable):
 # Shared rename helper (two-pass temp names avoid mid-batch clashes)
 # ---------------------------------------------------------------------------
 def apply_renames(rows, label):
-    """rows: objects with .Name (staged) and .<elem>.  Returns error list."""
+    """Write the staged names of `rows` (objects with .Name, .is_dirty() and
+    .view or .template) to Revit.
+
+    Pass 1 gives every changed element a temp name and pass 2 its real name,
+    so names can swap without clashing. If pass 2 is refused, the element is
+    put back to its original name so no temp name is left in the model.
+    Returns one message per name that was NOT written (empty list = all ok)."""
     changes = [r for r in rows if r.is_dirty()]
     if not changes:
         return []
     errors = []
+    originals, moved = [], []
     with revit.Transaction("View Manager: " + label):
         for i, r in enumerate(changes):
+            originals.append(views._safe_name(_elem_of(r)))
             try:
                 _set_elem_name(r, u"~SENDIT_TMP~{0}".format(i))
+                moved.append(True)
             except Exception:
-                pass
-        for r in changes:
+                moved.append(False)
+        for i, r in enumerate(changes):
             try:
                 _set_elem_name(r, r.Name)
             except Exception as ex:
-                errors.append(u"'{0}': {1}".format(r.Name, ex))
+                errors.append(_rename_error(originals[i], r.Name, ex))
+                if moved[i]:
+                    try:
+                        _set_elem_name(r, originals[i])
+                    except Exception:
+                        errors.append(u"'{0}': could not be put back, so it may "
+                                      u"still show a ~SENDIT_TMP~ name in Revit."
+                                      .format(originals[i]))
     return errors
 
 
+def _elem_of(row):
+    return getattr(row, "view", None) or getattr(row, "template", None)
+
+
 def _set_elem_name(row, name):
-    elem = getattr(row, "view", None) or getattr(row, "template", None)
-    elem.Name = name
+    _elem_of(row).Name = name
+
+
+def _rename_error(old, new, ex):
+    if not u"{0}".format(new).strip():
+        why = u"the new name is empty"
+    else:
+        why = (u"Revit refused the name (it may already be used by another "
+               u"view, or contain a character Revit does not allow)")
+    return u"'{0}' -> '{1}': not renamed, {2}.\n      Revit said: {3}".format(
+        old, new, why, ex)
+
+
+def _text_differs(staged, current):
+    """True when a staged grid value (typed text) differs from the model value."""
+    return u"{0}".format(staged).strip() != u"{0}".format(current).strip()
+
+
+def _list_lines(items, limit=8):
+    """The first `limit` items, one per line, plus an 'and N more' tail."""
+    lines = [u"{0}".format(i) for i in items[:limit]]
+    if len(items) > limit:
+        lines.append(u"... and {0} more".format(len(items) - limit))
+    return u"\n".join(lines)
+
+
+def _commit_grid(grid):
+    """Commit a cell that is still being typed in, so its text gets staged."""
+    try:
+        grid.CommitEdit()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -209,11 +259,20 @@ class TemplateEditor(forms.WPFWindow):
         self.t_unused.Click += self.on_tick_unused
         self.t_del.Click += self.on_delete
         self.t_close.Click += lambda s, a: self.Close()
+        self.Closing += self.on_closing
 
-    def reload(self):
+    def reload(self, keep_staged=True):
+        # staged (not yet applied) edits survive a reload unless the caller drops them
+        staged = {}
+        if keep_staged:
+            staged = dict((r.template.Id.Value, (r.Name, r.Scale))
+                          for r in self.rows if r.is_dirty())
         usage = views.template_usage(doc)
         self.rows = [TemplateRow(t, usage) for t in views.collect_templates(doc)]
         for r in self.rows:
+            key = r.template.Id.Value
+            if key in staged:
+                r.Name, r.Scale = staged[key]
             r.add_PropertyChanged(self.on_row_changed)
         coll = ObservableCollection[object]()
         for r in self.rows:
@@ -223,6 +282,16 @@ class TemplateEditor(forms.WPFWindow):
 
     def on_row_changed(self, sender, args):
         self.refresh_status()
+
+    def on_closing(self, sender, args):
+        _commit_grid(self.t_grid)
+        staged = len([r for r in self.rows if r.is_dirty()])
+        if staged and not dialogs.confirm(
+                "Close",
+                u"{0} staged edit(s) have not been applied and will be lost.\n\n"
+                u"Close anyway?".format(staged),
+                owner=self, ok_label="Close", cancel_label="Keep editing"):
+            args.Cancel = True
 
     def refresh_status(self):
         ticked = len([r for r in self.rows if r.Selected])
@@ -243,17 +312,33 @@ class TemplateEditor(forms.WPFWindow):
         return sel
 
     def on_apply(self, sender, args):
+        _commit_grid(self.t_grid)
         errors = apply_renames(self.rows, "rename templates")
+        errors += self._apply_scales()
+        self.reload()   # failed edits stay staged, so they can be fixed and applied again
+        if errors:
+            dialogs.message("Apply edits",
+                            u"{0} edit(s) NOT written - still staged in the grid.\n\n{1}"
+                            .format(len(errors), _list_lines(errors, 10)),
+                            owner=self)
+
+    def _apply_scales(self):
+        errors = []
         with revit.Transaction("View Manager: template scale"):
             for r in self.rows:
-                if r.Scale != views.scale_of(r.template):
-                    try:
-                        r.template.Scale = int(r.Scale)
-                    except Exception as ex:
-                        errors.append(u"'{0}' scale: {1}".format(r.Name, ex))
-        self.reload()
-        if errors:
-            dialogs.message("Apply edits", "\n".join(errors), owner=self)
+                if not _text_differs(r.Scale, views.scale_of(r.template)):
+                    continue
+                try:
+                    value = int(u"{0}".format(r.Scale).strip())
+                except ValueError:
+                    errors.append(u"'{0}': scale '{1}' is not a whole number, e.g. 100."
+                                  .format(r.Name, r.Scale))
+                    continue
+                try:
+                    r.template.Scale = value
+                except Exception as ex:
+                    errors.append(u"'{0}': scale not changed - {1}".format(r.Name, ex))
+        return errors
 
     def on_includes(self, sender, args):
         row = self.selected_single()
@@ -288,7 +373,8 @@ class TemplateEditor(forms.WPFWindow):
                             "{0} now controls {1} parameter(s).".format(
                                 row.Name, len(picked)), owner=self)
         except Exception as ex:
-            dialogs.message("Includes", "Could not update: {0}".format(ex),
+            dialogs.message("Includes",
+                            u"Could not update '{0}':\n{1}".format(row.Name, ex),
                             owner=self)
 
     def on_categories(self, sender, args):
@@ -307,7 +393,7 @@ class TemplateEditor(forms.WPFWindow):
             return
         picked_set = set(picked)
         cats = views.model_categories(doc)
-        errors = 0
+        failed = []
         with revit.Transaction("View Manager: template categories"):
             for name in names:
                 cat = cats.get(name)
@@ -318,27 +404,35 @@ class TemplateEditor(forms.WPFWindow):
                     if t.GetCategoryHidden(cat.Id) != want_hidden:
                         t.SetCategoryHidden(cat.Id, want_hidden)
                 except Exception:
-                    errors += 1
-        dialogs.message("Categories",
-                        "Updated visibility for '{0}'.{1}".format(
-                            row.Name,
-                            "" if not errors else
-                            "\n{0} category(ies) could not be changed.".format(errors)),
-                        owner=self)
+                    failed.append(name)
+        msg = u"Updated visibility for '{0}'.".format(row.Name)
+        if failed:
+            msg += (u"\n\n{0} category(ies) NOT changed:\n{1}"
+                    .format(len(failed), _list_lines(failed, 10)))
+        dialogs.message("Categories", msg, owner=self)
 
     def on_export(self, sender, args):
-        targets = [r.template for r in self.checked()] or [r.template for r in self.rows]
+        ticked = self.checked()
+        targets = [r.template for r in ticked] or [r.template for r in self.rows]
         if not targets:
             dialogs.message("Export", "No templates to export.", owner=self)
             return
         path = forms.save_file(file_ext="json")
         if not path:
             return
-        payload = views.export_templates(doc, targets)
-        views.write_json(path, payload)
-        dialogs.message("Export",
-                        "Exported {0} template(s) to:\n{1}".format(
-                            len(targets), path), owner=self)
+        try:
+            payload = views.export_templates(doc, targets)
+            views.write_json(path, payload)
+        except Exception as ex:
+            dialogs.message("Export",
+                            u"Could not write the file:\n{0}".format(ex), owner=self)
+            return
+        if ticked:
+            head = u"Exported {0} ticked template(s) to:".format(len(targets))
+        else:
+            head = (u"No templates were ticked, so all {0} template(s) were "
+                    u"exported to:".format(len(targets)))
+        dialogs.message("Export", u"{0}\n{1}".format(head, path), owner=self)
 
     def on_import(self, sender, args):
         path = forms.pick_file(file_ext="json")
@@ -355,12 +449,19 @@ class TemplateEditor(forms.WPFWindow):
             dialogs.message("Import", "No Sendit templates found in that file.",
                             owner=self)
             return
+        staged = len([r for r in self.rows if r.is_dirty()])
+        if staged and not dialogs.confirm(
+                "Import",
+                u"{0} staged edit(s) in the grid will be dropped by this import.\n\n"
+                u"Continue?".format(staged),
+                owner=self, ok_label="Import"):
+            return
 
         by_name = dict((views._safe_name(r.template), r.template) for r in self.rows)
         target_index = self._build_param_index()
         target_cat_names = set(views.model_categories(doc).keys())
 
-        reports, applied, skipped = [], 0, []
+        reports, applied, skipped, problems = [], 0, [], []
         with revit.Transaction("View Manager: import templates"):
             for spec in incoming:
                 name = spec.get("name", "")
@@ -372,15 +473,19 @@ class TemplateEditor(forms.WPFWindow):
                     spec.get("controlled", []), target_index)
                 appliable, missing = views.match_categories(
                     spec.get("categories", {}), target_cat_names)
-                self._apply_to_template(target, spec, matched, appliable)
+                for problem in self._apply_to_template(target, spec, matched, appliable):
+                    problems.append(u"'{0}': {1}".format(name, problem))
                 applied += 1
                 reports.append(views.merge_report(
                     name, matched, unmatched, appliable, missing))
-        self.reload()
+        self.reload(keep_staged=False)   # the import wrote the model values
 
         msg = "Applied {0} template(s).".format(applied)
         if reports:
             msg += "\n\n" + "\n".join(reports)
+        if problems:
+            msg += (u"\n\nSome settings could NOT be applied ({0}):\n{1}"
+                    .format(len(problems), _list_lines(problems, 10)))
         if skipped:
             msg += ("\n\nNo matching template in this model (skipped):\n"
                     + ", ".join(skipped)
@@ -403,12 +508,15 @@ class TemplateEditor(forms.WPFWindow):
         return {"builtins": builtins, "by_name": by_name}
 
     def _apply_to_template(self, target, spec, matched_param_ids, categories):
+        """Apply one imported spec to a template. Returns the settings that
+        could not be set (empty list = everything applied)."""
+        problems = []
         # scale
-        try:
-            if spec.get("scale"):
+        if spec.get("scale"):
+            try:
                 target.Scale = int(spec["scale"])
-        except Exception:
-            pass
+            except Exception:
+                problems.append(u"scale '{0}' not set".format(spec["scale"]))
         # controlled-parameter set
         try:
             all_ids = list(target.GetTemplateParameterIds())
@@ -416,10 +524,11 @@ class TemplateEditor(forms.WPFWindow):
             non_controlled = List[DB.ElementId](
                 [eid for eid in all_ids if eid.Value not in keep])
             target.SetNonControlledTemplateParameterIds(non_controlled)
-        except Exception:
-            pass
+        except Exception as ex:
+            problems.append(u"controlled parameters not set: {0}".format(ex))
         # category visibility
         cats = views.model_categories(doc)
+        failed_cats = []
         for cname, hidden in categories.items():
             cat = cats.get(cname)
             if cat is None:
@@ -428,31 +537,46 @@ class TemplateEditor(forms.WPFWindow):
                 if target.GetCategoryHidden(cat.Id) != bool(hidden):
                     target.SetCategoryHidden(cat.Id, bool(hidden))
             except Exception:
-                pass
+                failed_cats.append(cname)
+        if failed_cats:
+            problems.append(u"categories not set: {0}".format(
+                ", ".join(sorted(failed_cats)[:10])))
+        return problems
 
     def on_tick_unused(self, sender, args):
         for r in self.rows:
             r.Selected = (r.Used == 0)
 
     def on_delete(self, sender, args):
+        _commit_grid(self.t_grid)
         rows = self.checked()
         if not rows:
             dialogs.message("Delete", "Tick the templates to delete.", owner=self)
             return
         in_use = [r for r in rows if r.Used > 0]
-        warn = ("\n\n{0} of these are in use; views using them will revert to "
-                "<None>.".format(len(in_use)) if in_use else "")
+        warn = ""
+        if in_use:
+            warn = (u"\n\n{0} of these are in use: {1} view(s) will revert to "
+                    u"<None>.".format(len(in_use), sum(r.Used for r in in_use)))
         if not dialogs.confirm("Delete templates",
                                "Delete {0} template(s)?{1}".format(len(rows), warn),
                                owner=self, ok_label="Delete"):
             return
+        failed, deleted = [], 0
         with revit.Transaction("View Manager: delete templates"):
             for r in rows:
                 try:
                     doc.Delete(r.template.Id)
+                    deleted += 1
                 except Exception as ex:
                     logger.error("delete template %s: %s", r.Name, ex)
+                    failed.append(u"'{0}': {1}".format(r.Name, ex))
         self.reload()
+        if failed:
+            dialogs.message("Delete templates",
+                            u"Deleted {0} of {1} template(s).\n\nNOT deleted:\n{2}"
+                            .format(deleted, len(rows), _list_lines(failed, 10)),
+                            owner=self)
 
 
 # ---------------------------------------------------------------------------
@@ -555,14 +679,43 @@ class ViewManagerWindow(forms.WPFWindow):
         self.unplaced_btn.Click += self.on_tick_unplaced
         self.open_btn.Click += self.on_open
         self.del_btn.Click += self.on_delete
+        self.Closing += self.on_closing
 
     # ---- data ----
     def reload(self):
+        # staged name edits survive a reload; a successful Apply edits clears them
+        staged = dict((r.view.Id.Value, r.Name) for r in self.all_rows if r.is_dirty())
         sheet_map = views.sheet_of_view(doc)
         self.all_rows = [ViewRow(v, sheet_map) for v in views.collect_views(doc)]
         for r in self.all_rows:
+            key = r.view.Id.Value
+            if key in staged:
+                r.Name = staged[key]
             r.add_PropertyChanged(self.on_row_changed)
         self.apply_filter()
+
+    def hidden_in(self, rows):
+        """The given rows that the current search filter is hiding."""
+        shown = self.visible_rows()
+        return [r for r in rows if r not in shown]
+
+    def _scope_note(self, rows):
+        """Extra text for a confirm box when some ticked views are filtered out."""
+        hidden = len(self.hidden_in(rows))
+        if not hidden:
+            return u""
+        return (u"\n\n{0} of these are hidden by the search filter but are "
+                u"included.".format(hidden))
+
+    def on_closing(self, sender, args):
+        _commit_grid(self.views_grid)
+        staged = len(self.staged_rows())
+        if staged and not dialogs.confirm(
+                "Close",
+                u"{0} staged rename(s) have not been applied and will be lost.\n\n"
+                u"Close anyway?".format(staged),
+                owner=self, ok_label="Close", cancel_label="Keep editing"):
+            args.Cancel = True
 
     def apply_filter(self):
         q = (self.search_box.Text or "").lower() if hasattr(self, "search_box") else ""
@@ -604,14 +757,17 @@ class ViewManagerWindow(forms.WPFWindow):
 
     # ---- edits ----
     def on_apply(self, sender, args):
+        _commit_grid(self.views_grid)
         errors = apply_renames(self.all_rows, "rename views")
-        self.reload()
+        self.reload()   # failed names stay staged, so they can be fixed and applied again
         if errors:
             dialogs.message("Apply edits",
-                            "Applied with {0} issue(s):\n\n{1}".format(
-                                len(errors), "\n".join(errors)), owner=self)
+                            u"{0} name(s) NOT written - still staged in the grid. "
+                            u"Fix them and click Apply edits again.\n\n{1}".format(
+                                len(errors), _list_lines(errors, 10)), owner=self)
 
     def on_apply_template(self, sender, args):
+        _commit_grid(self.views_grid)
         rows = self.selected_rows()
         if not rows:
             dialogs.message("Apply template", "Tick some views first.", owner=self)
@@ -631,6 +787,16 @@ class ViewManagerWindow(forms.WPFWindow):
         if choice is None:
             return
         target = labels[choice]
+        if target is None:
+            what = u"Remove the view template from"
+        else:
+            what = u"Apply template '{0}' to".format(views._safe_name(target))
+        # nothing is changed until the user confirms the count
+        if not dialogs.confirm("Apply template",
+                               u"{0} {1} view(s)?{2}".format(
+                                   what, len(rows), self._scope_note(rows)),
+                               owner=self, ok_label="Apply"):
+            return
         tid = target.Id if target is not None else DB.ElementId.InvalidElementId
         ok, fail = 0, []
         with revit.Transaction("View Manager: apply template"):
@@ -639,12 +805,16 @@ class ViewManagerWindow(forms.WPFWindow):
                     r.view.ViewTemplateId = tid
                     ok += 1
                 except Exception as ex:
-                    fail.append(u"{0}: {1}".format(r.Name, ex))
+                    fail.append(u"'{0}': not changed - {1}".format(r.Name, ex))
         self.reload()
-        msg = "Applied to {0} view(s).".format(ok)
+        if target is None:
+            msg = u"Removed the template from {0} view(s).".format(ok)
+        else:
+            msg = u"Applied '{0}' to {1} view(s).".format(
+                views._safe_name(target), ok)
         if fail:
-            msg += "\n\nIncompatible / failed ({0}):\n{1}".format(
-                len(fail), "\n".join(fail[:10]))
+            msg += u"\n\n{0} view(s) NOT changed:\n{1}".format(
+                len(fail), _list_lines(fail, 10))
         dialogs.message("Apply template", msg, owner=self)
 
     def _bulk_field(self, label, getter_setter, value):
@@ -669,7 +839,7 @@ class ViewManagerWindow(forms.WPFWindow):
             msg += ("\n\n{0} skipped - their template controls this value:\n{1}"
                     .format(len(templated), ", ".join(templated[:10])))
         if fail:
-            msg += "\n\nFailed ({0}):\n{1}".format(len(fail), "\n".join(fail[:8]))
+            msg += "\n\n{0} NOT changed:\n{1}".format(len(fail), _list_lines(fail, 8))
         dialogs.message(label, msg, owner=self)
 
     def on_set_scale(self, sender, args):
@@ -726,20 +896,24 @@ class ViewManagerWindow(forms.WPFWindow):
         self._bulk_field("Set discipline", setter, choice)
 
     def on_find_replace(self, sender, args):
+        _commit_grid(self.views_grid)
         rows = self.selected_rows()
         if not rows:
             dialogs.message("Find / Replace", "Tick some views first.", owner=self)
             return
-        vals = dialogs.ask_form(
-            "Find / Replace in {0} view name(s)".format(len(rows)),
-            [{"key": "find", "label": "Find"},
-             {"key": "repl", "label": "Replace with"}],
-            owner=self,
-            message="Staged in the grid - nothing is written until 'Apply edits'.")
-        if not vals or not vals["find"]:
+        vals = bulk.ask_find_replace(rows, "view name(s)", owner=self)
+        if not vals:
             return
-        for r in rows:
-            r.Name = r.Name.replace(vals["find"], vals["repl"])
+        changed = bulk.replace_in_rows(rows, vals["find"], vals["repl"], ["Name"])
+        if changed:
+            dialogs.message("Find / Replace",
+                            u"Staged {0} name change(s) in the grid.\n\n"
+                            u"Nothing is written until you click 'Apply edits'.".format(
+                                changed), owner=self)
+        else:
+            dialogs.message("Find / Replace",
+                            u"No ticked view name contains '{0}'. Nothing was "
+                            u"staged.".format(vals["find"]), owner=self)
 
     def on_templates(self, sender, args):
         TemplateEditor(TEMPLATES_XAML, self).show_dialog()
@@ -759,6 +933,7 @@ class ViewManagerWindow(forms.WPFWindow):
         self.Close()
 
     def on_delete(self, sender, args):
+        _commit_grid(self.views_grid)
         rows = self.selected_rows()
         if not rows:
             dialogs.message("Delete", "Tick some views first.", owner=self)
@@ -766,17 +941,30 @@ class ViewManagerWindow(forms.WPFWindow):
         preview = "\n".join(u"{0}  ({1})".format(r.Name, r.Type) for r in rows[:8])
         if len(rows) > 8:
             preview += "\n... and {0} more".format(len(rows) - 8)
-        if not dialogs.confirm("Delete views",
-                               "Delete {0} view(s)?\n\n{1}".format(len(rows), preview),
-                               owner=self, ok_label="Delete"):
+        text = u"Delete {0} view(s)?\n\n{1}".format(len(rows), preview)
+        on_sheet = len([r for r in rows if r.OnSheet])
+        if on_sheet:
+            text += u"\n\n{0} of these are placed on sheets.".format(on_sheet)
+        text += self._scope_note(rows)
+        if not dialogs.confirm("Delete views", text, owner=self, ok_label="Delete"):
             return
+        deleted, fail = 0, []
         with revit.Transaction("View Manager: delete views"):
             for r in rows:
                 try:
-                    doc.Delete(r.view.Id)
+                    # a view already gone was removed along with another deleted view
+                    if doc.GetElement(r.view.Id) is not None:
+                        doc.Delete(r.view.Id)
+                    deleted += 1
                 except Exception as ex:
                     logger.error("delete view %s: %s", r.Name, ex)
+                    fail.append(u"'{0}' ({1}): not deleted - {2}".format(r.Name, r.Type, ex))
         self.reload()
+        if fail:
+            dialogs.message("Delete views",
+                            u"Deleted {0} of {1} view(s).\n\nNOT deleted:\n{2}".format(
+                                deleted, len(rows), _list_lines(fail, 10)),
+                            owner=self)
 
 
 if not doc:
@@ -789,4 +977,5 @@ if PENDING_OPEN["view"] is not None:
     try:
         uidoc.ActiveView = PENDING_OPEN["view"]
     except Exception as ex:
-        forms.alert("Could not open that view:\n{0}".format(ex), exitscript=False)
+        forms.alert("Could not open that view. Revit said:\n{0}".format(ex),
+                    exitscript=False)

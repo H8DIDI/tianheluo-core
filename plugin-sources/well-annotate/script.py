@@ -3,10 +3,27 @@ __title__ = '一键井大样标注'
 __doc__ = '选中井/图纸 → 勾选要标注的视图 → 按视图内可见构件（不含管道）的外包框生成总尺寸标注（下方标宽、左侧标高）。'
 
 from pyrevit import revit, DB, UI, forms
+import System
 import traceback
 
 doc = revit.doc
 uidoc = revit.uidoc
+
+# ============================================================
+# 可调参数（改这里即可；数值是当前默认值，改后重新运行生效）
+# ============================================================
+
+# 尺寸线离框的间距（英尺，1.0 约 305 mm）：下方总宽线、左侧总高线与井外包框之间的距离
+_DIM_MARGIN = 1.0
+
+# 跨度保险倍数：构件在视图平面上的尺寸超过整个视图框的这个倍数时，判为横穿的长构件并剔除
+_SPAN_RATIO = 2.0
+
+# 严格轴向判据（法线分量阈值，0.995 约等于偏角 5.7°）；越接近 1 越严格，只取严格平行于轴的面
+_AXIAL_TOL = 0.995
+
+# 同位置判重精度（英尺，0.01 约 3 mm）：同一视图内两道尺寸的端点在此精度内相同，视为同一位置，第二道跳过
+_SPOT_TOL_FT = 0.01
 
 # ============================================================
 # 配置
@@ -62,15 +79,6 @@ _PIPE_CATS = [
     DB.BuiltInCategory.OST_StructuralFoundation,
 ]
 
-# 跨度保险：构件在视图平面上的尺寸超过整个视图框这个倍数时判为横穿长构件，剔除
-_SPAN_RATIO = 2.0
-
-# 尺寸线离框的间距（英尺）
-_DIM_MARGIN = 1.0
-
-# 严格轴向判据（法线分量阈值，0.995 约等于偏角 5.7°）
-_AXIAL_TOL = 0.995
-
 
 def _ints(cats):
     out = []
@@ -84,6 +92,32 @@ def _ints(cats):
 
 _EXCLUDE_IDS = _ints(_EXCLUDE_CATS)
 _PIPE_IDS = _ints(_PIPE_CATS)
+
+# 统计用：跳过原因（报告按此顺序列出）与同位置重复计数键
+_SKIP_HIDDEN = '不可见'
+_SKIP_NOBB = '没有包围盒'
+_SKIP_ZERO = '尺寸为零'
+_SKIP_SPAN = '超出视图跨度（长构件）'
+_SKIP_CAT = '注释/管道/结构框架等（按口径不计入）'
+_SKIP_ERR = '读取异常'
+_ST_DUP = '同位置重复尺寸（已跳过）'
+_REPORT_SKIPS = [_SKIP_HIDDEN, _SKIP_NOBB, _SKIP_ZERO, _SKIP_SPAN, _SKIP_CAT, _SKIP_ERR]
+
+
+def _bump(stats, key, n=1):
+    """计数（stats 为 None 时不统计）。"""
+    if stats is not None and n:
+        stats[key] = stats.get(key, 0) + n
+
+
+def _fmt_skips(stats):
+    """把非零的跳过计数整理成报告行。"""
+    txt = ''
+    for key in _REPORT_SKIPS:
+        n = stats.get(key, 0)
+        if n:
+            txt += '    - {}：{} 个\n'.format(key, n)
+    return txt
 
 
 # ============================================================
@@ -199,8 +233,9 @@ def crop_world_range(view):
         return None
 
 
-def collect_target_elems(view):
-    """收集视图内应计入包围盒的可见模型构件（排除注释、CAD 底图、管道类）。"""
+def collect_target_elems(view, stats=None):
+    """收集视图内应计入包围盒的可见模型构件（排除注释、CAD 底图、管道类）。
+    stats 若传入 dict，则按原因累计被跳过的构件数（见 _REPORT_SKIPS）。"""
     out = []
     try:
         col = DB.FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType().ToElements()
@@ -218,27 +253,34 @@ def collect_target_elems(view):
         try:
             cat = e.Category
             if cat is None:
+                _bump(stats, _SKIP_CAT)
                 continue
             cid = cat.Id.Value
             if cid in _EXCLUDE_IDS or cid in _PIPE_IDS:
+                _bump(stats, _SKIP_CAT)
                 continue
             try:
                 if e.IsHidden(view):
+                    _bump(stats, _SKIP_HIDDEN)
                     continue
             except:
                 pass
             bb = e.get_BoundingBox(view)
             if bb is None:
+                _bump(stats, _SKIP_NOBB)
                 continue
             w = abs(bb.Max.X - bb.Min.X)
             h = abs(bb.Max.Z - bb.Min.Z)
             if w <= 0 and h <= 0:
+                _bump(stats, _SKIP_ZERO)
                 continue
             if crop_w > 0 and crop_h > 0:
                 if w > crop_w * _SPAN_RATIO or h > crop_h * _SPAN_RATIO:
+                    _bump(stats, _SKIP_SPAN)
                     continue
             out.append(e)
         except:
+            _bump(stats, _SKIP_ERR)
             continue
     return out
 
@@ -274,10 +316,33 @@ def union_box(view, elems):
 # ============================================================
 
 
-def _try_dim(view, ref_a, ref_b, world_p1, world_p2):
-    """两个面引用之间建一条尺寸。"""
+class _SpotLedger(object):
+    """记录同一视图内已生成尺寸的位置：同位置再次生成时跳过并计数，避免重复标注。"""
+
+    def __init__(self):
+        self.keys = set()
+        self.dup = 0
+
+
+def _spot_key(p1, p2):
+    """两端点按 _SPOT_TOL_FT 取整后的键，与端点先后顺序无关。"""
+    def _q(p):
+        return (int(round(p.X / _SPOT_TOL_FT)), int(round(p.Y / _SPOT_TOL_FT)), int(round(p.Z / _SPOT_TOL_FT)))
+    a = _q(p1)
+    b = _q(p2)
+    return (a, b) if a <= b else (b, a)
+
+
+def _try_dim(view, ref_a, ref_b, world_p1, world_p2, ledger=None):
+    """两个面引用之间建一条尺寸。传入 ledger 时，同位置已有尺寸则跳过并计入 ledger.dup。"""
     if view is None or ref_a is None or ref_b is None:
         return None
+    key = None
+    if ledger is not None:
+        key = _spot_key(world_p1, world_p2)
+        if key in ledger.keys:
+            ledger.dup += 1
+            return None
     try:
         arr = DB.ReferenceArray()
         arr.Append(ref_a)
@@ -285,12 +350,15 @@ def _try_dim(view, ref_a, ref_b, world_p1, world_p2):
         if arr.Size < 2:
             return None
         line = DB.Line.CreateBound(world_p1, world_p2)
-        return view.Document.Create.NewDimension(view, line, arr)
+        d = view.Document.Create.NewDimension(view, line, arr)
+        if d is not None and key is not None:
+            ledger.keys.add(key)
+        return d
     except:
         return None
 
 
-def make_total_dims(view, elems, box):
+def make_total_dims(view, elems, box, ledger=None):
     """按外包框生成总尺寸：下方一道宽度、左侧一道高度。
 
     轴的选择随视图类型走：
@@ -339,7 +407,7 @@ def make_total_dims(view, elems, box):
         else:
             p1 = _wpt(x0 - m, depth, v0 - m)
             p2 = _wpt(x1 + m, depth, v0 - m)
-        if _try_dim(view, west[1]['ref'], east[1]['ref'], p1, p2):
+        if _try_dim(view, west[1]['ref'], east[1]['ref'], p1, p2, ledger):
             made += 1
 
     # ---- 高度（左侧）：竖向最外两侧 ----
@@ -361,7 +429,7 @@ def make_total_dims(view, elems, box):
         else:
             p1 = _wpt(x0 - m, depth, v0 - m)
             p2 = _wpt(x0 - m, depth, v1 + m)
-        if _try_dim(view, lo[1]['ref'], hi[1]['ref'], p1, p2):
+        if _try_dim(view, lo[1]['ref'], hi[1]['ref'], p1, p2, ledger):
             made += 1
 
     return made
@@ -552,8 +620,24 @@ def main():
         if not target_views:
             return
 
-        # ---------- 3. 执行 ----------
-        t = DB.Transaction(doc, "井大样外包尺寸标注")
+        # 同一视图若放在多张图纸上会被重复选中：只处理一次，避免重复计数
+        uniq_views = []
+        uniq_ids = set()
+        for v in target_views:
+            try:
+                vid = v.Id.Value
+            except:
+                vid = None
+            if vid is not None:
+                if vid in uniq_ids:
+                    continue
+                uniq_ids.add(vid)
+            uniq_views.append(v)
+        dup_views = len(target_views) - len(uniq_views)
+        target_views = uniq_views
+
+        # ---------- 3. 执行（整次运行在一个事务内，Ctrl+Z 可整体撤销） ----------
+        t = DB.Transaction(doc, "KAIFA 一键井大样标注")
         fho = t.GetFailureHandlingOptions()
         fho.SetFailuresPreprocessor(_SilentFailures())
         fho.SetClearAfterRollback(True)
@@ -563,13 +647,14 @@ def main():
         purged = 0
         made = 0
         ok_views = 0
+        stats = {}
         notes = []
         try:
             for v in target_views:
                 try:
                     purged += purge_dims(v)
 
-                    elems = collect_target_elems(v)
+                    elems = collect_target_elems(v, stats)
                     if not elems:
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
@@ -579,7 +664,9 @@ def main():
                         notes.append(('{}（无法计算包围盒）'.format(v.Name), 0))
                         continue
 
-                    n = make_total_dims(v, elems, box)
+                    led = _SpotLedger()
+                    n = make_total_dims(v, elems, box, led)
+                    _bump(stats, _ST_DUP, led.dup)
                     made += n
                     if n:
                         ok_views += 1
@@ -588,7 +675,8 @@ def main():
                         notes.append(('{}（未生成尺寸）'.format(v.Name), 0))
                 except Exception as ev:
                     notes.append(('{}（异常：{}）'.format(v.Name, ev), 0))
-            t.Commit()
+            st = t.Commit()
+            committed = (st == DB.TransactionStatus.Committed)
         except Exception as inner:
             if t.HasStarted() and not t.HasEnded():
                 t.RollBack()
@@ -596,11 +684,22 @@ def main():
                         title='一键井大样标注')
             return
 
+        if not committed:
+            forms.alert('标注未能写入模型，本次修改未保存（Revit 事务状态：{}）。'.format(st), title='一键井大样标注')
+            return
+
         # ---------- 4. 报告 ----------
         msg = '外包尺寸标注完成！\n\n'
         msg += '• 处理视图：{} 个（成功 {} 个）\n'.format(len(target_views), ok_views)
         msg += '• 生成尺寸：{} 道\n'.format(made)
         msg += '• 清除旧尺寸：{} 道\n'.format(purged)
+        if dup_views:
+            msg += '• 重复选择的视图（已合并）：{} 个\n'.format(dup_views)
+        if stats.get(_ST_DUP):
+            msg += '• 同位置重复尺寸（已跳过）：{} 道\n'.format(stats[_ST_DUP])
+        skip_txt = _fmt_skips(stats)
+        if skip_txt:
+            msg += '\n跳过的构件（按视图累计）：\n' + skip_txt
         bad = [n for n in notes if n[1] == 0]
         if bad:
             msg += '\n未生成尺寸的视图 {} 个：\n'.format(len(bad))

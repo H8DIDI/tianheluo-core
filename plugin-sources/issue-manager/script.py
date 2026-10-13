@@ -33,7 +33,7 @@ from sendit import theme, dialogs, register
 from sendit.bindable import Notifiable
 from sendit.shell import open_path
 from sendit.sheets import (collect_sheets, get_current_rev, sanitize,
-                             export_pdf, export_dwg)
+                             export_pdf, export_dwg, render_template)
 
 doc    = revit.doc
 logger = script.get_logger()
@@ -43,7 +43,10 @@ SCHEDULE_FIELDS = ["Sheet Number", "Sheet Name", "Current Revision",
                    "Current Revision Date", "Current Revision Description",
                    "Current Revision Issued By", "Current Revision Issued To"]
 TRANSMITTAL_FILENAME = "_issued_documents.csv"
+TRANSMITTAL_HEADER = ["SheetNumber", "SheetName", "Revision", "File", "Formats"]
 DWG_DEFAULT_LABEL = u"« Revit defaults »"
+DEFAULT_TEMPLATE = "{number} - {name} - {rev}"
+MAX_LISTED = 20  # long lists in dialogs are cut here; the full list is logged
 
 
 def list_dwg_setups():
@@ -62,21 +65,150 @@ def list_dwg_setups():
     return setups
 
 
-def map_results(rows, done, fail):
-    """Map per-sheet export results back onto rows.
+# ---------------------------------------------------------------------------
+# Naming and export helpers (shared by the PDF and DWG paths)
+# ---------------------------------------------------------------------------
+def today_str():
+    return DateTime.Now.ToString("yyyy-MM-dd")
 
-    done/fail come from export_pdf/export_dwg in row order; fail entries
-    are '<number>: <error>'. Returns dict[number] = filename or ''.
+
+def err_text(ex):
+    """Exception text as unicode (Revit messages may contain non-ASCII)."""
+    try:
+        return u"{0}".format(ex)
+    except Exception:
+        return u"{0}".format(repr(ex))
+
+
+def issue_folder_name(date_str, issue_name):
+    """Dated issue folder under the archive, e.g. '2026-10-13 - Planning'."""
+    return sanitize(u"{0} - {1}".format(date_str, issue_name))
+
+
+def combined_pdf_name(project, issue_name, date_str):
+    """Single combined PDF, e.g. 'Project - Planning - 2026-10-13'."""
+    return sanitize(u"{0} - {1} - {2}".format(project, issue_name, date_str))
+
+
+def unique(items):
+    out = []
+    for it in items:
+        if it not in out:
+            out.append(it)
+    return out
+
+
+def listed(lines):
+    """First MAX_LISTED lines, indented, with a count for the rest."""
+    out = [u"  " + line for line in lines[:MAX_LISTED]]
+    if len(lines) > MAX_LISTED:
+        out.append(u"  ……另有 {0} 项，完整列表见日志".format(
+            len(lines) - MAX_LISTED))
+    return out
+
+
+def export_per_sheet(exporter, rows, folder, **kwargs):
+    """Run one sheets.py exporter (export_pdf or export_dwg) per row.
+
+    One call per sheet means every file name and every error belongs to
+    exactly one row, so nothing is matched back by position. A sheet that
+    raises is recorded as a failure and the loop carries on.
+
+    Returns:
+        (file_for, done, reasons)
+        file_for[number] = created file name, or u"" if none
+        done             = created file names
+        reasons[number]  = failure line, only for sheets with no file
     """
-    failed = set(f.split(":")[0] for f in fail)
-    mapping, di = {}, 0
+    file_for, done, reasons = {}, [], {}
     for r in rows:
-        if r.Number in failed:
-            mapping[r.Number] = u""
-        elif di < len(done):
-            mapping[r.Number] = done[di]
-            di += 1
-    return mapping
+        try:
+            ok, bad = exporter(doc, [r.sheet], folder, **kwargs)
+        except Exception as ex:
+            ok, bad = [], [u"{0}: {1}".format(r.Number, err_text(ex))]
+        if ok:
+            file_for[r.Number] = ok[0]
+            done.extend(ok)
+        else:
+            file_for[r.Number] = u""
+            reasons[r.Number] = (bad[0] if bad
+                                 else u"{0}: 未返回文件".format(r.Number))
+    return file_for, done, reasons
+
+
+def export_combined_pdf(rows, folder, combined_name):
+    """One combined PDF for all rows. Same return shape as export_per_sheet.
+
+    If the combined file fails, every row gets the same reason.
+    """
+    try:
+        ok, bad = export_pdf(doc, [r.sheet for r in rows], folder,
+                             combine=True, combined_name=combined_name)
+    except Exception as ex:
+        ok, bad = [], [err_text(ex)]
+    if ok:
+        return dict((r.Number, ok[0]) for r in rows), list(ok), {}
+    reason = u"合并 PDF：{0}".format(bad[0] if bad else u"未返回文件")
+    return (dict((r.Number, u"") for r in rows), [],
+            dict((r.Number, reason) for r in rows))
+
+
+def duplicate_file_names(rows, template, extra):
+    """Describe sheets whose rendered file name equals an earlier sheet's.
+
+    Those would overwrite each other in the same issue folder.
+    """
+    seen, dupes = {}, []
+    for r in rows:
+        try:
+            name = render_template(doc, r.sheet, template, extra)
+        except Exception:
+            continue
+        if name in seen:
+            dupes.append(u"{0} 与 {1}：文件名均为 {2}".format(
+                seen[name], r.Number, name))
+        else:
+            seen[name] = r.Number
+    return dupes
+
+
+def append_csv(path, header, rows):
+    """Append rows to a CSV, writing the header first if the file is new.
+
+    Same layout as register.append_rows (utf-8-sig for new files so Excel
+    opens them with the right encoding).
+    """
+    is_new = not os.path.exists(path)
+    with codecs.open(path, "w" if is_new else "a",
+                     "utf-8-sig" if is_new else "utf-8") as f:
+        if is_new:
+            f.write(register.csv_line(header) + u"\r\n")
+        for row in rows:
+            f.write(register.csv_line(row) + u"\r\n")
+
+
+def issue_result_lines(headline, issue_name, issue_folder, combine, do_dwg,
+                       pdf_count, dwg_count, recorded, total, skipped,
+                       failures):
+    """Result dialog text: what was exported, what was skipped, failures last."""
+    lines = [headline, u"",
+             u"签发名称：{0}".format(issue_name),
+             u"保存位置：{0}".format(issue_folder)]
+    exported = (u"合并 PDF {0} 个".format(pdf_count) if combine
+                else u"PDF {0} 个".format(pdf_count))
+    if do_dwg:
+        exported += u"，DWG {0} 个".format(dwg_count)
+    lines.append(u"已导出：{0}".format(exported))
+    lines.append(u"已登记签发记录：{0} / {1} 张".format(recorded, total))
+    if skipped:
+        lines.append(u"")
+        lines.append(u"已跳过、未登记（{0} 张）：".format(len(skipped)))
+        lines.extend(listed(skipped))
+    if failures:
+        lines.append(u"")
+        lines.append(u"失败详情（{0} 项）：".format(len(failures)))
+        lines.extend(listed(failures))
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +302,11 @@ def export_schedule_pdf(schedule, folder):
     """Export the schedule view to PDF. Returns the created filename."""
     opts = DB.PDFExportOptions()
     opts.Combine = True
-    fname = sanitize(u"{0} {1}".format(SCHEDULE_NAME,
-                                       DateTime.Now.ToString("yyyy-MM-dd")))
+    fname = sanitize(u"{0} {1}".format(SCHEDULE_NAME, today_str()))
     opts.FileName = fname
     ids = List[DB.ElementId]([schedule.Id])
     if not doc.Export(folder, ids, opts):
-        raise Exception("Revit PDF export returned False")
+        raise Exception(u"Revit PDF export returned False")
     return fname + ".pdf"
 
 
@@ -208,7 +339,7 @@ class IssueRow(Notifiable):
 
     @LastIssued.setter
     def LastIssued(self, v):
-        self._last_date = v; self._notify("LastIssued")
+        self._last_date = v; self._notify("LastIssued"); self._notify("IssueStatus")
 
     @property
     def LastIssue(self):
@@ -224,7 +355,17 @@ class IssueRow(Notifiable):
 
     @LastRevIssued.setter
     def LastRevIssued(self, v):
-        self._last_rev = v; self._notify("LastRevIssued")
+        self._last_rev = v; self._notify("LastRevIssued"); self._notify("IssueStatus")
+
+    @property
+    def IssueStatus(self):
+        """Grid state: 'Not issued', 'Issued' (the current revision is the
+        one last issued) or 'Rev changed' (revised since the last issue)."""
+        if not self._last_date:
+            return u"Not issued"
+        current = u"{0}".format(self.CurrentRev or u"")
+        issued = u"{0}".format(self._last_rev or u"")
+        return u"Issued" if current == issued else u"Rev changed"
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +423,25 @@ class HistoryWindow(forms.WPFWindow):
             captions.append(cap)
         return captions
 
+    def matrix_rows(self):
+        """Matrix body shared by the grid and the CSV export.
+
+        One list per sheet: [number, name, cell per issue]. A cell is the
+        revision issued, u"✓" if issued without a revision, u"" if not issued.
+        """
+        out = []
+        for skey in self.sheets:
+            sheet_cells = self.cells.get(skey, {})
+            vals = [skey[0], skey[1]]
+            for ikey in self.issues:
+                if ikey in sheet_cells:
+                    rev = sheet_cells[ikey]
+                    vals.append(rev if rev else u"✓")
+                else:
+                    vals.append(u"")
+            out.append(vals)
+        return out
+
     def populate(self):
         dt = DataTable("Issues")
         dt.Columns.Add("Number")
@@ -289,21 +449,13 @@ class HistoryWindow(forms.WPFWindow):
         captions = self.column_captions()
         for cap in captions:
             dt.Columns.Add(cap)
-        for skey in self.sheets:
-            values = [skey[0], skey[1]]
-            sheet_cells = self.cells.get(skey, {})
-            for ikey in self.issues:
-                if ikey in sheet_cells:
-                    rev = sheet_cells[ikey]
-                    values.append(rev if rev else u"✓")
-                else:
-                    values.append(u"")
+        for values in self.matrix_rows():
             row = dt.NewRow()
             for i, v in enumerate(values):
                 row[i] = v
             dt.Rows.Add(row)
         self.hist_grid.ItemsSource = dt.DefaultView
-        self.h_status.Text = "{0} sheet(s) across {1} issue(s)".format(
+        self.h_status.Text = u"共 {0} 张图纸，{1} 次签发".format(
             len(self.sheets), len(self.issues))
 
     def on_export(self, sender, args):
@@ -313,18 +465,10 @@ class HistoryWindow(forms.WPFWindow):
         captions = self.column_captions()
         with codecs.open(path, "w", "utf-8-sig") as f:
             f.write(register.csv_line(["Number", "Name"] + captions) + u"\r\n")
-            for skey in self.sheets:
-                sheet_cells = self.cells.get(skey, {})
-                vals = [skey[0], skey[1]]
-                for ikey in self.issues:
-                    if ikey in sheet_cells:
-                        rev = sheet_cells[ikey]
-                        vals.append(rev if rev else u"✓")
-                    else:
-                        vals.append(u"")
+            for vals in self.matrix_rows():
                 f.write(register.csv_line(vals) + u"\r\n")
-        dialogs.message("Export matrix",
-                        "Saved issue matrix to:\n{0}".format(path), owner=self)
+        dialogs.message(u"导出矩阵",
+                        u"已保存签发矩阵：\n{0}".format(path), owner=self)
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +587,23 @@ XAML = """
         <DataGridTextColumn Header="Number" Binding="{Binding Number}" Width="120" IsReadOnly="True"/>
         <DataGridTextColumn Header="Sheet Name" Binding="{Binding Name}" Width="*" IsReadOnly="True"/>
         <DataGridTextColumn Header="Cur Rev" Binding="{Binding CurrentRev}" Width="66" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Issue status" Binding="{Binding IssueStatus}" Width="100" IsReadOnly="True">
+          <DataGridTextColumn.ElementStyle>
+            <Style TargetType="TextBlock">
+              <Setter Property="Foreground" Value="{DynamicResource FgMuted}"/>
+              <Style.Triggers>
+                <DataTrigger Binding="{Binding IssueStatus}" Value="Issued">
+                  <Setter Property="Foreground" Value="{DynamicResource AccentBg}"/>
+                  <Setter Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IssueStatus}" Value="Rev changed">
+                  <Setter Property="Foreground" Value="{DynamicResource Fg}"/>
+                  <Setter Property="FontWeight" Value="Bold"/>
+                </DataTrigger>
+              </Style.Triggers>
+            </Style>
+          </DataGridTextColumn.ElementStyle>
+        </DataGridTextColumn>
         <DataGridTextColumn Header="Last Issued" Binding="{Binding LastIssued}" Width="96" IsReadOnly="True"/>
         <DataGridTextColumn Header="Last Issue" Binding="{Binding LastIssue}" Width="150" IsReadOnly="True"/>
         <DataGridTextColumn Header="Rev Issued" Binding="{Binding LastRevIssued}" Width="80" IsReadOnly="True"/>
@@ -462,8 +623,7 @@ class IssueManagerWindow(forms.WPFWindow):
 
         self.archive_box.Text = self.cfg.get("archive", "")
         self.issued_to.Text = self.cfg.get("issued_to", "")
-        self.template_box.Text = self.cfg.get(
-            "template", "{number} - {name} - {rev}")
+        self.template_box.Text = self.cfg.get("template", DEFAULT_TEMPLATE)
         self.dwg_check.IsChecked = bool(self.cfg.get("dwg"))
         self.refresh_dwg_button()
 
@@ -522,7 +682,7 @@ class IssueManagerWindow(forms.WPFWindow):
         return [r for r in self.all_rows if r.Selected]
 
     def refresh_status(self):
-        self.status.Text = "{0} sheets   |   {1} shown   |   {2} ticked".format(
+        self.status.Text = u"共 {0} 张图纸   |   显示 {1} 张   |   已勾选 {2} 张".format(
             len(self.all_rows), len(self.visible_rows()),
             len(self.selected_rows()))
 
@@ -537,8 +697,7 @@ class IssueManagerWindow(forms.WPFWindow):
 
     # ---- archive folder ----
     def on_browse(self, sender, args):
-        folder = forms.pick_folder(title="Choose the issue archive folder "
-                                         "for this project")
+        folder = forms.pick_folder(title=u"选择本项目的签发归档文件夹")
         if not folder:
             return
         self.archive_box.Text = folder
@@ -556,8 +715,8 @@ class IssueManagerWindow(forms.WPFWindow):
                 return folder
             except Exception:
                 pass
-        dialogs.message("Archive folder",
-                        "Choose an archive folder first (Browse...).",
+        dialogs.message(u"归档文件夹",
+                        u"请先选择归档文件夹（点击 Browse...）。",
                         owner=self)
         return None
 
@@ -566,8 +725,7 @@ class IssueManagerWindow(forms.WPFWindow):
         if folder and os.path.isdir(folder):
             open_path(folder)
         else:
-            dialogs.message("Archive folder", "No archive folder set yet.",
-                            owner=self)
+            dialogs.message(u"归档文件夹", u"尚未设置归档文件夹。", owner=self)
 
     # ---- DWG export setup ----
     def refresh_dwg_button(self):
@@ -579,11 +737,10 @@ class IssueManagerWindow(forms.WPFWindow):
     def on_pick_dwg_setup(self, sender, args):
         setups = sorted(list_dwg_setups().keys())
         choice = dialogs.pick_item(
-            "DWG export setup", [DWG_DEFAULT_LABEL] + setups, owner=self,
-            message="Saved setups come from Revit's DWG export dialog "
-                    "(File > Export > CAD Formats > Modify Export Setups). "
-                    "'Revit defaults' merges each sheet's views into a "
-                    "single DWG.")
+            u"DWG 导出设置", [DWG_DEFAULT_LABEL] + setups, owner=self,
+            message=u"已保存的设置来自 Revit 的 DWG 导出对话框（File > Export > "
+                    u"CAD Formats > Modify Export Setups）。"
+                    u"「Revit defaults」会把每张图纸的视图合并为一个 DWG。")
         if choice is None:
             return
         self.cfg["dwg_setup"] = "" if choice == DWG_DEFAULT_LABEL else choice
@@ -606,132 +763,167 @@ class IssueManagerWindow(forms.WPFWindow):
     def on_issue(self, sender, args):
         rows = self.selected_rows()
         if not rows:
-            dialogs.message("Issue", "Tick the sheets to issue.", owner=self)
+            dialogs.message(u"签发", u"请先勾选要签发的图纸。", owner=self)
             return
         folder = self.require_archive()
         if not folder:
             return
         issue_name = (self.issue_name.Text or "").strip()
         if not issue_name:
-            dialogs.message("Issue", "Enter an issue name "
-                            "(e.g. 'Planning', 'Tender').", owner=self)
+            dialogs.message(u"签发", u"请填写签发名称，例如 'Planning'、'Tender'。",
+                            owner=self)
             return
         issued_to = (self.issued_to.Text or "").strip()
-        template = (self.template_box.Text or "").strip() or "{number} - {name} - {rev}"
+        template = (self.template_box.Text or "").strip() or DEFAULT_TEMPLATE
         combine = bool(self.mode_combined.IsChecked)
+        do_dwg = bool(self.dwg_check.IsChecked)
+        extra = {"{issue}": issue_name}
 
-        date_str = DateTime.Now.ToString("yyyy-MM-dd")
+        date_str = today_str()
         time_str = DateTime.Now.ToString("HH:mm")
-        issue_folder = os.path.join(
-            folder, sanitize(u"{0} - {1}".format(date_str, issue_name)))
+        issue_folder = os.path.join(folder,
+                                    issue_folder_name(date_str, issue_name))
         if os.path.isdir(issue_folder):
             if not dialogs.confirm(
-                    "Issue",
-                    "An archive folder for this issue already exists:\n{0}\n\n"
-                    "Existing PDFs with the same names will be overwritten "
-                    "and the register will gain new rows.".format(issue_folder),
-                    owner=self, ok_label="Continue"):
+                    u"签发",
+                    u"该签发文件夹已存在：\n{0}\n\n同名文件会被覆盖，"
+                    u"签发记录会追加新行。".format(issue_folder),
+                    owner=self, ok_label=u"继续", cancel_label=u"取消"):
                 return
         else:
             try:
                 os.makedirs(issue_folder)
             except Exception as ex:
-                dialogs.message("Issue", "Could not create folder:\n{0}\n\n{1}"
-                                .format(issue_folder, ex), owner=self)
+                dialogs.message(u"签发", u"无法创建文件夹：\n{0}\n\n{1}"
+                                .format(issue_folder, err_text(ex)), owner=self)
                 return
 
-        do_dwg = bool(self.dwg_check.IsChecked)
-        fmt_desc = "PDFs and DWGs" if do_dwg else "PDFs"
+        # sheets whose file names would overwrite each other in this run
+        warn = u""
+        dupes = [] if combine else duplicate_file_names(rows, template, extra)
+        if dupes:
+            warn = (u"\n\n注意：以下图纸的文件名相同，后导出的会覆盖先导出的：\n"
+                    + u"\n".join(listed(dupes)))
+        fmt_desc = u"PDF 和 DWG" if do_dwg else u"PDF"
         if not dialogs.confirm(
-                "Issue & archive",
-                "Issue {0} sheet(s) as '{1}'?\n\n{2} will be saved to:\n{3}"
-                .format(len(rows), issue_name, fmt_desc, issue_folder),
-                owner=self, ok_label="Issue"):
+                u"签发并归档",
+                u"签发 {0} 张图纸，签发名称 '{1}'？\n\n{2} 将保存到：\n{3}{4}"
+                .format(len(rows), issue_name, fmt_desc, issue_folder, warn),
+                owner=self, ok_label=u"签发", cancel_label=u"取消"):
             return
 
-        sheets = [r.sheet for r in rows]
-        extra = {"{issue}": issue_name}
-
+        # 1. export: PDF (one combined file, or one per sheet), then DWG
         if combine:
-            combined_name = sanitize(u"{0} - {1} - {2}".format(
-                doc.Title, issue_name, date_str))
-            pdf_done, pdf_fail = export_pdf(doc, sheets, issue_folder,
-                                            combine=True,
-                                            combined_name=combined_name)
-            pdf_file_for = dict((r.Number, pdf_done[0] if pdf_done else u"")
-                                for r in rows)
+            pdf_file_for, pdf_done, pdf_reasons = export_combined_pdf(
+                rows, issue_folder,
+                combined_pdf_name(doc.Title, issue_name, date_str))
         else:
-            pdf_done, pdf_fail = export_pdf(doc, sheets, issue_folder,
-                                            template=template,
-                                            extra_tokens=extra)
-            pdf_file_for = map_results(rows, pdf_done, pdf_fail)
-
-        dwg_file_for, dwg_done, dwg_fail = {}, [], []
+            pdf_file_for, pdf_done, pdf_reasons = export_per_sheet(
+                export_pdf, rows, issue_folder,
+                template=template, extra_tokens=extra)
+        dwg_file_for, dwg_done, dwg_reasons = {}, [], {}
         if do_dwg:
-            dwg_done, dwg_fail = export_dwg(doc, sheets, issue_folder,
-                                            template=template,
-                                            extra_tokens=extra,
-                                            options=self.current_dwg_options())
-            dwg_file_for = map_results(rows, dwg_done, dwg_fail)
+            dwg_file_for, dwg_done, dwg_reasons = export_per_sheet(
+                export_dwg, rows, issue_folder, template=template,
+                extra_tokens=extra, options=self.current_dwg_options())
 
-        # register rows + per-issue transmittal (only sheets that exported
-        # in at least one format)
-        reg_rows, trans_rows = [], []
+        # 2. a sheet is recorded only when every requested format exported.
+        #    Any other sheet is skipped and its reason is listed at the end.
+        complete, skipped, failures = [], [], []
         for r in rows:
             pdf_name = pdf_file_for.get(r.Number, u"")
             dwg_name = dwg_file_for.get(r.Number, u"")
-            if not pdf_name and not dwg_name:
-                continue
+            missing = []
+            if not pdf_name:
+                missing.append(u"PDF")
+                failures.append(pdf_reasons.get(
+                    r.Number, u"{0}: 未导出 PDF".format(r.Number)))
+            if do_dwg and not dwg_name:
+                missing.append(u"DWG")
+                failures.append(dwg_reasons.get(
+                    r.Number, u"{0}: 未导出 DWG".format(r.Number)))
+            if missing:
+                skipped.append(u"{0}（缺 {1}）".format(
+                    r.Number, u"、".join(missing)))
+            else:
+                complete.append((r, pdf_name, dwg_name))
+
+        items = []  # (sheet number, register row, transmittal row)
+        for r, pdf_name, dwg_name in complete:
+            rev = get_current_rev(r.sheet)
             formats = u", ".join(
                 fmt for fmt, name in (("PDF", pdf_name), ("DWG", dwg_name))
                 if name)
-            rev = get_current_rev(r.sheet)
-            fname = pdf_name or dwg_name
-            reg_rows.append([date_str, time_str, issue_name, issued_to,
-                             doc.Title, r.Number, r.Name, rev, fname, formats])
-            trans_rows.append([r.Number, r.Name, rev, fname, formats])
+            reg_row = [date_str, time_str, issue_name, issued_to,
+                       doc.Title, r.Number, r.Name, rev, pdf_name, formats]
+            items.append((r.Number, reg_row,
+                          [r.Number, r.Name, rev, pdf_name, formats]))
 
-        if reg_rows:
-            register.append_rows(register.register_path(folder), reg_rows)
-            trans_path = os.path.join(issue_folder, TRANSMITTAL_FILENAME)
-            is_new = not os.path.exists(trans_path)
-            with codecs.open(trans_path, "a" if not is_new else "w",
-                             "utf-8-sig" if is_new else "utf-8") as f:
-                if is_new:
-                    f.write(register.csv_line(
-                        ["SheetNumber", "SheetName", "Revision", "File",
-                         "Formats"]) + u"\r\n")
-                for tr in trans_rows:
-                    f.write(register.csv_line(tr) + u"\r\n")
+        # 3. register: one row per write, so a failure names the sheets that
+        #    were not recorded. Nothing is written when nothing exported.
+        reg_path = register.register_path(folder)
+        recorded, reg_errors = [], []
+        for number, reg_row, _trans in items:
+            try:
+                register.append_rows(reg_path, [reg_row])
+                recorded.append(number)
+            except Exception as ex:
+                reg_errors.append(u"未写入签发记录 {0}：{1}".format(
+                    number, err_text(ex)))
+
+        trans_error = None
+        trans_rows = [trans for number, _reg, trans in items
+                      if number in recorded]
+        if trans_rows:
+            try:
+                append_csv(os.path.join(issue_folder, TRANSMITTAL_FILENAME),
+                           TRANSMITTAL_HEADER, trans_rows)
+            except Exception as ex:
+                trans_error = err_text(ex)
 
         self.cfg["issued_to"] = issued_to
         self.cfg["template"] = template
         self.cfg["dwg"] = do_dwg
         save_config(self.cfg)
-        self.refresh_last_issued()
+        read_errors = []
+        try:
+            self.refresh_last_issued()
+        except Exception as ex:
+            # the grid status may be stale, but the report below must still show
+            read_errors.append(u"签发记录无法读取，状态列可能未更新：{0}".format(
+                err_text(ex)))
 
-        msg = "Issued {0} of {1} sheet(s) to:\n{2}".format(
-            len(reg_rows), len(rows), issue_folder)
-        msg += "\n\nPDF files: {0}".format(len(pdf_done))
-        if do_dwg:
-            msg += "\nDWG files: {0}".format(len(dwg_done))
-        if pdf_fail:
-            msg += "\n\nPDF failures ({0}):\n{1}".format(
-                len(pdf_fail), "\n".join(pdf_fail))
-        if dwg_fail:
-            msg += "\n\nDWG failures ({0}):\n{1}".format(
-                len(dwg_fail), "\n".join(dwg_fail))
-        if dialogs.confirm("Issue & archive", msg + "\n\nOpen the folder?",
-                           owner=self, ok_label="Open folder",
-                           cancel_label="Close"):
+        # 4. report. A partial run is never described as a success.
+        if reg_errors:
+            headline = u"部分图纸未能写入签发记录，请查看下方失败详情后重试。"
+        elif not recorded:
+            headline = u"没有图纸导出成功，签发记录未写入。"
+        elif trans_error:
+            headline = u"签发记录已写入，但签发清单写入失败。"
+        elif skipped:
+            headline = u"部分图纸未导出，已跳过，未登记。"
+        else:
+            headline = u"签发完成，全部图纸已导出并登记。"
+        if trans_error:
+            reg_errors.append(u"签发清单 {0} 写入失败：{1}".format(
+                TRANSMITTAL_FILENAME, trans_error))
+        failures = unique(failures) + reg_errors + read_errors
+        for line in failures:
+            logger.error(u"Issue Manager: %s", line)
+
+        text = u"\n".join(issue_result_lines(
+            headline, issue_name, issue_folder, combine, do_dwg,
+            len(pdf_done), len(dwg_done), len(recorded), len(rows),
+            skipped, failures)) + u"\n\n打开文件夹？"
+        if dialogs.confirm(u"签发结果", text, owner=self,
+                           ok_label=u"打开文件夹", cancel_label=u"关闭"):
             open_path(issue_folder)
 
     # ---- history / register ----
     def on_history(self, sender, args):
         rows = self.register_rows()
         if not rows:
-            dialogs.message("History",
-                            "No issues recorded yet for this archive folder.",
+            dialogs.message(u"签发记录", u"本归档文件夹还没有签发记录。",
                             owner=self)
             return
         HistoryWindow(HISTORY_XAML, rows).show_dialog()
@@ -742,58 +934,56 @@ class IssueManagerWindow(forms.WPFWindow):
         if path and os.path.exists(path):
             open_path(path)
         else:
-            dialogs.message("Register",
-                            "No issue register yet - it is created on the "
-                            "first issue.", owner=self)
+            dialogs.message(u"签发记录",
+                            u"还没有签发记录，首次签发后会自动创建。",
+                            owner=self)
 
     # ---- Revit schedule ----
     def on_update_schedule(self, sender, args):
         try:
             vs, created = ensure_schedule()
         except Exception as ex:
-            dialogs.message("Schedule", "Could not create the schedule:\n{0}"
-                            .format(ex), owner=self)
+            dialogs.message(u"明细表", u"无法创建明细表：\n{0}".format(err_text(ex)),
+                            owner=self)
             return
         dialogs.message(
-            "Schedule",
-            ("Created" if created else "Found") +
-            " schedule '{0}'.\n\nIt lists every sheet with its current "
-            "revision data. Find it in the Project Browser under "
-            "Schedules/Quantities.".format(SCHEDULE_NAME),
+            u"明细表",
+            (u"已创建" if created else u"已找到") +
+            u"明细表 '{0}'。\n\n列出每张图纸及其当前修订信息，"
+            u"可在项目浏览器的 Schedules/Quantities 中找到。".format(SCHEDULE_NAME),
             owner=self)
 
     def on_export_schedule(self, sender, args):
         try:
             vs, created = ensure_schedule()
         except Exception as ex:
-            dialogs.message("Schedule", "Could not create the schedule:\n{0}"
-                            .format(ex), owner=self)
+            dialogs.message(u"明细表", u"无法创建明细表：\n{0}".format(err_text(ex)),
+                            owner=self)
             return
         folder = self.archive_folder()
         if not folder or not os.path.isdir(folder):
-            folder = forms.pick_folder(title="Choose a folder for the "
-                                             "schedule PDF")
+            folder = forms.pick_folder(title=u"选择明细表 PDF 的保存文件夹")
         if not folder:
             return
         try:
             fname = export_schedule_pdf(vs, folder)
         except Exception as ex:
             dialogs.message(
-                "Schedule PDF",
-                "Could not export the schedule to PDF:\n{0}\n\n"
-                "You can still print it from Revit: open '{1}' in the "
-                "Project Browser and use File > Print.".format(ex, SCHEDULE_NAME),
+                u"明细表 PDF",
+                u"无法导出明细表 PDF：\n{0}\n\n"
+                u"您仍可在 Revit 中打开项目浏览器里的 '{1}'，"
+                u"然后使用 File > Print 打印。".format(err_text(ex), SCHEDULE_NAME),
                 owner=self)
             return
-        if dialogs.confirm("Schedule PDF",
-                           "Exported:\n{0}\\{1}\n\nOpen the folder?".format(
+        if dialogs.confirm(u"明细表 PDF",
+                           u"已导出：\n{0}\\{1}\n\n打开文件夹？".format(
                                folder, fname),
-                           owner=self, ok_label="Open folder",
-                           cancel_label="Close"):
+                           owner=self, ok_label=u"打开文件夹",
+                           cancel_label=u"关闭"):
             open_path(folder)
 
 
 if not doc:
-    forms.alert("Open a Revit document first.", exitscript=True)
+    forms.alert(u"请先打开一个 Revit 文档。", exitscript=True)
 
 IssueManagerWindow(XAML).show_dialog()

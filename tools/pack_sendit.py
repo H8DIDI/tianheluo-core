@@ -4,10 +4,12 @@ import json, pathlib
 import detzip
 
 SRC = pathlib.Path(r"C:\Users\PCB\AppData\Roaming\pyRevit\Extensions\Sendit.extension")
+# 仓库里的副本（python-src/sendit）优先：在仓库里改了，就打进插件；没有时才用本机 pyRevit 的原文件。
+REPO = pathlib.Path(__file__).resolve().parent.parent / "python-src" / "sendit"
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 OUT.mkdir(exist_ok=True)
-VERSION = "0.1.0"
-LICENSE = (SRC / "LICENSE").read_text(encoding="utf-8")
+VERSION = "0.2.0"
+LICENSE = ((REPO if (REPO / "LICENSE").exists() else SRC) / "LICENSE").read_text(encoding="utf-8")
 NOTICE = ("本插件基于开源项目 Sendit，作者 lewismconte，MIT 许可。\n"
           "原项目：https://github.com/lewismconte/sendit\n"
           "天河落仅提供运行环境适配，工具本体代码未做功能修改。\n")
@@ -23,7 +25,8 @@ TOOLS = {
 }
 
 for folder, (pid, name, cat, glyph, desc) in TOOLS.items():
-    d = SRC / "Sendit.tab" / "Tools.panel" / f"{folder}.pushbutton"
+    repo_tool = REPO / "tools" / folder
+    d = repo_tool if (repo_tool / "script.py").exists() else SRC / "Sendit.tab" / "Tools.panel" / f"{folder}.pushbutton"
     mf = {"id": pid, "name": name, "version": VERSION, "description": desc, "category": cat, "revit": "2026",
           "hostApi": 1, "type": "python", "script": "script.py", "glyph": glyph,
           "author": "lewismconte (Sendit)", "license": "MIT", "homepage": "https://github.com/lewismconte/sendit"}
@@ -31,7 +34,8 @@ for folder, (pid, name, cat, glyph, desc) in TOOLS.items():
     with detzip.create(pkg) as z:
         detzip.writestr(z, "plugin.json", json.dumps(mf, ensure_ascii=False, indent=2))
         detzip.write(z, d / "script.py", "script.py")
-        for f in sorted((SRC / "lib" / "sendit").glob("*.py")):
+        lib = REPO / "lib" / "sendit" if (REPO / "lib" / "sendit").exists() else SRC / "lib" / "sendit"
+        for f in sorted(lib.glob("*.py")):
             detzip.write(z, f, f"sendit/{f.name}")
         if (d / "icon.png").exists():
             detzip.write(z, d / "icon.png", "icon.png")

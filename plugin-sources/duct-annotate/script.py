@@ -6,29 +6,46 @@ __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 给视图内每根
            '注意：请先跑「一键井大样标注」再跑本工具（它只清排管相关尺寸，不会动井的尺寸）。')
 
 from pyrevit import revit, DB, UI, forms
+import System
 import traceback
 
 doc = revit.doc
 uidoc = revit.uidoc
 
 # ============================================================
-# 配置
+# 可调参数（改这里即可；数值是当前默认值，改后重新运行生效）
 # ============================================================
 
-# 尺寸线与构件/井外包边的间距（英尺）
+# 尺寸线与构件/井外包边的间距（英尺，1.0 约 305 mm）
 _DIM_MARGIN = 1.0
 
-# 裁剪框自动外扩量（英尺）——保证下方/左侧尺寸线及文字在裁剪框内
+# 裁剪框自动外扩量（英尺，1.8 约 550 mm）：保证下方/左侧尺寸线及文字在裁剪框内
 _CROP_PAD = 1.8
 
-# 严格轴向判据（法线分量阈值，0.995 约等于偏角 5.7°）
+# 严格轴向判据（法线分量阈值，0.995 约等于偏角 5.7°）；越接近 1 越严格
 _AXIAL_TOL = 0.995
 
-# 井内壁候选面最小面积（平方英尺，≈2 m2），过滤碎面/倒角面
+# 井内壁候选面最小面积（平方英尺，21.5 约 2 m2），过滤碎面/倒角面
 _AREA_MIN_FT2 = 21.5
 
-# 尺寸类型（找不到则用默认类型）
+# 尺寸类型名：决定尺寸文字样式（名称里的 4mm、1比100 即文字高度与出图比例）；找不到则用默认类型
 _DIM_TYPE_NAME = '井大样 - 4mm(1比100)'
+
+# 净距文字位置相对井内壁的水平偏移（英尺，沿壁面法线方向退开的量），原值 0.33
+_TXT_SIDE_FT = 0.33
+
+# 净距文字位置相对尺寸线的向上偏移（英尺，文字离开尺寸线的高度），原值 0.66
+_TXT_UP_FT = 0.66
+
+# 跨度保险倍数：构件在视图平面上的尺寸超过整个视图框的这个倍数时，判为横穿长构件并剔除
+_SPAN_RATIO = 2.0
+
+# 同位置判重精度（英尺，0.01 约 3 mm）：同一视图内两道尺寸的端点在此精度内相同，视为同一位置，第二道跳过
+_SPOT_TOL_FT = 0.01
+
+# ============================================================
+# 配置
+# ============================================================
 
 # 排管类别：本项目用结构框架族承载排管
 _BANK_CAT = DB.BuiltInCategory.OST_StructuralFraming
@@ -80,9 +97,6 @@ _PIPE_CATS = [
     DB.BuiltInCategory.OST_StructuralFoundation,
 ]
 
-# 跨度保险：构件在视图平面上的尺寸超过整个视图框这个倍数时判为横穿长构件，剔除
-_SPAN_RATIO = 2.0
-
 
 def _ints(cats):
     out = []
@@ -96,6 +110,47 @@ def _ints(cats):
 
 _EXCLUDE_IDS = _ints(_EXCLUDE_CATS)
 _PIPE_IDS = _ints(_PIPE_CATS)
+
+# 统计用：报告按此顺序列出跳过原因；_ST_* 是统计键（不是跳过原因）
+_ST_BANK_OK = '标注成功的排管'
+_ST_DUP = '同位置重复尺寸（已跳过）'
+_SKIP_BANK_DIR = '排管方向与视口水平不一致（未标注）'
+_SKIP_BANK_NOAX = '排管没有严格轴向面（未标注）'
+_SKIP_BANK_ERR = '排管处理异常（未标注）'
+_SKIP_HIDDEN = '不可见'
+_SKIP_NOBB = '没有包围盒'
+_SKIP_ZERO = '尺寸为零'
+_SKIP_SPAN = '超出视图跨度（长构件）'
+_SKIP_CAT = '注释/管道/结构框架等（按口径不计入）'
+_SKIP_ERR = '读取异常'
+_REPORT_SKIPS = [
+    (_SKIP_BANK_DIR, '根'),
+    (_SKIP_BANK_NOAX, '根'),
+    (_SKIP_BANK_ERR, '根'),
+    (_SKIP_HIDDEN, '个'),
+    (_SKIP_NOBB, '个'),
+    (_SKIP_ZERO, '个'),
+    (_SKIP_SPAN, '个'),
+    (_SKIP_CAT, '个'),
+    (_SKIP_ERR, '个'),
+]
+
+
+def _bump(stats, key, n=1):
+    """计数（stats 为 None 时不统计）。"""
+    if stats is not None and n:
+        stats[key] = stats.get(key, 0) + n
+
+
+def _fmt_skips(stats):
+    """把非零的跳过计数整理成报告行。"""
+    txt = ''
+    for key, unit in _REPORT_SKIPS:
+        n = stats.get(key, 0)
+        if n:
+            txt += '    - {}：{} {}\n'.format(key, n, unit)
+    return txt
+
 
 _DIM_TYPE_ID = [None]  # 惰性缓存
 
@@ -218,8 +273,9 @@ def crop_world_range(view):
         return None
 
 
-def collect_target_elems(view):
-    """收集视图内应计入包围盒的可见模型构件（排除注释、CAD 底图、管道类）。"""
+def collect_target_elems(view, stats=None):
+    """收集视图内应计入包围盒的可见模型构件（排除注释、CAD 底图、管道类）。
+    stats 若传入 dict，则按原因累计被跳过的构件数（见 _REPORT_SKIPS）。"""
     out = []
     try:
         col = DB.FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType().ToElements()
@@ -237,27 +293,34 @@ def collect_target_elems(view):
         try:
             cat = e.Category
             if cat is None:
+                _bump(stats, _SKIP_CAT)
                 continue
             cid = cat.Id.Value
             if cid in _EXCLUDE_IDS or cid in _PIPE_IDS:
+                _bump(stats, _SKIP_CAT)
                 continue
             try:
                 if e.IsHidden(view):
+                    _bump(stats, _SKIP_HIDDEN)
                     continue
             except:
                 pass
             bb = e.get_BoundingBox(view)
             if bb is None:
+                _bump(stats, _SKIP_NOBB)
                 continue
             w = abs(bb.Max.X - bb.Min.X)
             h = abs(bb.Max.Z - bb.Min.Z)
             if w <= 0 and h <= 0:
+                _bump(stats, _SKIP_ZERO)
                 continue
             if crop_w > 0 and crop_h > 0:
                 if w > crop_w * _SPAN_RATIO or h > crop_h * _SPAN_RATIO:
+                    _bump(stats, _SKIP_SPAN)
                     continue
             out.append(e)
         except:
+            _bump(stats, _SKIP_ERR)
             continue
     return out
 
@@ -298,8 +361,8 @@ def _overlap(bb, rng):
         return False
 
 
-def _find_banks(rng, h_axis):
-    """视图内与裁剪框相交、且横断面宽度方向与视口水平方向一致的排管。"""
+def _find_banks(rng, h_axis, stats=None):
+    """视图内与裁剪框相交的排管；横断面宽度方向与视口水平方向不一致的不标，计入 stats。"""
     out = []
     try:
         col = DB.FilteredElementCollector(doc).OfCategory(_BANK_CAT).WhereElementIsNotElementType().ToElements()
@@ -314,10 +377,11 @@ def _find_banks(rng, h_axis):
             dy = abs(bb.Max.Y - bb.Min.Y)
             if dx <= 0 and dy <= 0:
                 continue
+            if not _overlap(bb, rng):
+                continue
             width_axis = 'Y' if dx > dy else 'X'
             if width_axis != h_axis:
-                continue
-            if not _overlap(bb, rng):
+                _bump(stats, _SKIP_BANK_DIR)
                 continue
             out.append(e)
         except:
@@ -424,10 +488,33 @@ def _find_dim_type_id():
     return None
 
 
-def _try_dim(view, ref_a, ref_b, world_p1, world_p2):
-    """两个面引用之间建一条尺寸。"""
+class _SpotLedger(object):
+    """记录同一视图内已生成尺寸的位置：同位置再次生成时跳过并计数，避免重复标注。"""
+
+    def __init__(self):
+        self.keys = set()
+        self.dup = 0
+
+
+def _spot_key(p1, p2):
+    """两端点按 _SPOT_TOL_FT 取整后的键，与端点先后顺序无关。"""
+    def _q(p):
+        return (int(round(p.X / _SPOT_TOL_FT)), int(round(p.Y / _SPOT_TOL_FT)), int(round(p.Z / _SPOT_TOL_FT)))
+    a = _q(p1)
+    b = _q(p2)
+    return (a, b) if a <= b else (b, a)
+
+
+def _try_dim(view, ref_a, ref_b, world_p1, world_p2, ledger=None):
+    """两个面引用之间建一条尺寸。传入 ledger 时，同位置已有尺寸则跳过并计入 ledger.dup。"""
     if view is None or ref_a is None or ref_b is None:
         return None
+    key = None
+    if ledger is not None:
+        key = _spot_key(world_p1, world_p2)
+        if key in ledger.keys:
+            ledger.dup += 1
+            return None
     try:
         arr = DB.ReferenceArray()
         arr.Append(ref_a)
@@ -442,6 +529,8 @@ def _try_dim(view, ref_a, ref_b, world_p1, world_p2):
                 d.ChangeTypeId(dt)
         except:
             pass
+        if d is not None and key is not None:
+            ledger.keys.add(key)
         return d
     except:
         return None
@@ -488,8 +577,9 @@ def _purge_bank_dims(view):
     return n
 
 
-def annotate_view(view):
-    """给一个视图内的每根排管生成 7 道尺寸（下链：宽+净距；左链：底净距+高+顶净距；内部净距）。返回 (生成数, 跳过原因)。"""
+def annotate_view(view, stats=None):
+    """给一个视图内的每根排管生成 7 道尺寸（下链：宽+净距；左链：底净距+高+顶净距；内部净距）。返回 (生成数, 跳过原因)。
+    stats 若传入 dict，则累计标注成功的排管数、各类跳过原因与同位置重复数。"""
     made = 0
     try:
         if view.ViewType == DB.ViewType.FloorPlan:
@@ -506,11 +596,11 @@ def annotate_view(view):
     d_axis = 'X' if h_axis == 'Y' else 'Y'
     lsign = 1.0 if ((left.X if h_axis == 'X' else left.Y) >= 0) else -1.0
 
-    banks = _find_banks(rng, h_axis)
+    banks = _find_banks(rng, h_axis, stats)
     if not banks:
         return 0, '视图内无排管（结构框架）'
 
-    elems = collect_target_elems(view)
+    elems = collect_target_elems(view, stats)
     if not elems:
         return 0, '无可用井构件'
     box = union_box(view, elems)
@@ -539,10 +629,17 @@ def annotate_view(view):
                 continue
 
     m = _DIM_MARGIN
+    led = _SpotLedger()
+
+    def _add_dim(ra, rb, p1, p2):
+        return _try_dim(view, ra, rb, p1, p2, led)
+
     for bank in banks:
+        m0 = made
         try:
             bf = _axial_all(bank)
             if not bf['Z'] or not bf[h_axis]:
+                _bump(stats, _SKIP_BANK_NOAX)
                 continue
             b_zlo, fzlo = bf['Z'][0]
             b_zhi, fzhi = bf['Z'][-1]
@@ -550,7 +647,7 @@ def annotate_view(view):
             b_hi, fhi = bf[h_axis][-1]
 
             # ---- 下方标宽（断面宽；尺寸链风格=端部不超出引用） ----
-            d = _try_dim(view, flo['ref'], fhi['ref'],
+            d = _add_dim(flo['ref'], fhi['ref'],
                          _pt(h_axis, b_lo, d_axis, d_mid, z0 - m),
                          _pt(h_axis, b_hi, d_axis, d_mid, z0 - m))
             if d is not None:
@@ -561,7 +658,7 @@ def annotate_view(view):
                 hx = (x1 if h_axis == 'X' else y1) + m
             else:
                 hx = (x0 if h_axis == 'X' else y0) - m
-            d = _try_dim(view, fzlo['ref'], fzhi['ref'],
+            d = _add_dim(fzlo['ref'], fzhi['ref'],
                          _pt(h_axis, hx, d_axis, d_mid, b_zlo),
                          _pt(h_axis, hx, d_axis, d_mid, b_zhi))
             if d is not None:
@@ -595,7 +692,7 @@ def annotate_view(view):
             if lref is not None:
                 s0 = min(bl, lci) - m
                 s1 = max(bl, lci) + m
-                d = _try_dim(view, fl['ref'], lref['ref'],
+                d = _add_dim(fl['ref'], lref['ref'],
                              _pt(h_axis, s0, d_axis, d_mid, z_line),
                              _pt(h_axis, s1, d_axis, d_mid, z_line))
                 if d is not None:
@@ -604,7 +701,7 @@ def annotate_view(view):
                         if abs(bl - lci) < 0.01:
                             nrm = lref['norm']
                             nh = nrm.X if h_axis == 'X' else nrm.Y
-                            d.TextPosition = _pt(h_axis, lci - nh * 0.33, d_axis, d_mid, z_line + 0.66)
+                            d.TextPosition = _pt(h_axis, lci - nh * _TXT_SIDE_FT, d_axis, d_mid, z_line + _TXT_UP_FT)
                     except:
                         pass
 
@@ -629,7 +726,7 @@ def annotate_view(view):
             if rref is not None:
                 s0 = min(br, rci) - m
                 s1 = max(br, rci) + m
-                d = _try_dim(view, fr['ref'], rref['ref'],
+                d = _add_dim(fr['ref'], rref['ref'],
                              _pt(h_axis, s0, d_axis, d_mid, z_line),
                              _pt(h_axis, s1, d_axis, d_mid, z_line))
                 if d is not None:
@@ -638,7 +735,7 @@ def annotate_view(view):
                         if abs(br - rci) < 0.01:
                             nrm = rref['norm']
                             nh = nrm.X if h_axis == 'X' else nrm.Y
-                            d.TextPosition = _pt(h_axis, rci - nh * 0.33, d_axis, d_mid, z_line + 0.66)
+                            d.TextPosition = _pt(h_axis, rci - nh * _TXT_SIDE_FT, d_axis, d_mid, z_line + _TXT_UP_FT)
                     except:
                         pass
 
@@ -646,7 +743,7 @@ def annotate_view(view):
             if rref is not None:
                 t0 = min(br, rci)
                 t1 = max(br, rci)
-                d = _try_dim(view, fr['ref'], rref['ref'],
+                d = _add_dim(fr['ref'], rref['ref'],
                              _pt(h_axis, t0, d_axis, d_mid, z0 - m),
                              _pt(h_axis, t1, d_axis, d_mid, z0 - m))
                 if d is not None:
@@ -667,7 +764,7 @@ def annotate_view(view):
                 except:
                     continue
             if ztref is not None and abs(zt - b_zhi) > 0.005:
-                d = _try_dim(view, fzhi['ref'], ztref['ref'],
+                d = _add_dim(fzhi['ref'], ztref['ref'],
                              _pt(h_axis, hx, d_axis, d_mid, b_zhi),
                              _pt(h_axis, hx, d_axis, d_mid, zt))
                 if d is not None:
@@ -688,14 +785,18 @@ def annotate_view(view):
                 except:
                     continue
             if zbref is not None and abs(b_zlo - zb) > 0.005:
-                d = _try_dim(view, fzlo['ref'], zbref['ref'],
+                d = _add_dim(fzlo['ref'], zbref['ref'],
                              _pt(h_axis, hx, d_axis, d_mid, zb),
                              _pt(h_axis, hx, d_axis, d_mid, b_zlo))
                 if d is not None:
                     made += 1
         except:
+            _bump(stats, _SKIP_BANK_ERR)
             continue
+        if made > m0:
+            _bump(stats, _ST_BANK_OK)
 
+    _bump(stats, _ST_DUP, led.dup)
     if made:
         _ensure_crop(view, box)
     return made, None
@@ -871,8 +972,24 @@ def main():
         if not target_views:
             return
 
-        # ---------- 3. 执行 ----------
-        t = DB.Transaction(doc, "井大样排管尺寸标注")
+        # 同一视图若放在多张图纸上会被重复选中：只处理一次，避免重复计数
+        uniq_views = []
+        uniq_ids = set()
+        for v in target_views:
+            try:
+                vid = v.Id.Value
+            except:
+                vid = None
+            if vid is not None:
+                if vid in uniq_ids:
+                    continue
+                uniq_ids.add(vid)
+            uniq_views.append(v)
+        dup_views = len(target_views) - len(uniq_views)
+        target_views = uniq_views
+
+        # ---------- 3. 执行（整次运行在一个事务内，Ctrl+Z 可整体撤销） ----------
+        t = DB.Transaction(doc, "KAIFA 一键排管标注")
         fho = t.GetFailureHandlingOptions()
         fho.SetFailuresPreprocessor(_SilentFailures())
         fho.SetClearAfterRollback(True)
@@ -883,13 +1000,14 @@ def main():
         made = 0
         ok_views = 0
         no_bank = 0
+        stats = {}
         notes = []
         try:
             for v in target_views:
                 try:
                     purged += _purge_bank_dims(v)
 
-                    n, reason = annotate_view(v)
+                    n, reason = annotate_view(v, stats)
                     made += n
                     if n:
                         ok_views += 1
@@ -899,7 +1017,8 @@ def main():
                         notes.append(('{}（{}）'.format(v.Name, reason or '未生成尺寸'), 0))
                 except Exception as ev:
                     notes.append(('{}（异常：{}）'.format(v.Name, ev), 0))
-            t.Commit()
+            st = t.Commit()
+            committed = (st == DB.TransactionStatus.Committed)
         except Exception as inner:
             if t.HasStarted() and not t.HasEnded():
                 t.RollBack()
@@ -907,13 +1026,25 @@ def main():
                         title='一键排管标注')
             return
 
+        if not committed:
+            forms.alert('标注未能写入模型，本次修改未保存（Revit 事务状态：{}）。'.format(st), title='一键排管标注')
+            return
+
         # ---------- 4. 报告 ----------
         msg = '排管尺寸标注完成！\n\n'
         msg += '• 处理视图：{} 个（成功 {} 个）\n'.format(len(target_views), ok_views)
+        msg += '• 标注排管：{} 根（按视图累计）\n'.format(stats.get(_ST_BANK_OK, 0))
         msg += '• 生成尺寸：{} 道\n'.format(made)
         msg += '• 清除旧排管尺寸：{} 道\n'.format(purged)
         if no_bank:
             msg += '• 跳过（视图内无排管）：{} 个\n'.format(no_bank)
+        if dup_views:
+            msg += '• 重复选择的视图（已合并）：{} 个\n'.format(dup_views)
+        if stats.get(_ST_DUP):
+            msg += '• 同位置重复尺寸（已跳过）：{} 道\n'.format(stats[_ST_DUP])
+        skip_txt = _fmt_skips(stats)
+        if skip_txt:
+            msg += '\n跳过的构件（按视图累计）：\n' + skip_txt
         bad = [n for n in notes if n[1] == 0]
         if bad:
             msg += '\n未生成尺寸的视图 {} 个：\n'.format(len(bad))

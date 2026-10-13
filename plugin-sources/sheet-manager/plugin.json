@@ -1,7 +1,7 @@
 {
   "id": "sheet-manager",
   "name": "图纸管理",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "可编辑的图纸表格：批量改图号/图名、查找替换、从 CSV 批量创建、复制、删除、修订管理、图纸集，以及按文件名模板导出 PDF/CSV。",
   "category": "出图打印",
   "revit": "2026",
