@@ -999,16 +999,18 @@ def main():
                         except:
                             template_key = None
 
+                        # 只套同类型的样板：平面视图只用平面样板，剖面只用剖面样板，详图只用详图样板。
+                        # （旧逻辑没找到同类样板时退回第一个样板，把"详图"样板套到平面上，平面就空白了）
                         tid = chosen_templates.get(template_key) if template_key else None
-                        if tid is None and picked_template_ids:
-                            tid = picked_template_ids[0]
                         if tid is None:
                             continue
                         try:
                             v.ViewTemplateId = tid
                         except:
-                            # 该样板确实套不上时，再依次试用户勾选的其他样板
+                            # 该类型的样板套不上时，依次试同类型的其他样板
                             for _alt in picked_template_ids:
+                                if _template_kind(doc.GetElement(_alt).ViewType) != template_key:
+                                    continue
                                 try:
                                     v.ViewTemplateId = _alt
                                     break
@@ -1149,8 +1151,6 @@ def main():
             _tpl_desc = []
             for _tk, _tlabel in [('FloorPlan', '平面'), ('Section', '剖面'), ('Detail', '详图')]:
                 _tid = chosen_templates.get(_tk)
-                if _tid is None and picked_template_ids:
-                    _tid = picked_template_ids[0]   # 与套用逻辑一致的回退
                 if _tid is None:
                     continue
                 try:
