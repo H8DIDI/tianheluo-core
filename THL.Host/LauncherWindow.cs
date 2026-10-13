@@ -78,7 +78,24 @@ public sealed class LauncherWindow : Window
         _tabInstalled.Click += (_, _) => { _storeTab = false; Render(); };
         _tabStore.Click += async (_, _) => { _storeTab = true; Render(); await LoadCatalogAsync(); };
         tabs.Children.Add(_tabInstalled); tabs.Children.Add(_tabStore);
-        DockPanel.SetDock(tabs, Dock.Top); root.Children.Add(tabs);
+        // 官网地址：分享插件时别人能找到你。单击打开，右键复制
+        const string SiteUrl = "https://tianheluo.com";
+        var site = new TextBlock
+        {
+            Text = "官网 tianheluo.com", Foreground = Blue, Cursor = System.Windows.Input.Cursors.Hand,
+            Margin = new Thickness(0, 12, 20, 0), VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "单击打开官网；右键复制地址（分享插件时把这个地址发给别人）",
+        };
+        site.MouseLeftButtonUp += (_, _) =>
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(SiteUrl) { UseShellExecute = true }); }
+            catch (Exception ex) { Flash("打开官网失败：" + ex.Message); }
+        };
+        site.MouseRightButtonUp += (_, _) => { Clipboard.SetText(SiteUrl); Flash("已复制官网地址：" + SiteUrl); };
+        var tabRow = new DockPanel();
+        DockPanel.SetDock(site, Dock.Right);
+        tabRow.Children.Add(site); tabRow.Children.Add(tabs);
+        DockPanel.SetDock(tabRow, Dock.Top); root.Children.Add(tabRow);
 
         // 底栏
         var bottom = new Border { Padding = new Thickness(20, 10, 20, 10), BorderBrush = Line, BorderThickness = new Thickness(0, 1, 0, 0) };
