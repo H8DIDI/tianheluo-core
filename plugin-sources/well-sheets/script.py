@@ -80,6 +80,19 @@ def save_rules(rules):
         _json.dump(rules, f, indent=2, ensure_ascii=False)
 
 
+def _log(msg):
+    # write one line to Documents/KaifaTools/井展开图日志.txt (for diagnosing dialog problems)
+    try:
+        import datetime as _dt
+        folder = _os.path.dirname(RULES_PATH)
+        if not _os.path.exists(folder):
+            _os.makedirs(folder)
+        with open(_os.path.join(folder, "井展开图日志.txt"), "a") as f:
+            f.write("[%s] %s\n" % (_dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
 def layout_rects(sample, rules):
     """各视图在图纸上的矩形（图纸mm，平面中心为原点）。预览用，与生成时的几何一致。
     返回 ({名称: (cx, cy, 宽, 高)}, (半宽, 半长, 半高, 剖面框厚) 毫米)。"""
@@ -197,6 +210,12 @@ def rules_preview_dialog(sample):
         panel.Invalidate()
 
     def on_paint(sender, e):
+        try:
+            _paint(e)
+        except Exception as ex:
+            _log("预览绘制出错：" + str(ex))
+
+    def _paint(e):
         g = e.Graphics
         g.SmoothingMode = SmoothingMode.AntiAlias
         rects = state["rects"]
@@ -246,6 +265,7 @@ def rules_preview_dialog(sample):
         r = read_rules()
         save_rules(r)
         result["rules"] = r
+        _log("规则窗口：用户点了保存并生成，规则=" + str(r))
         form.DialogResult = DialogResult.OK
         form.Close()
 
@@ -256,6 +276,8 @@ def rules_preview_dialog(sample):
         recompute()
 
     def on_cancel(sender, args):
+        _log("规则窗口：用户点了取消")
+        form.DialogResult = DialogResult.Cancel
         form.Close()
 
     ok = Button()
@@ -279,8 +301,13 @@ def rules_preview_dialog(sample):
     form.AcceptButton = ok
     form.CancelButton = cancel
 
+    form.TopMost = True
     recompute()
-    form.ShowDialog()
+    _log("规则窗口：打开")
+    answer = form.ShowDialog()
+    _log("规则窗口：关闭，返回 " + str(answer))
+    if answer != DialogResult.OK:
+        return None
     return result["rules"]
 
 
@@ -475,9 +502,16 @@ def main():
             return
 
         # 规则与预览：按选中井的真实尺寸实时看排版效果，保存后用新规则生成
-        R = rules_preview_dialog(valid_elems[0])
-        if R is None:
+        try:
+            R = rules_preview_dialog(valid_elems[0])
+        except Exception as ex:
+            _log("规则窗口异常：" + traceback.format_exc())
+            forms.alert("规则与预览窗口出错，已停止生成：\n" + str(ex), title="一键井展开图")
             return
+        if not R:
+            _log("未生成：规则窗口返回空（取消或关闭）")
+            return
+        _log("开始生成")
         R_CROP = R["crop_margin_mm"] / FT_MM
         R_FACE_OUT = R["face_out_mm"] / FT_MM
         R_FACE_DEPTH = R["face_depth_mm"] / FT_MM
