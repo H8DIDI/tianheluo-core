@@ -37,8 +37,10 @@ form.Shown += (_, _) =>
         t.Stop();
         using var bmp = new Bitmap(form.Width, form.Height);
         form.DrawToBitmap(bmp, new Rectangle(0, 0, form.Width, form.Height));
-        bmp.Save(args.Length > 0 ? args[0] : "review.png", ImageFormat.Png);
-        Console.WriteLine("saved; action=" + form.Action + " writeCount=" + rows.Count(r => r.Write && r.CanWrite));
+        var outPath = args.Length > 0 ? args[0] : "review.png";
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
+        bmp.Save(outPath, ImageFormat.Png);
+        Console.WriteLine("saved; writeCount=" + rows.Count(r => r.Write && r.CanWrite));
         form.Close();
     };
     t.Start();
