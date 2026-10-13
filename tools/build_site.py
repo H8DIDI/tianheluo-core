@@ -24,6 +24,19 @@ try:
 except Exception:
     pass
 
+def brief(s, n=80):
+    """摘要不超过 n 字：优先在句号处断，其次逗号加省略号，避免截成半句。"""
+    s = s.strip()
+    if len(s) <= n:
+        return s
+    cut = s[:n]
+    k = max(cut.rfind(c) for c in "。！？")
+    if k >= n * 0.4:
+        return cut[: k + 1]
+    k = max(cut.rfind(c) for c in "；;，,、")
+    return (cut[:k] if k >= n * 0.4 else cut) + "…"
+
+
 REPO = "https://github.com/H8DIDI/tianheluo-core/tree/main/"
 cs_dirs = {}
 for mf in (root / "plugins").glob("*/plugin.json"):
@@ -41,7 +54,7 @@ for pkg in sorted(dist.glob("*.thlp")):
     date = prev["date"] if prev and prev.get("version") == m["version"] and prev.get("date") else today
     plugins.append({
         "id": m["id"], "name": m["name"], "en": m["id"], "category": m.get("category", ""),
-        "summary": summary[:80], "description": desc, "features": feats,
+        "summary": brief(summary), "description": desc, "features": feats,
         "version": m["version"], "revit": m.get("revit", "2026"),
         "size": f"{pkg.stat().st_size/1024:.0f} KB", "status": "beta",
         "download": f"/api/dl/{m['id']}", "file": f"/dl/{pkg.name}", "sha256": hashlib.sha256(pkg.read_bytes()).hexdigest(), "hostApi": m.get("hostApi", 1), "source": REPO + (f"plugins/{cs_dirs[m['id']]}" if m["id"] in cs_dirs else f"plugin-sources/{m['id']}"), "date": date,

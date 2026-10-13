@@ -145,6 +145,7 @@ def main():
 
     print("== 1/5 构建 ==")
     run([sys.executable, "tools/build_all.py"], quiet=True)
+    run([sys.executable, str(SITE / "tools" / "build_seo.py")], quiet=True)  # 插件详情页、导航页脚、sitemap
     if not a.skip_tests:
         print("== 2/5 单元测试 ==")
         for t in ("tests/StoreTests", "tests/UpdateTests"):

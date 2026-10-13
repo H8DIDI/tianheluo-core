@@ -42,8 +42,13 @@ html = f"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI 开发说明书 — 天河落</title>
+<title>Revit 插件 AI 开发说明书（给 ChatGPT / Claude 读）— 天河落 THL</title>
 <meta name="description" content="天河落平台专门给 AI 阅读的开发说明书：规则、接口、完整示例、常见错误、交付格式。让你的 AI 读完就能开发 Revit 插件。">
+<link rel="canonical" href="https://tianheluo.com/ai">
+<meta property="og:type" content="website"><meta property="og:site_name" content="天河落 Tianheluo">
+<meta property="og:title" content="Revit 插件 AI 开发说明书（给 ChatGPT / Claude 读）— 天河落 THL"><meta property="og:description" content="天河落平台专门给 AI 阅读的开发说明书：规则、接口、完整示例、常见错误、交付格式。让你的 AI 读完就能开发 Revit 插件。">
+<meta property="og:url" content="https://tianheluo.com/ai"><meta property="og:image" content="https://tianheluo.com/og-image.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image"><meta name="robots" content="index,follow,max-image-preview:large">
 <meta name="theme-color" content="#070709">
 <link rel="icon" href="/favicon-production.png">
 <link rel="alternate" type="text/markdown" href="/ai.md" title="Markdown 原文">
