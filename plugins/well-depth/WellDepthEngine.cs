@@ -116,7 +116,7 @@ public sealed class WellResult
     internal List<PipeHit> Hits = new();
 
     public double? LowestPipeMm;     // absolute
-    public double NewBottomMm;       // parameter value (relative to RefMm)
+    public double NewBottomMm;       // new 井底标高 (absolute, = lowest pipe bottom - clearance)
     public double NewDepthMm;
     public WellStatus Status;
     public string Note = "";
@@ -397,8 +397,9 @@ public static class WellDepthEngine
 
         var bottoms = w.Hits.Select(h => h.BottomZ).OrderBy(z => z).ToList();
         w.LowestPipeMm = bottoms[0];
-        // parameters are measured from the same reference as the offset: parameter = absolute - RefMm
-        w.NewBottomMm = Math.Round(bottoms[0] - Rules.ClearanceMm - w.RefMm);
+        // rule: 井底 = 最低接入管底 - 300 (same absolute frame as the pipes and as the values typed by hand)
+        //       井深 = 偏移 - 井底
+        w.NewBottomMm = Math.Round(bottoms[0] - Rules.ClearanceMm);
         w.NewDepthMm = Math.Round(w.OffsetMm - w.NewBottomMm);
 
         bool depthWrong = Math.Abs(w.NewDepthMm - w.CurDepthMm.Value) > Rules.ToleranceMm;

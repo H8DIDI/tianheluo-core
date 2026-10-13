@@ -217,16 +217,16 @@ public sealed class ReviewForm : Form
         _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
         _grid.DataSource = _shown;
         _grid.CellContentClick += (_, e) => { if (e.RowIndex >= 0) _grid.EndEdit(); };
-        _grid.CellValueChanged += (_, _) => UpdateSummary();
+        _grid.CellValueChanged += (_, _) => { ColourRows(); UpdateSummary(); };
         _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) Jump(); };
         _grid.DataBindingComplete += (_, _) => ColourRows();
 
         void Col(string header, string prop, int width, bool readOnly = true, bool isCheck = false)
         {
             if (isCheck)
-                _grid.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = header, DataPropertyName = prop, Width = width });
+                _grid.Columns.Add(new DataGridViewCheckBoxColumn { Name = prop, HeaderText = header, DataPropertyName = prop, Width = width });
             else
-                _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = header, DataPropertyName = prop, Width = width, ReadOnly = readOnly });
+                _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = prop, HeaderText = header, DataPropertyName = prop, Width = width, ReadOnly = readOnly });
         }
         Col("写入", nameof(WellRow.Write), 46, false, true);
         Col("标记", nameof(WellRow.Mark), 62);
@@ -246,6 +246,11 @@ public sealed class ReviewForm : Form
         _grid.Columns[_grid.Columns.Count - 1].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
     }
 
+    private static readonly Color ChangeBack = Color.FromArgb(255, 183, 77);   // orange: a value that will be written
+    private static readonly Color ManualBack = Color.FromArgb(255, 241, 118);   // yellow: typed by hand
+    private static readonly Color ChangeText = Color.FromArgb(120, 53, 0);
+
+    /// <summary>Row tint by status, then highlight every value that will change (and every hand-typed value).</summary>
     private void ColourRows()
     {
         foreach (DataGridViewRow r in _grid.Rows)
@@ -259,8 +264,33 @@ public sealed class ReviewForm : Form
                 WellStatus.Adjust or WellStatus.SyncOnly => Color.FromArgb(232, 245, 255),
                 _ => Color.White,
             };
+
+            bool willWrite = row.Write && row.CanWrite;
+            var newB = row.NewBottom;
+            var newD = row.NewDepth;
+            bool bottomChanges = willWrite && newB is { } nb && (row.W.CurBottomMm is not { } cb || Math.Abs(nb - cb) > 0.5);
+            bool depthChanges = willWrite && newD is { } nd && (row.W.CurDepthMm is not { } cd || Math.Abs(nd - cd) > 0.5);
+
+            Tint(r, nameof(WellRow.NewBottomText), bottomChanges, ChangeBack, true);
+            Tint(r, nameof(WellRow.NewDepthText), depthChanges, ChangeBack, true);
+            Tint(r, nameof(WellRow.ChangeText), depthChanges, ChangeBack, true);
+            Tint(r, nameof(WellRow.NewBottomInput), !string.IsNullOrWhiteSpace(row.NewBottomInput), ManualBack, true);
+            Tint(r, nameof(WellRow.NewDepthInput), !string.IsNullOrWhiteSpace(row.NewDepthInput), ManualBack, true);
         }
     }
+
+    private static void Tint(DataGridViewRow r, string column, bool on, Color back, bool bold)
+    {
+        var style = r.Cells[column].Style;
+        style.BackColor = on ? back : Color.Empty;
+        style.SelectionBackColor = on ? back : Color.Empty;   // still visible when the row is selected
+        style.SelectionForeColor = on ? ChangeText : Color.Empty;
+        style.ForeColor = on ? ChangeText : Color.Empty;
+        style.Font = on && bold ? BoldFont(r) : null;
+    }
+
+    private static Font? _bold;
+    private static Font BoldFont(DataGridViewRow r) => _bold ??= new Font(r.DataGridView!.Font, FontStyle.Bold);
 
     private void RefreshShown()
     {
@@ -289,6 +319,7 @@ public sealed class ReviewForm : Form
         foreach (var r in _all)
             if (r.W.System == sys && r.CanWrite && r.W.Status is WellStatus.Adjust or WellStatus.SyncOnly or WellStatus.Review)
                 r.Write = include;
+        ColourRows();
         _grid.Refresh();
         UpdateSummary();
     }
