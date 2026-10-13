@@ -3,9 +3,12 @@
 import json, pathlib, re, ast
 import detzip
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\Antigravity.tab\工具箱.panel")
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
+# 单独升级过的插件（其余仍用上面的 VERSION）
+VERSION_OVERRIDE = {"well-sheets": "0.2.0"}
 OUT.mkdir(exist_ok=True)
 
 # 文件夹名 -> (id, 分类, 图标上的字)
@@ -43,16 +46,19 @@ EXPERIMENTAL = {"一键井大样标注", "一键排管标注"}
 catalog = []
 for folder, (pid, cat, glyph) in PLUGINS.items():
     d = SRC / f"{folder}.pushbutton"
-    script = d / "script.py"
+    # 仓库里的 python-src/<id>/script.py 优先（可在仓库里直接改规则）；没有就用本机 Antigravity 的原文件
+    repo_script = ROOT / "python-src" / pid / "script.py"
+    script = repo_script if repo_script.exists() else d / "script.py"
     text = script.read_text(encoding="utf-8")
     for old, new in TEXT_PATCHES.get(folder, []):
         if old not in text: print("  [提示] 文字补丁未命中:", folder, old)
         text = text.replace(old, new)
     desc = doc_of(text) or folder
     if folder in EXPERIMENTAL: desc = "【实验功能，仍在优化】" + desc
-    mf = {"id": pid, "name": folder, "version": VERSION, "description": desc, "category": cat,
+    VER = VERSION_OVERRIDE.get(pid, VERSION)
+    mf = {"id": pid, "name": folder, "version": VER, "description": desc, "category": cat,
           "revit": "2026", "hostApi": 1, "type": "python", "script": "script.py", "glyph": glyph}
-    pkg = OUT / f"{pid}_{VERSION}.thlp"
+    pkg = OUT / f"{pid}_{VER}.thlp"
     with detzip.create(pkg) as z:
         detzip.writestr(z, "plugin.json", json.dumps(mf, ensure_ascii=False, indent=2))
         detzip.writestr(z, "script.py", text)          # 除界面文字补丁外，逻辑一字不改
