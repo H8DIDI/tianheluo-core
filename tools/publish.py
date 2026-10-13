@@ -174,7 +174,7 @@ def main():
         if run(["git", "diff", "--cached", "--quiet"], cwd=repo, check=False).returncode == 0:
             print(f"  {name}：没有改动")
             continue
-        run(GIT + ["commit", "-q", "-m", a.message + "\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"], cwd=repo)
+        run(GIT + ["commit", "-q", "-m", a.message + "\n\nCo-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>"], cwd=repo)
         run(["git", "push", "-q", "origin", "HEAD"], cwd=repo)
         print(f"  {name}：已推送")
     print("== 5/5 核对线上文件（SHA256）==")
