@@ -886,7 +886,10 @@ def main():
                                           center.Z + pit_dz + offset)
                         view_plan.CropBox = crop
 
-                        level_elev = doc.GetElement(level_id).Elevation
+                        # 视图范围按标高的“相对项目基点高程”换算（ProjectElevation）。
+                        # 用 Elevation 时，本项目 0.00 标高的 Elevation 是 4390 m，偏移被算成 -4383 m，
+                        # 平面视图范围落在井之外，平面空白。井的几何与 ProjectElevation 同一坐标系。
+                        level_elev = doc.GetElement(level_id).ProjectElevation
                         view_range = view_plan.GetViewRange()
                         # 剖切面置于井顶之上：井整体落在剖切面以下，平面图以俯视投影
                         # 完整显示井身（含顶面轮廓）。原来 Cut 放在井中心高度，Revit

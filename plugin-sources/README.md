@@ -20,4 +20,4 @@
 | [`well-clear-marks`](well-clear-marks/) | 一键清除井标记 | 0.1.0 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.2 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-number`](well-number/) | 一键编号 | 0.1.0 | Python | didi | MIT |
-| [`well-sheets`](well-sheets/) | 一键井展开图 | 0.2.3 | Python | didi | MIT |
+| [`well-sheets`](well-sheets/) | 一键井展开图 | 0.2.4 | Python | didi | MIT |
