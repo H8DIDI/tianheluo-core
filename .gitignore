@@ -17,3 +17,7 @@ secrets/
 
 # 端到端测试素材（本地生成）
 _e2e/
+
+# python bytecode caches
+__pycache__/
+*.pyc

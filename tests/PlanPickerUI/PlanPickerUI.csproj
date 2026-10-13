@@ -8,5 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\plugins\plan-batch\PlanPickerForm.cs" Link="PlanPickerForm.cs" />
+    <Compile Include="..\..\plugins\plan-batch\PlanNaming.cs" Link="PlanNaming.cs" />
+    <Compile Include="..\..\plugins\plan-batch\PickerMemory.cs" Link="PickerMemory.cs" />
   </ItemGroup>
 </Project>

@@ -11,7 +11,7 @@ namespace KaifaTools.Commands;
 
 /// <summary>
 /// 批量生成平面图: pick floor-plan view types on the left and levels on the right,
-/// then create one plan view for every combination. Names are "标高_视图类型"; a name that already exists is skipped.
+/// then create one plan view for every combination. Names follow the naming pattern (default "标高_视图类型"); a name that already exists is skipped.
 /// </summary>
 [Transaction(TransactionMode.Manual)]
 public class BatchPlansCommand : IExternalCommand
@@ -36,18 +36,26 @@ public class BatchPlansCommand : IExternalCommand
         }
 
         // first row = no template; then one row per model template
-        var typeNames = new List<string> { "（不套用样板）" };
+        var typeNames = new List<string> { PlanNaming.NoTemplateLabel };
         typeNames.AddRange(templates.Select(t => t.Name));
-        using var form = new PlanPickerForm(typeNames, levels.Select(l => l.Name).ToList());
+        var levelNames = levels.Select(l => l.Name).ToList();
+
+        // view names must be unique across all views in the model
+        var existingNames = new FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.View)).Cast<Autodesk.Revit.DB.View>()
+            .Select(v => v.Name).ToList();
+        var taken = new HashSet<string>(existingNames, StringComparer.OrdinalIgnoreCase);
+
+        using var form = new PlanPickerForm(typeNames, levelNames, existingNames, PickerMemoryStore.Load());
         if (form.ShowDialog(new RevitOwner()) != System.Windows.Forms.DialogResult.OK) return Result.Cancelled;
+
+        // remember this selection for next time (a file that cannot be written is not an error)
+        PickerMemoryStore.Save(new PickerMemory(
+            form.TypeIndexes.Select(i => typeNames[i]).ToList(),
+            form.LevelIndexes.Select(i => levelNames[i]).ToList(),
+            form.NamePattern));
 
         var chosenTemplates = form.TypeIndexes.Select(i => i == 0 ? null : templates[i - 1]).ToList();
         var chosenLevels = form.LevelIndexes.Select(i => levels[i]).ToList();
-
-        // view names must be unique across all views in the model
-        var taken = new HashSet<string>(
-            new FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.View)).Cast<Autodesk.Revit.DB.View>().Select(v => v.Name),
-            StringComparer.OrdinalIgnoreCase);
 
         int created = 0;
         var skipped = new List<string>();
@@ -58,7 +66,7 @@ public class BatchPlansCommand : IExternalCommand
             foreach (var level in chosenLevels)
             foreach (var template in chosenTemplates)
             {
-                string name = template is null ? $"{level.Name}_平面" : $"{level.Name}_{template.Name}";
+                string name = PlanNaming.Build(form.NamePattern, level.Name, template?.Name);
                 if (taken.Contains(name)) { skipped.Add(name); continue; }
                 try
                 {

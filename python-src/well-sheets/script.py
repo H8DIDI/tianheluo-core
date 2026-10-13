@@ -56,19 +56,31 @@ RULE_LABELS = [
     ("spacing_y_mm", "前后视图间距 (图纸mm)", 0, 2000),
     ("sheet_shift_x_mm", "整组左移 (图纸mm)", -2000, 2000),
 ]
+# 预览里视图的固定顺序（保证重叠提示的顺序稳定）
+VIEW_ORDER = ["平面", "南", "北", "西", "东"]
+
+
+def read_saved_rules():
+    """读取已保存的规则文件（原样返回，不套默认值）。返回 (dict 或 None, 说明文字)。"""
+    if not _os.path.exists(RULES_PATH):
+        return None, "还没有保存过规则，没有可恢复的内容"
+    try:
+        with open(RULES_PATH, "r") as f:
+            data = _json.load(f)
+    except Exception:
+        return None, "保存的规则文件无法读取，未恢复"
+    if not isinstance(data, dict):
+        return None, "保存的规则文件格式不对，未恢复"
+    return data, "已恢复上次保存的规则"
 
 
 def load_rules():
     rules = dict(DEFAULT_RULES)
-    try:
-        if _os.path.exists(RULES_PATH):
-            with open(RULES_PATH, "r") as f:
-                data = _json.load(f)
-            for k in DEFAULT_RULES:
-                if k in data:
-                    rules[k] = data[k]
-    except Exception:
-        rules = dict(DEFAULT_RULES)
+    data, _msg = read_saved_rules()
+    if data is not None:
+        for k in DEFAULT_RULES:
+            if k in data:
+                rules[k] = data[k]
     return rules
 
 
@@ -93,6 +105,50 @@ def _log(msg):
         pass
 
 
+def _short_name(label):
+    # "平面裁剪余量 (mm)" -> "平面裁剪余量"；"视图比例 1:" -> "视图比例"
+    return label.split(" 1:")[0].split(" (")[0].strip()
+
+
+def parse_rules(texts, hide_grids):
+    """把规则窗口里的文字解析成规则（纯函数，便于测试）。
+    texts：{键: 文本框里的字符串}。返回 (规则 dict, 提示文字列表)。
+    - 空白、不是数字、或低于下限（例如负数）：该项改用默认值，并在提示里写明；
+    - 超过上限：取上限；允许负数的项（整组左移）低于下限时取下限。"""
+    out = dict(DEFAULT_RULES)
+    issues = []
+    for key, label, lo, hi in RULE_LABELS:
+        name = _short_name(label)
+        dflt = str(DEFAULT_RULES[key])
+        raw = (texts.get(key) or "").strip()
+        if not raw:
+            issues.append("%s：输入为空，已用默认值 %s" % (name, dflt))
+            continue
+        try:
+            v = float(raw)
+        except ValueError:
+            issues.append("%s：「%s」不是数字，已用默认值 %s" % (name, raw, dflt))
+            continue
+        if v != v or v in (float("inf"), float("-inf")):
+            issues.append("%s：「%s」不是有效数字，已用默认值 %s" % (name, raw, dflt))
+            continue
+        if key == "view_scale":
+            v = int(round(v))
+        if v < lo:
+            if lo >= 0:
+                why = "不能为负数" if v < 0 else "不能小于 %s" % lo
+                issues.append("%s：%s，已用默认值 %s" % (name, why, dflt))
+                continue
+            issues.append("%s：小于 %s，已按 %s 计算" % (name, lo, lo))
+            v = lo
+        elif v > hi:
+            issues.append("%s：大于 %s，已按 %s 计算" % (name, hi, hi))
+            v = hi
+        out[key] = v
+    out["hide_grids_levels"] = bool(hide_grids)
+    return out, issues
+
+
 def layout_rects(sample, rules):
     """各视图在图纸上的矩形（图纸mm，平面中心为原点）。预览用，与生成时的几何一致。
     返回 ({名称: (cx, cy, 宽, 高)}, (半宽, 半长, 半高, 剖面框厚) 毫米)。"""
@@ -114,16 +170,77 @@ def layout_rects(sample, rules):
     return rects, (hx, hy, hz, fd)
 
 
+def overlap_pairs(rects):
+    """互相重叠的视图对，按 VIEW_ORDER 排序：[(名1, 名2), ...]。"""
+    names = [n for n in VIEW_ORDER if n in rects]
+    pairs = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = rects[names[i]], rects[names[j]]
+            if abs(a[0] - b[0]) < (a[2] + b[2]) / 2.0 and abs(a[1] - b[1]) < (a[3] + b[3]) / 2.0:
+                pairs.append((names[i], names[j]))
+    return pairs
+
+
+def pair_hint(a, b):
+    """两个视图重叠时，建议增大哪个间距（按它们相对平面的位置判断）。"""
+    s = set([a, b])
+    if "平面" in s:
+        other = (s - set(["平面"])).pop()
+        return "前后视图间距" if other in ("南", "北") else "左右视图间距"
+    if s <= set(["南", "北"]):
+        return "前后视图间距"
+    if s <= set(["西", "东"]):
+        return "左右视图间距"
+    return "左右或前后视图间距"
+
+
+def section_sketch(hx, hy, fo, fd):
+    """剖面示意的像素坐标（示意，不按比例；真实数字另外写在图上）。整体左上角为 (0, 0)。
+    hx、hy 为井的半宽、半长，fo 为剖切面外移，fd 为剖面框厚（均为模型 mm）。
+    返回 dict：well 井的矩形，box 剖面框矩形，cut_y 剖切面的高度，cut_x0/cut_x1 剖切线两端，
+    d1 为外移尺寸线 (x, 起点y, 终点y)，d2 为框厚尺寸线 (x, 起点y, 终点y)。"""
+    hx = max(float(hx), 1.0)
+    hy = max(float(hy), 1.0)
+    fo = max(float(fo), 0.0)
+    fd = max(float(fd), 0.0)
+    ww = 70.0
+    wh = max(30.0, min(90.0, ww * hy / hx))
+    s = wh / (2.0 * hy)          # 竖向 像素/毫米
+    sx = ww / (2.0 * hx)         # 横向 像素/毫米
+    fo_px = max(12.0, min(40.0, fo * s))
+    fd_px = max(24.0, min(110.0, fd * s))
+    ext = max(6.0, min(30.0, fo * sx))
+    xw = 120.0
+    yw = max(0.0, fd_px - fo_px - wh)
+    cut_y = yw + wh + fo_px
+    box_top = cut_y - fd_px
+    d1x = xw - ext - 8.0
+    d2x = xw + ww + ext + 8.0
+    return {
+        "well": (xw, yw, ww, wh),
+        "box": (xw - ext, box_top, ww + 2.0 * ext, fd_px),
+        "cut_y": cut_y,
+        "cut_x0": xw - ext - 4.0,
+        "cut_x1": xw + ww + ext + 4.0,
+        "d1": (d1x, yw + wh, cut_y),
+        "d2": (d2x, box_top, cut_y),
+    }
+
+
 def rules_preview_dialog(sample):
-    """规则与预览窗口：改参数，右边立刻画出按这些规则排版的图纸效果。
-    保存并返回规则；取消返回 None。"""
+    """规则与预览窗口：改参数，右边立刻画出按这些规则排版的图纸效果；
+    下方是图例与剖面示意（数字为模型毫米）。保存并返回规则；取消返回 None。"""
     import clr
     clr.AddReference("System.Windows.Forms")
     clr.AddReference("System.Drawing")
     from System.Windows.Forms import (Form, Label, TextBox, Button, Panel, CheckBox,
                                       DialogResult, FormBorderStyle, FormStartPosition)
-    from System.Drawing import Size, Point, Font, Color, Pen, SolidBrush, PointF
-    from System.Drawing.Drawing2D import SmoothingMode
+    from System.Drawing import (Size, Point, Font, FontStyle, Color, Pen, SolidBrush,
+                                PointF, RectangleF, StringFormat, StringAlignment)
+    from System.Drawing.Drawing2D import SmoothingMode, DashStyle
+
+    STRIP_H = 170  # 预览面板底部的图例 + 剖面示意区高度（像素）
 
     rules = load_rules()
     form = Form()
@@ -132,7 +249,7 @@ def rules_preview_dialog(sample):
     form.StartPosition = FormStartPosition.CenterScreen
     form.FormBorderStyle = FormBorderStyle.FixedDialog
     form.MaximizeBox = False
-    form.ClientSize = Size(980, 600)
+    form.ClientSize = Size(1060, 640)
 
     boxes = {}
     y = 16
@@ -157,56 +274,82 @@ def rules_preview_dialog(sample):
     form.Controls.Add(chk)
     y += 40
 
+    # 视图比例快选：只改文本框，由文本框的变化统一重算预览
+    qlb = Label()
+    qlb.Text = "快选视图比例："
+    qlb.Location = Point(16, y + 4)
+    qlb.AutoSize = True
+    form.Controls.Add(qlb)
+
+    def make_scale_pick(v):
+        def pick(sender, args):
+            boxes["view_scale"].Text = str(v)
+        return pick
+
+    qx = 120
+    for v in (20, 50, 100):
+        qb = Button()
+        qb.Text = "1:%d" % v
+        qb.Location = Point(qx, y)
+        qb.Size = Size(64, 26)
+        qb.Click += make_scale_pick(v)
+        form.Controls.Add(qb)
+        qx += 70
+
     note = Label()
-    note.Location = Point(16, y)
-    note.Size = Size(310, 170)
+    note.Location = Point(16, 346)
+    note.Size = Size(310, 234)
     note.ForeColor = Color.FromArgb(70, 70, 70)
     form.Controls.Add(note)
 
     panel = Panel()
     panel.Location = Point(340, 16)
-    panel.Size = Size(620, 520)
+    panel.Size = Size(700, 560)
     panel.BackColor = Color.White
     form.Controls.Add(panel)
 
-    state = {"rects": {}, "warn": "", "rules": dict(DEFAULT_RULES)}
+    state = {"rects": {}, "pairs": [], "rules": dict(DEFAULT_RULES),
+             "half": (600.0, 600.0), "notice": "", "busy": False}
 
     def read_rules():
-        out = dict(DEFAULT_RULES)
+        texts = {}
         for key, label, lo, hi in RULE_LABELS:
-            try:
-                v = float(boxes[key].Text.strip())
-                if key == "view_scale":
-                    v = int(round(v))
-                out[key] = max(lo, min(hi, v))
-            except Exception:
-                out[key] = DEFAULT_RULES[key]
-        out["hide_grids_levels"] = bool(chk.Checked)
-        return out
+            texts[key] = boxes[key].Text
+        return parse_rules(texts, chk.Checked)
 
     def recompute():
-        r = read_rules()
+        r, issues = read_rules()
         rects, dims = layout_rects(sample, r)
-        names = list(rects.keys())
-        warn = []
-        for i in range(len(names)):
-            for j in range(i + 1, len(names)):
-                a, b = rects[names[i]], rects[names[j]]
-                if abs(a[0] - b[0]) < (a[2] + b[2]) / 2.0 and abs(a[1] - b[1]) < (a[3] + b[3]) / 2.0:
-                    warn.append(names[i] + " 与 " + names[j] + " 重叠")
-        state["rects"] = rects
-        state["warn"] = "；".join(warn)
-        state["rules"] = r
+        pairs = overlap_pairs(rects)
         hx, hy, hz, fd = dims
-        text = ("预览尺寸取自你选中的井：半宽 %.0f / 半长 %.0f / 半高 %.0f mm\n"
-                "视图比例 1:%d，剖面框厚 %.0f mm\n") % (hx, hy, hz, r["view_scale"], fd)
-        if warn:
-            text += "⚠ " + state["warn"] + "（请加大间距）"
+        state["rects"] = rects
+        state["pairs"] = pairs
+        state["rules"] = r
+        state["half"] = (hx, hy)
+        sc = int(r["view_scale"])
+        lines = []
+        if state["notice"]:
+            lines.append(state["notice"])
+            lines.append("")
+        lines.append("预览尺寸取自你选中的井（模型 mm）：")
+        lines.append("半宽 %.0f / 半长 %.0f / 半高 %.0f" % (hx, hy, hz))
+        lines.append("视图比例 1:%d" % sc)
+        lines.append("剖切面外移 %.0f mm，剖面框厚 %.0f mm" % (r["face_out_mm"], fd))
+        if issues:
+            lines.append("")
+            lines.append("以下输入无效，已自动修正：")
+            for it in issues:
+                lines.append("· " + it)
+        lines.append("")
+        if pairs:
+            lines.append("⚠ 以下视图重叠，请加大间距：")
+            for a, b in pairs:
+                lines.append("· %s 与 %s 重叠，建议增大%s" % (a, b, pair_hint(a, b)))
             note.ForeColor = Color.Firebrick
         else:
-            text += "✓ 各视图没有重叠，可以生成"
-            note.ForeColor = Color.FromArgb(40, 120, 60)
-        note.Text = text
+            lines.append("✓ 各视图没有重叠，可以生成")
+            note.ForeColor = Color.FromArgb(176, 96, 0) if issues else Color.FromArgb(40, 120, 60)
+        note.Text = "\n".join(lines)
         panel.Invalidate()
 
     def on_paint(sender, e):
@@ -215,9 +358,83 @@ def rules_preview_dialog(sample):
         except Exception as ex:
             _log("预览绘制出错：" + str(ex))
 
+    def _dim_v(g, x, ya, yb):
+        # 竖向尺寸线：两端画 45° 短斜线
+        pen = Pen(Color.FromArgb(60, 60, 60), 1.0)
+        g.DrawLine(pen, x, ya, x, yb)
+        for yy in (ya, yb):
+            g.DrawLine(pen, x - 3, yy + 3, x + 3, yy - 3)
+
+    def _draw_legend(g, T):
+        fb = Font("Microsoft YaHei UI", 9.0, FontStyle.Bold)
+        fn = Font("Microsoft YaHei UI", 9.0)
+        ink = SolidBrush(Color.FromArgb(50, 50, 50))
+        sc = int(state["rules"]["view_scale"])
+        g.DrawString("图例", fb, ink, PointF(14, T + 8))
+        yy = T + 28
+        for col, text in ((Color.FromArgb(139, 92, 246), "紫框：平面视图（俯视）"),
+                          (Color.FromArgb(47, 140, 255), "蓝框：南 / 北 / 西 / 东 剖面视图"),
+                          (Color.Firebrick, "红框：与其他视图重叠，需加大间距")):
+            g.DrawRectangle(Pen(col, 2.0), 14, yy + 3, 14, 10)
+            g.DrawString(text, fn, ink, PointF(36, yy))
+            yy += 18
+        for text in ("比例 1:%d：图纸 1 mm = 模型 %d mm" % (sc, sc),
+                     "框的尺寸为图纸 mm（打印到图纸上）",
+                     "右侧示意的数字为模型 mm（实际距离）"):
+            g.DrawString(text, fn, ink, PointF(14, yy))
+            yy += 18
+
+    def _draw_sketch(g, T):
+        if not state["rects"]:
+            return
+        r = state["rules"]
+        hx, hy = state["half"]
+        geo = section_sketch(hx, hy, r["face_out_mm"], r["face_depth_mm"])
+        sx0 = 390.0
+        sy0 = T + 36.0
+        ink = SolidBrush(Color.FromArgb(50, 50, 50))
+        fb = Font("Microsoft YaHei UI", 9.0, FontStyle.Bold)
+        fn = Font("Microsoft YaHei UI", 9.0)
+        g.DrawString("剖面示意（非按比例）", fb, ink, PointF(sx0, T + 8))
+
+        wx, wy, ww, wh = geo["well"]
+        g.FillRectangle(SolidBrush(Color.FromArgb(232, 234, 240)), sx0 + wx, sy0 + wy, ww, wh)
+        g.DrawRectangle(Pen(Color.FromArgb(110, 110, 110), 1.0), sx0 + wx, sy0 + wy, ww, wh)
+        g.DrawString("井", fn, ink, PointF(sx0 + wx + ww / 2.0 - 8, sy0 + wy + wh / 2.0 - 9))
+
+        bx, by, bw, bh = geo["box"]
+        g.FillRectangle(SolidBrush(Color.FromArgb(60, 47, 140, 255)), sx0 + bx, sy0 + by, bw, bh)
+        g.DrawRectangle(Pen(Color.FromArgb(47, 140, 255), 1.0), sx0 + bx, sy0 + by, bw, bh)
+
+        cy = sy0 + geo["cut_y"]
+        cut_pen = Pen(Color.FromArgb(200, 60, 60), 1.5)
+        cut_pen.DashStyle = DashStyle.Dash
+        g.DrawLine(cut_pen, sx0 + geo["cut_x0"], cy, sx0 + geo["cut_x1"], cy)
+
+        d1x, d1a, d1b = geo["d1"]
+        d2x, d2a, d2b = geo["d2"]
+        _dim_v(g, sx0 + d1x, sy0 + d1a, sy0 + d1b)
+        _dim_v(g, sx0 + d2x, sy0 + d2a, sy0 + d2b)
+
+        sf_r = StringFormat()
+        sf_r.Alignment = StringAlignment.Far
+        mid1 = sy0 + (d1a + d1b) / 2.0
+        g.DrawString("剖切面外移\n%.0f mm" % r["face_out_mm"], fn, ink,
+                     RectangleF(sx0, mid1 - 24, d1x - 6, 48), sf_r)
+        mid2 = sy0 + (d2a + d2b) / 2.0
+        g.DrawString("剖面框厚\n%.0f mm" % r["face_depth_mm"], fn, ink,
+                     RectangleF(sx0 + d2x + 6, mid2 - 24, 90, 48))
+
     def _paint(e):
         g = e.Graphics
         g.SmoothingMode = SmoothingMode.AntiAlias
+        W_all = panel.Width
+        draw_h = panel.Height - STRIP_H
+        g.FillRectangle(SolidBrush(Color.FromArgb(246, 247, 250)), 0, draw_h, W_all, STRIP_H)
+        g.DrawLine(Pen(Color.FromArgb(210, 214, 222), 1.0), 0, draw_h, W_all, draw_h)
+        _draw_legend(g, draw_h)
+        _draw_sketch(g, draw_h)
+
         rects = state["rects"]
         if not rects:
             return
@@ -225,16 +442,16 @@ def rules_preview_dialog(sample):
         maxx = max(r[0] + r[2] / 2.0 for r in rects.values())
         miny = min(r[1] - r[3] / 2.0 for r in rects.values())
         maxy = max(r[1] + r[3] / 2.0 for r in rects.values())
-        W = panel.Width - 40.0
-        H = panel.Height - 40.0
+        W = W_all - 40.0
+        H = draw_h - 40.0
         k = min(W / max(maxx - minx, 1.0), H / max(maxy - miny, 1.0))
         ox = 20 + (W - (maxx - minx) * k) / 2.0 - minx * k
         oy = 20 + (H - (maxy - miny) * k) / 2.0 + maxy * k
 
         bad = set()
-        for nm in rects:
-            if "与 " + nm in state["warn"] or nm + " 与" in state["warn"]:
-                bad.add(nm)
+        for a, b in state["pairs"]:
+            bad.add(a)
+            bad.add(b)
         pen_ok = Pen(Color.FromArgb(47, 140, 255), 2.0)
         pen_bad = Pen(Color.Firebrick, 2.0)
         pen_plan = Pen(Color.FromArgb(139, 92, 246), 2.0)
@@ -253,6 +470,9 @@ def rules_preview_dialog(sample):
     panel.Paint += on_paint
 
     def changed(sender, args):
+        if state["busy"]:
+            return
+        state["notice"] = ""
         recompute()
 
     for tb in boxes.values():
@@ -261,18 +481,39 @@ def rules_preview_dialog(sample):
 
     result = {"rules": None}
 
+    def set_values(values, hide):
+        # 程序性改文本框：期间不逐格重算，最后统一重算一次
+        state["busy"] = True
+        try:
+            for key, label, lo, hi in RULE_LABELS:
+                boxes[key].Text = str(values[key])
+            chk.Checked = bool(hide)
+        finally:
+            state["busy"] = False
+
     def on_ok(sender, args):
-        r = read_rules()
+        r, issues = read_rules()
         save_rules(r)
         result["rules"] = r
         _log("规则窗口：用户点了保存并生成，规则=" + str(r))
+        if issues:
+            _log("规则窗口：已自动修正输入：" + "；".join(issues))
         form.DialogResult = DialogResult.OK
         form.Close()
 
     def on_default(sender, args):
-        for key, label, lo, hi in RULE_LABELS:
-            boxes[key].Text = str(DEFAULT_RULES[key])
-        chk.Checked = bool(DEFAULT_RULES["hide_grids_levels"])
+        set_values(DEFAULT_RULES, DEFAULT_RULES["hide_grids_levels"])
+        state["notice"] = "已恢复默认值（尚未保存）"
+        recompute()
+
+    def on_restore(sender, args):
+        saved, msg = read_saved_rules()
+        if saved is not None:
+            vals = {}
+            for key in DEFAULT_RULES:
+                vals[key] = saved.get(key, DEFAULT_RULES[key])
+            set_values(vals, vals["hide_grids_levels"])
+        state["notice"] = msg
         recompute()
 
     def on_cancel(sender, args):
@@ -282,22 +523,28 @@ def rules_preview_dialog(sample):
 
     ok = Button()
     ok.Text = "保存规则并生成"
-    ok.Location = Point(340, 548)
+    ok.Location = Point(340, 592)
     ok.Size = Size(200, 36)
     ok.Click += on_ok
     cancel = Button()
     cancel.Text = "取消"
-    cancel.Location = Point(556, 548)
+    cancel.Location = Point(920, 592)
     cancel.Size = Size(120, 36)
     cancel.Click += on_cancel
     default = Button()
     default.Text = "恢复默认"
-    default.Location = Point(16, 548)
+    default.Location = Point(16, 592)
     default.Size = Size(120, 36)
     default.Click += on_default
+    restore = Button()
+    restore.Text = "恢复上次保存"
+    restore.Location = Point(146, 592)
+    restore.Size = Size(130, 36)
+    restore.Click += on_restore
     form.Controls.Add(ok)
     form.Controls.Add(cancel)
     form.Controls.Add(default)
+    form.Controls.Add(restore)
     form.AcceptButton = ok
     form.CancelButton = cancel
 

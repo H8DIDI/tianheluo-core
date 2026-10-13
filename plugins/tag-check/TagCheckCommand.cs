@@ -74,15 +74,16 @@ internal sealed class TagCheckHandler : IExternalEventHandler
                 uidoc.ShowElements(eid);
                 break;
             case TagRequestKind.Arrange:
+                var layout = TagCheckEngine.LoadStandard(out string? layoutError).Layout;
                 int moved;
                 using (var tx = new Transaction(doc, "KAIFA 整理标注位置"))
                 {
                     tx.Start();
-                    moved = TagLayout.Arrange(doc, doc.ActiveView);
+                    moved = TagLayout.Arrange(doc, doc.ActiveView, layout);
                     tx.Commit();
                 }
                 var after = TagCheckEngine.Check(doc, doc.ActiveView, out string afterSummary);
-                Form.Update(after, afterSummary, null);
+                Form.Update(after, afterSummary, layoutError);
                 TaskDialog.Show("整理标注位置", $"已整理 {moved} 个标注。\n{afterSummary}\n不满意可按 Ctrl+Z 撤销。");
                 break;
             case TagRequestKind.Recheck:
