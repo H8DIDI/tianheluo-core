@@ -82,7 +82,15 @@ public static class DuctSnapEngine
                     // (e.g. the bank runs along a wall). Do not skip silently: list it for a person to check.
                     var inside = wells.FirstOrDefault(w =>
                         pts[k].X >= w.MinX && pts[k].X <= w.MaxX && pts[k].Y >= w.MinY && pts[k].Y <= w.MaxY);
-                    if (inside is not null) picked[k] = (inside, new SnapDecision(SnapKind.Unrelated, 0));
+                    if (inside is not null)
+                    {
+                        // The bank runs inside the wall and leaves the footprint: the excess (end -> footprint edge) is trimmed.
+                        var exit = DuctSnapMath.ExitDistance(pts[k], pts[1 - k], inside.MinX, inside.MaxX, inside.MinY, inside.MaxY);
+                        var dec = exit is { } e && e <= rules.MaxEdgeTrimMm
+                            ? new SnapDecision(SnapKind.TrimToWellEdge, e)
+                            : new SnapDecision(SnapKind.Unrelated, 0);
+                        picked[k] = (inside, dec);
+                    }
                 }
                 anyNear |= picked[k].Well is not null;
             }
@@ -96,7 +104,7 @@ public static class DuctSnapEngine
             {
                 var d = picked[k].Dec;
                 if (picked[k].Well is null) continue;
-                if (d.Kind is SnapKind.Extend or SnapKind.Trim && Math.Abs(d.T) >= rules.ToleranceMm)
+                if (d.Kind is SnapKind.Extend or SnapKind.Trim or SnapKind.TrimToWellEdge && Math.Abs(d.T) >= rules.ToleranceMm)
                 {
                     moved[k] = true;
                     newMm[k] = DuctSnapMath.Move(pts[k], pts[1 - k], d.T);
@@ -379,9 +387,23 @@ public static class DuctSnapEngine
                 (status, action) = ("需人工", "不动");
                 note = "无法识别这口井的内壁（井族几何不规则），未自动处理";
                 break;
+            case SnapKind.TrimToWellEdge:
+                if (willMove)
+                {
+                    status = "可修改";
+                    action = "修剪到井的外缘";
+                    note = $"排管沿井墙走，端点在墙里；修剪掉井内多出的 {d.T:0} mm，端点停在井的外缘";
+                }
+                else
+                {
+                    status = "需人工";
+                    action = "不动";
+                    note = shortNote ?? "移动量低于误差，未改";
+                }
+                break;
             case SnapKind.Unrelated:
                 (status, action) = ("需人工", "不动");
-                note = "端点在井的墙体里，排管线与井内腔不相交（排管沿井壁走），只改长度无法贴上内壁，需人工调整";
+                note = "端点在井的墙体里，排管与井内腔不相交；整段都在井内或多出的长度超过上限，需人工确认";
                 break;
             default:
                 (status, action) = ("需人工", "不动");

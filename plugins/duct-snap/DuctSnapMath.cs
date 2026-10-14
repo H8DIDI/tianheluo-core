@@ -26,6 +26,7 @@ public enum SnapKind
     Fit,           // already on the inner wall, within tolerance: no change
     Extend,        // stops short of the inner wall: extend into the well
     Trim,          // overshoots into the well: trim back to the inner wall on the bank side
+    TrimToWellEdge, // runs inside the well's wall, parallel to it: trim the excess back to the footprint edge
     TrimTooFar,    // would need a trim longer than the limit: end sits in the middle of the well, a person decides
     ExtendTooFar,  // would need an extension longer than the limit: a person decides
     Through,       // the well lies ahead of this end on the bank side: the bank passes through the well
@@ -91,6 +92,26 @@ public static class DuctSnapMath
 
         // Within tolerance of the boundary on both sides.
         return new SnapDecision(SnapKind.Fit, 0);
+    }
+
+    /// <summary>
+    /// Distance from an end, along the bank toward the other end, to where the bank leaves a rectangle (the well's
+    /// footprint). Used when the bank runs inside a wall and never crosses the inner cavity: the part inside the
+    /// footprint is the excess, and it is trimmed back to the footprint edge. Returns null when the end is outside the
+    /// rectangle or the other end is inside it (the bank does not leave the footprint, so there is no edge to trim to).
+    /// </summary>
+    public static double? ExitDistance(Pt2 end, Pt2 other, double minX, double maxX, double minY, double maxY)
+    {
+        bool InBox(Pt2 p) => p.X >= minX && p.X <= maxX && p.Y >= minY && p.Y <= maxY;
+        if (!InBox(end) || InBox(other)) return null;
+        double dx = other.X - end.X, dy = other.Y - end.Y;
+        double len = Math.Sqrt(dx * dx + dy * dy);
+        if (len < 1e-3) return null;
+        double ux = dx / len, uy = dy / len;
+        double t = double.PositiveInfinity;
+        if (Math.Abs(ux) > 1e-9) t = Math.Min(t, ux > 0 ? (maxX - end.X) / ux : (minX - end.X) / ux);
+        if (Math.Abs(uy) > 1e-9) t = Math.Min(t, uy > 0 ? (maxY - end.Y) / uy : (minY - end.Y) / uy);
+        return double.IsPositiveInfinity(t) ? null : Math.Max(0, t);
     }
 
     /// <summary>The end moved by T along the bank direction. Plan position only.</summary>

@@ -12,6 +12,7 @@ public sealed class DuctSnapRules
 {
     public double MaxExtendMm { get; set; } = 1000;      // an end this far (or less) short of the inner wall is extended to it
     public double MaxTrimMm { get; set; } = 600;         // an end this far (or less) inside the well is trimmed back; deeper -> a person decides
+    public double MaxEdgeTrimMm { get; set; } = 2500;    // a bank running inside a well's wall is trimmed back to the well's edge if the excess is this long or less
     public double ToleranceMm { get; set; } = 5;         // within this distance the end already sits on the wall: no change
     public double MinLengthMm { get; set; } = 500;       // a bank shorter than this after the change is not edited
     public double MinFaceAreaM2 { get; set; } = 0.9;     // wall faces smaller than this are ignored
@@ -91,7 +92,7 @@ public sealed class SnapRow
 
     // Display helpers for the grid
     public string End => EndIndex == 0 ? "起点" : "终点";
-    public string Move => Kind is SnapKind.Extend or SnapKind.Trim or SnapKind.ExtendTooFar or SnapKind.TrimTooFar
+    public string Move => Kind is SnapKind.Extend or SnapKind.Trim or SnapKind.TrimToWellEdge or SnapKind.ExtendTooFar or SnapKind.TrimTooFar
         ? Math.Abs(MoveMm).ToString("0", System.Globalization.CultureInfo.InvariantCulture) : "";
     public string StartZ => ZText(StartZBeforeMm, StartZAfterMm);
     public string EndZ => ZText(EndZBeforeMm, EndZAfterMm);
