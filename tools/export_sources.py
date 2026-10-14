@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "plugin-sources"
 TEXT_EXT = {".py", ".json", ".md", ".txt", ".xaml", ".csv", ".xml", ".yaml", ".yml", ""}
 shutil.rmtree(OUT, ignore_errors=True)
-OUT.mkdir()
+OUT.mkdir(exist_ok=True)
 
 rows = []
 for pkg in sorted((ROOT / "dist").glob("*.thlp")):

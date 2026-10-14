@@ -51,7 +51,7 @@ _CHAIN_STEP_FT = mm_to_ft(_CHAIN_STEP_MM)
 
 # 外包总尺寸线与同侧最外一道尺寸链线之间的净距（mm，改这里）：应大于一道尺寸文字的高度，避免文字叠压；
 # 只在该侧有尺寸链时生效，无尺寸链的侧仍用 _DIM_MARGIN
-_TOTAL_GAP_MM = 250.0
+_TOTAL_GAP_MM = 700.0
 _TOTAL_GAP_FT = mm_to_ft(_TOTAL_GAP_MM)
 
 # 井内壁搜索分区（占外包框对应方向长度的比例）：左/右内壁只在外包框左/右各 1/3 内找，上/下内壁只在上/下各 1/3 内找
@@ -794,7 +794,7 @@ def _end_edges(bank, run, m, near):
     if len(cand) < 2:
         return None
     best = min(c[0] for c in cand)
-    near_c = [c for c in cand if c[0] <= best + 0.05]
+    near_c = [c for c in cand if c[0] <= best + 0.15]
     lo = min(near_c, key=lambda c: c[1])
     hi = max(near_c, key=lambda c: c[1])
     if hi[1] - lo[1] < 0.01:
@@ -1046,7 +1046,7 @@ def _note_reach(extents, key, dist):
         extents[key] = max(extents.get(key, 0.0), dist)
 
 
-def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
+def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, only=None, only_dir=None):
     """为视图内位于井内的每根排管生成尺寸链：每侧每根排管一条多段尺寸（内壁 → 排管边 → 排管宽 → 排管边 → 内壁），
     与标准视图一致；链本身不另加总线，外包总尺寸由 make_total_dims 负责。返回 (生成尺寸数, 原因)；原因为 None 表示正常处理。
     排管按截面判断两类链（平面与剖面/立面共用）：
@@ -1068,6 +1068,9 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
     plan = fr['plan']
 
     banks = _find_banks(rng, fr, stats)
+    if only is not None:
+        ids = [str(b.Id) for b in only]
+        banks = [b for b in banks if str(b.Id) in ids]
     if not banks:
         return 0, '视图内无排管（结构框架）'
 
@@ -1141,6 +1144,10 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
             else:
                 want_h = dh < dd      # 端面朝向视线：水平截面宽 = dh
                 want_v = True         # 截面高度（Z）总可标
+            if only_dir == 'h':
+                want_v = False
+            elif only_dir == 'v':
+                want_h = False
             if not (want_h or want_v):
                 _bump(stats, _SKIP_BANK_DIR)
                 continue
@@ -1156,14 +1163,18 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
                 ve = _end_edges(bank, run, v, (d0 + d1) / 2.0 if run == d else (wL if abs(_bb_mid(bb, run) - wL) < abs(_bb_mid(bb, run) - wR) else wR))
             if he:
                 hb_lo, hb_lo_r, hb_hi, hb_hi_r = he
-            elif len(hf) >= 2:
+            elif len(hf) >= 2 or len(_axial_all(bank)[h]) >= 2:
+                if len(hf) < 2:
+                    hf = _axial_all(bank)[h]
                 (hb_lo, hb_lo_f), (hb_hi, hb_hi_f) = hf[0], hf[-1]
                 hb_lo_r, hb_hi_r = hb_lo_f['ref'], hb_hi_f['ref']
             else:
                 hb_lo = hb_hi = hb_lo_r = hb_hi_r = None
             if ve:
                 vb_lo, vb_lo_r, vb_hi, vb_hi_r = ve
-            elif len(vf) >= 2:
+            elif len(vf) >= 2 or len(_axial_all(bank)[v]) >= 2:
+                if len(vf) < 2:
+                    vf = _axial_all(bank)[v]
                 (vb_lo, vb_lo_f), (vb_hi, vb_hi_f) = vf[0], vf[-1]
                 vb_lo_r, vb_hi_r = vb_lo_f['ref'], vb_hi_f['ref']
             else:
@@ -1482,10 +1493,25 @@ def main():
                     def _chains():
                         res['cn'], res['why'] = make_chain_dims(v, elems, box, led, stats, ext)
                     if not _step("排管尺寸链", _chains):
+                        # 整体提交失败：逐根排管各自提交，只丢弃参照失效的那一根
                         res['cn'] = 0
                         ext = {}
                         led = _SpotLedger()
-                        failed_steps.append('{}：排管尺寸链（Revit 判定参照失效）'.format(v.Name))
+                        try:
+                            frm = _frame(v)
+                            all_banks = _find_banks(crop_world_range(v), frm)
+                        except Exception:
+                            all_banks = []
+                        for bk in all_banks:
+                            for dr in ('h', 'v'):
+                                sub = {}
+
+                                def _one(bk=bk, dr=dr, sub=sub):
+                                    sub['cn'], _w = make_chain_dims(v, elems, box, led, stats, ext, [bk], dr)
+                                if _step("排管尺寸链", _one):
+                                    res['cn'] += sub.get('cn', 0)
+                                else:
+                                    failed_steps.append('{}：排管 {} 的{}向尺寸链（Revit 判定参照失效）'.format(v.Name, bk.Id, '水平' if dr == 'h' else '竖'))
 
                     def _totals():
                         res['n'] = make_total_dims(v, elems, box, led, ext)
