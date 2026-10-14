@@ -16,6 +16,8 @@ public sealed class SnapReport
     public bool SelectionUsed;
     public string? RulesError;
     public List<string> Notes { get; } = new();
+    public bool Done;          // false until an analysis has run
+    public double Seconds;     // how long the analysis took
 
     public int Ready => Rows.Count(r => r.Status == "可修改");
     public int Fit => Rows.Count(r => r.Status == "已贴合");
@@ -25,6 +27,7 @@ public sealed class SnapReport
     {
         get
         {
+            if (!Done) return "尚未读取模型";
             string scope = SelectionUsed ? "只看选中的排管" : "整个模型";
             return $"{scope}：排管 {BanksScanned} 根，靠近井的端点 {Rows.Count} 个 → " +
                    $"可修改 {Ready} 个（延伸 {Rows.Count(r => r.Status == "可修改" && r.Kind == SnapKind.Extend)}、" +
@@ -34,7 +37,9 @@ public sealed class SnapReport
     }
 }
 
-public sealed record ApplyResult(int BanksChanged, List<string> Failed);
+/// <summary>Result of writing the edits. Checked = banks read back and compared; RolledBack = the whole change was undone.</summary>
+public sealed record ApplyResult(int BanksChanged, List<string> Failed, int Checked = 0,
+    double MaxElevationDiffMm = 0, bool RolledBack = false);
 
 /// <summary>Revit side of 排管贴井内壁: collects banks and wells, reads the inner walls, classifies ends, writes curves.</summary>
 public static class DuctSnapEngine
@@ -42,11 +47,19 @@ public static class DuctSnapEngine
     private const double MmPerFoot = 304.8;
     private const double M2PerFt2 = 0.09290304;
 
-    private sealed record WellBox(long Id, string Family, double MinX, double MaxX, double MinY, double MaxY, Element Element);
+    private sealed record WellBox(long Id, string Family, double MinX, double MaxX, double MinY, double MaxY, Element Element, string Key);
     private sealed record BankRec(long Id, string Family, XYZ A, XYZ B);
+
+    /// <summary>
+    /// Inner cavities already read in this window's session, keyed by document, well and bounding box.
+    /// A well that moves or is changed gets a new key, so stale values are never reused. The plugin is hot-loaded
+    /// per click, so this cache lasts for one window session (first check reads the wells, later checks are fast).
+    /// </summary>
+    private static readonly Dictionary<string, Cavity?> CavityCache = new();
 
     public static SnapReport Analyse(Document doc, ICollection<ElementId>? selection)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         var rep = new SnapReport();
         var rules = DuctSnapRules.Load(out var err);
         rep.RulesError = err;
@@ -55,7 +68,6 @@ public static class DuctSnapEngine
         var banks = CollectBanks(doc, rules, selection, rep);
         rep.BanksScanned = banks.Count;
 
-        var cache = new Dictionary<long, Cavity?>();
         foreach (var bank in banks)
         {
             var pts = new[] { ToMm(bank.A), ToMm(bank.B) };
@@ -63,7 +75,15 @@ public static class DuctSnapEngine
             bool anyNear = false;
             for (int k = 0; k < 2; k++)
             {
-                picked[k] = PickWell(pts[k], pts[1 - k], wells, cache, rules);
+                picked[k] = PickWell(pts[k], pts[1 - k], wells, rules);
+                if (picked[k].Well is null)
+                {
+                    // The end is inside a well's footprint but the bank line never crosses the inner cavity
+                    // (e.g. the bank runs along a wall). Do not skip silently: list it for a person to check.
+                    var inside = wells.FirstOrDefault(w =>
+                        pts[k].X >= w.MinX && pts[k].X <= w.MaxX && pts[k].Y >= w.MinY && pts[k].Y <= w.MaxY);
+                    if (inside is not null) picked[k] = (inside, new SnapDecision(SnapKind.Unrelated, 0));
+                }
                 anyNear |= picked[k].Well is not null;
             }
             if (!anyNear) continue;
@@ -95,18 +115,18 @@ public static class DuctSnapEngine
                 }
             }
 
-            if (canEdit)
-            {
-                var start = moved[0] ? new XYZ(newMm[0].X / MmPerFoot, newMm[0].Y / MmPerFoot, bank.A.Z) : bank.A;
-                var end = moved[1] ? new XYZ(newMm[1].X / MmPerFoot, newMm[1].Y / MmPerFoot, bank.B.Z) : bank.B;
-                rep.Edits.Add(new BankEdit(bank.Id, start, end));
-            }
+            // Planned ends. Only the plan position differs from the original; Z is copied from the original end.
+            var plannedStart = moved[0] && canEdit ? new XYZ(newMm[0].X / MmPerFoot, newMm[0].Y / MmPerFoot, bank.A.Z) : bank.A;
+            var plannedEnd = moved[1] && canEdit ? new XYZ(newMm[1].X / MmPerFoot, newMm[1].Y / MmPerFoot, bank.B.Z) : bank.B;
+            if (canEdit) rep.Edits.Add(new BankEdit(bank.Id, plannedStart, plannedEnd));
 
             for (int k = 0; k < 2; k++)
             {
                 if (picked[k].Well is not { } w) continue;
                 bool willMove = moved[k] && canEdit;
-                rep.Rows.Add(MakeRow(bank, k, w, picked[k].Dec, willMove, shortNote, rules));
+                rep.Rows.Add(MakeRow(bank, k, w, picked[k].Dec, willMove, shortNote, rules,
+                    startBeforeMm: bank.A.Z * MmPerFoot, endBeforeMm: bank.B.Z * MmPerFoot,
+                    startAfterMm: plannedStart.Z * MmPerFoot, endAfterMm: plannedEnd.Z * MmPerFoot));
                 if (willMove) rep.EndsChanged++;
             }
         }
@@ -114,19 +134,33 @@ public static class DuctSnapEngine
         if (rep.BanksNearWells == 0) rep.Notes.Add("没有找到靠近井的排管端点（检查井族前缀设置）。");
         int noCav = rep.Rows.Count(r => r.Kind == SnapKind.NoCavity);
         if (noCav > 0) rep.Notes.Add($"有 {noCav} 个端点靠近的井无法识别内壁（已列为需人工）。");
+        rep.Seconds = clock.Elapsed.TotalSeconds;
+        rep.Done = true;
         return rep;
     }
 
     /// <summary>Changes the bank curves in one undoable transaction. Failures are listed, the rest still applies.</summary>
+    /// <summary>Elevation check: a change of more than this (mm) at either end rolls the whole change back.</summary>
+    private const double ZToleranceMm = 0.1;
+
+    /// <summary>Plan check: an end read back more than this (mm) from its planned spot also rolls the change back.</summary>
+    private const double PlanToleranceMm = 1.0;
+
+    /// <summary>
+    /// Changes the bank curves in one undoable transaction. Before committing, every changed bank is read back from
+    /// the model and checked: the ends must sit at the planned spot and keep their elevation. If any bank fails the
+    /// check, the whole transaction is rolled back, so the model is left as it was.
+    /// </summary>
     public static ApplyResult Apply(Document doc, IEnumerable<BankEdit> edits)
     {
         var failed = new List<string>();
-        int ok = 0;
+        var changed = new List<(BankEdit Edit, LocationCurve Loc)>();
         using var tx = new Transaction(doc, "KAIFA 排管贴井内壁");
         tx.Start();
         var fo = tx.GetFailureHandlingOptions();
         fo.SetFailuresPreprocessor(new WarningsOnly());
         tx.SetFailureHandlingOptions(fo);
+
         foreach (var edit in edits)
         {
             try
@@ -134,25 +168,46 @@ public static class DuctSnapEngine
                 var el = doc.GetElement(new ElementId(edit.BankId));
                 if (el?.Location is not LocationCurve lc) throw new InvalidOperationException("不是线状构件");
                 lc.Curve = Line.CreateBound(edit.Start, edit.End);
-                ok++;
+                changed.Add((edit, lc));
             }
             catch (Exception ex)
             {
                 failed.Add($"{edit.BankId}：{ex.Message}");
             }
         }
-        if (ok == 0)
+        if (changed.Count == 0)
         {
             tx.RollBack();
             return new ApplyResult(0, failed);
         }
+
+        int checkedCount = 0;
+        double maxDz = 0;
+        var bad = new List<string>();
+        foreach (var (edit, lc) in changed)
+        {
+            var cur = lc.Curve;
+            var (dz, dxy) = DuctSnapMath.CompareEnds(
+                ToPt3(edit.Start), ToPt3(edit.End), ToPt3(cur.GetEndPoint(0)), ToPt3(cur.GetEndPoint(1)));
+            checkedCount++;
+            maxDz = Math.Max(maxDz, dz);
+            if (dz > ZToleranceMm || dxy > PlanToleranceMm)
+                bad.Add($"{edit.BankId}：端点标高变了 {dz:0.00} mm，位置偏差 {dxy:0.00} mm");
+        }
+        if (bad.Count > 0)
+        {
+            tx.RollBack();
+            failed.AddRange(bad);
+            return new ApplyResult(0, failed, checkedCount, maxDz, RolledBack: true);
+        }
+
         var status = tx.Commit();
         if (status != TransactionStatus.Committed)
         {
             failed.Add("事务未提交：" + status);
-            return new ApplyResult(0, failed);
+            return new ApplyResult(0, failed, checkedCount, maxDz, RolledBack: true);
         }
-        return new ApplyResult(ok, failed);
+        return new ApplyResult(changed.Count, failed, checkedCount, maxDz);
     }
 
     // ---- collection ---------------------------------------------------------------
@@ -168,8 +223,9 @@ public static class DuctSnapEngine
             if (!rules.WellPrefixes.Any(p => fam.StartsWith(p, StringComparison.Ordinal))) continue;
             var bb = fi.get_BoundingBox(null);
             if (bb is null) continue;
-            list.Add(new WellBox(fi.Id.Value, fam,
-                bb.Min.X * MmPerFoot, bb.Max.X * MmPerFoot, bb.Min.Y * MmPerFoot, bb.Max.Y * MmPerFoot, fi));
+            double x0 = bb.Min.X * MmPerFoot, x1 = bb.Max.X * MmPerFoot, y0 = bb.Min.Y * MmPerFoot, y1 = bb.Max.Y * MmPerFoot;
+            string key = $"{doc.PathName}|{fi.Id.Value}|{x0:0.0}|{y0:0.0}|{x1:0.0}|{y1:0.0}";
+            list.Add(new WellBox(fi.Id.Value, fam, x0, x1, y0, y1, fi, key));
         }
         return list;
     }
@@ -209,8 +265,7 @@ public static class DuctSnapEngine
         _ => 1,
     };
 
-    private static (WellBox? Well, SnapDecision Dec) PickWell(Pt2 end, Pt2 other, List<WellBox> wells,
-        Dictionary<long, Cavity?> cache, DuctSnapRules rules)
+    private static (WellBox? Well, SnapDecision Dec) PickWell(Pt2 end, Pt2 other, List<WellBox> wells, DuctSnapRules rules)
     {
         WellBox? best = null;
         var bestDec = new SnapDecision(SnapKind.Unrelated, 0);
@@ -220,7 +275,7 @@ public static class DuctSnapEngine
         foreach (var w in wells)
         {
             if (end.X < w.MinX - margin || end.X > w.MaxX + margin || end.Y < w.MinY - margin || end.Y > w.MaxY + margin) continue;
-            var cav = CavityOf(w, rules, cache);
+            var cav = CavityOf(w, rules);
             var dec = cav is null
                 ? new SnapDecision(SnapKind.NoCavity, 0)
                 : DuctSnapMath.Classify(end, other, cav.Value, rules.Limits);
@@ -238,9 +293,9 @@ public static class DuctSnapEngine
         return (best, bestDec);
     }
 
-    private static Cavity? CavityOf(WellBox w, DuctSnapRules rules, Dictionary<long, Cavity?> cache)
+    private static Cavity? CavityOf(WellBox w, DuctSnapRules rules)
     {
-        if (cache.TryGetValue(w.Id, out var known)) return known;
+        if (CavityCache.TryGetValue(w.Key, out var known)) return known;
         var faces = new List<WallFace>();
         var geom = w.Element.get_Geometry(new Options { DetailLevel = ViewDetailLevel.Fine });
         if (geom is not null)
@@ -257,7 +312,7 @@ public static class DuctSnapEngine
             }
         }
         var cav = DuctSnapMath.FindCavity(faces, rules.MinFaceAreaM2, rules.FaceAreaRatio);
-        cache[w.Id] = cav;
+        CavityCache[w.Key] = cav;
         return cav;
     }
 
@@ -276,7 +331,8 @@ public static class DuctSnapEngine
         }
     }
 
-    private static SnapRow MakeRow(BankRec bank, int k, WellBox w, SnapDecision d, bool willMove, string? shortNote, DuctSnapRules rules)
+    private static SnapRow MakeRow(BankRec bank, int k, WellBox w, SnapDecision d, bool willMove, string? shortNote, DuctSnapRules rules,
+        double startBeforeMm, double endBeforeMm, double startAfterMm, double endAfterMm)
     {
         string status, action, note;
         double shown = d.T;
@@ -323,6 +379,10 @@ public static class DuctSnapEngine
                 (status, action) = ("需人工", "不动");
                 note = "无法识别这口井的内壁（井族几何不规则），未自动处理";
                 break;
+            case SnapKind.Unrelated:
+                (status, action) = ("需人工", "不动");
+                note = "端点在井的墙体里，排管线与井内腔不相交（排管沿井壁走），只改长度无法贴上内壁，需人工调整";
+                break;
             default:
                 (status, action) = ("需人工", "不动");
                 note = "退化排管（长度为零），未处理";
@@ -341,10 +401,15 @@ public static class DuctSnapEngine
             Status = status,
             Action = action,
             Note = note,
+            StartZBeforeMm = startBeforeMm,
+            StartZAfterMm = startAfterMm,
+            EndZBeforeMm = endBeforeMm,
+            EndZAfterMm = endAfterMm,
         };
     }
 
     private static Pt2 ToMm(XYZ p) => new(p.X * MmPerFoot, p.Y * MmPerFoot);
+    private static Pt3 ToPt3(XYZ p) => new(p.X * MmPerFoot, p.Y * MmPerFoot, p.Z * MmPerFoot);
     private static double Dist(Pt2 a, Pt2 b) => Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y));
 
     // Failures that are only warnings are deleted silently so the change goes through.

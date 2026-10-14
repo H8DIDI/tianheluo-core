@@ -98,6 +98,8 @@ public sealed class DuctSnapForm : Form
         Col("排管ID", nameof(SnapRow.BankId), 90);
         Col("排管族", nameof(SnapRow.BankFamily), 230);
         Col("端点", nameof(SnapRow.End), 60);
+        Col("起点标高(mm) 改前 → 改后", nameof(SnapRow.StartZ), 170);
+        Col("终点标高(mm) 改前 → 改后", nameof(SnapRow.EndZ), 170);
         Col("井族", nameof(SnapRow.WellFamily), 180);
         Col("说明", nameof(SnapRow.Note), 320, fill: true);
         _grid.Columns[nameof(SnapRow.Note)]!.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
@@ -205,6 +207,7 @@ public sealed class DuctSnapForm : Form
         }
         string text = $"将修改 {_report.EndsChanged} 个端点（{_report.Edits.Count} 根排管）。\n"
             + "只改平面位置，端点标高保持不变。需人工的端点不会被改动。\n"
+            + "写入后会从模型里逐根读回核对两端标高；有任何一根标高变了，整次修改全部撤销。\n"
             + "一次操作，可用 Ctrl+Z 撤销。\n\n继续吗？";
         var r = MessageBox.Show(this, text, "排管贴井内壁", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (r == DialogResult.Yes) Requested?.Invoke(new DuctSnapRequest(DuctSnapRequestKind.Apply));

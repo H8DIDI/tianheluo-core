@@ -24,14 +24,18 @@ public class DuctSnapCommand : IExternalCommand
             .FirstOrDefault(f => f.GetType().FullName == typeof(DuctSnapForm).FullName);
         if (open is not null) { open.Activate(); return Result.Succeeded; }
 
-        var report = DuctSnapEngine.Analyse(doc, uidoc.Selection.GetElementIds());
-
+        // Show the window at once. The first check reads the wells (about 20-30 s), so it runs in the external
+        // event right after this command returns. Errors are shown in the window and written to the log.
         var handler = new DuctSnapHandler();
         var ev = ExternalEvent.Create(handler);
-        var form = new DuctSnapForm(report);
+        var form = new DuctSnapForm(new SnapReport());
         handler.Form = form;
         form.Requested = req => { handler.Post(req); ev.Raise(); };
+        form.ShowMessage("正在读取模型，第一次约 20–30 秒（期间 Revit 会暂停响应）。");
         form.Show(new RevitOwner());
+        DuctSnapLog.Write($"打开窗口 · 文档：{doc.Title}");
+        handler.Post(new DuctSnapRequest(DuctSnapRequestKind.Recheck));
+        ev.Raise();
         return Result.Succeeded;
     }
 
@@ -61,6 +65,7 @@ internal sealed class DuctSnapHandler : IExternalEventHandler
         var doc = uidoc.Document;
         try
         {
+            DuctSnapLog.Write($"请求：{req.Kind}");
             switch (req.Kind)
             {
                 case DuctSnapRequestKind.Jump:
@@ -75,7 +80,10 @@ internal sealed class DuctSnapHandler : IExternalEventHandler
                     break;
 
                 case DuctSnapRequestKind.Recheck:
-                    Form.Update(DuctSnapEngine.Analyse(doc, uidoc.Selection.GetElementIds()));
+                    var checkedReport = DuctSnapEngine.Analyse(doc, uidoc.Selection.GetElementIds());
+                    DuctSnapLog.Write($"检查完成 {checkedReport.Seconds:0.0} 秒 · {checkedReport.Summary}" +
+                                      (checkedReport.RulesError is null ? "" : " · 规则文件：" + checkedReport.RulesError));
+                    Form.Update(checkedReport);
                     break;
 
                 case DuctSnapRequestKind.Apply:
@@ -83,16 +91,27 @@ internal sealed class DuctSnapHandler : IExternalEventHandler
                     var fresh = DuctSnapEngine.Analyse(doc, uidoc.Selection.GetElementIds());
                     var result = DuctSnapEngine.Apply(doc, fresh.Edits);
                     var after = DuctSnapEngine.Analyse(doc, uidoc.Selection.GetElementIds());
-                    string text = $"已修改 {result.BanksChanged} 根排管。可按 Ctrl+Z 一次撤销。";
-                    if (result.Failed.Count > 0)
-                        text += $"\n失败 {result.Failed.Count} 根（Revit 拒绝修改，多为端点已连接其他构件）：" + string.Join("；", result.Failed.Take(3));
+                    string text;
+                    if (result.RolledBack)
+                    {
+                        text = $"标高核对没通过，已全部撤销，模型未改动。核对 {result.Checked} 根，问题 {result.Failed.Count} 根：" + string.Join("；", result.Failed.Take(3));
+                    }
+                    else
+                    {
+                        text = $"已修改 {result.BanksChanged} 根排管。已从模型读回核对 {result.Checked} 根的两端：" +
+                               $"标高最大变化 {result.MaxElevationDiffMm:0.00} mm（应为 0）。可按 Ctrl+Z 一次撤销。";
+                        if (result.Failed.Count > 0)
+                            text += $"\n未改成功 {result.Failed.Count} 根（Revit 拒绝修改，多为端点已连接其他构件）：" + string.Join("；", result.Failed.Take(3));
+                    }
+                    DuctSnapLog.Write($"执行：{text}");
                     Form.Update(after, text);
                     break;
             }
         }
         catch (Exception ex)
         {
-            Form.ShowMessage("出错：" + ex.Message);
+            DuctSnapLog.Write("出错：" + ex);
+            Form.ShowMessage("出错：" + ex.Message + "（详情见 Documents\\KaifaTools\\排管贴井日志.txt）");
         }
     }
 }

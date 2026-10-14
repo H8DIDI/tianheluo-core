@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace KaifaTools.DuctSnap;
 
@@ -28,6 +29,7 @@ public sealed class DuctSnapRules
     // Never touched (checked against family names of banks and wells)
     public string[] Exclude { get; set; } = { "雨水", "排水", "污水", "阀门", "井盖", "mold_" };
 
+    [JsonIgnore]
     public SnapLimits Limits => new(MaxExtendMm, MaxTrimMm, ToleranceMm);
 
     static readonly JsonSerializerOptions Opt = new()
@@ -81,10 +83,45 @@ public sealed class SnapRow
     public string Action { get; init; } = "";     // 延伸到内壁 / 修剪伸入井内的部分 / 不动
     public string Note { get; init; } = "";       // why, in words
 
+    // Elevations (标高) of both ends of the bank, mm: before the change and as planned after it
+    public double StartZBeforeMm { get; init; }
+    public double StartZAfterMm { get; init; }
+    public double EndZBeforeMm { get; init; }
+    public double EndZAfterMm { get; init; }
+
     // Display helpers for the grid
     public string End => EndIndex == 0 ? "起点" : "终点";
     public string Move => Kind is SnapKind.Extend or SnapKind.Trim or SnapKind.ExtendTooFar or SnapKind.TrimTooFar
         ? Math.Abs(MoveMm).ToString("0", System.Globalization.CultureInfo.InvariantCulture) : "";
+    public string StartZ => ZText(StartZBeforeMm, StartZAfterMm);
+    public string EndZ => ZText(EndZBeforeMm, EndZAfterMm);
+
+    private static string ZText(double before, double after) =>
+        $"{before.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} → {after.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}";
+}
+
+/// <summary>
+/// Plain-text log of each run in Documents\KaifaTools\排管贴井日志.txt: start, timing, result and any exception.
+/// Logging never throws, so it cannot break the command.
+/// </summary>
+public static class DuctSnapLog
+{
+    public static string FilePath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "KaifaTools", "排管贴井日志.txt");
+
+    public static void Write(string text)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+            File.AppendAllText(FilePath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {text}{Environment.NewLine}",
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        }
+        catch
+        {
+            // logging must not break the command
+        }
+    }
 }
 
 public static class DuctSnapCsv
@@ -96,13 +133,17 @@ public static class DuctSnapCsv
         Directory.CreateDirectory(dir);
         string path = Path.Combine(dir, $"排管贴井_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
         var sb = new StringBuilder();
-        sb.AppendLine("状态,排管ID,排管族,端点,井ID,井族,动作,移动(mm),说明");
+        sb.AppendLine("状态,排管ID,排管族,端点,井ID,井族,动作,移动(mm),起点标高改前(mm),起点标高改后(mm),终点标高改前(mm),终点标高改后(mm),说明");
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
         foreach (var r in rows)
         {
             sb.AppendLine(string.Join(",", new[]
             {
                 r.Status, r.BankId.ToString(), Csv(r.BankFamily), r.End, r.WellId.ToString(), Csv(r.WellFamily),
-                r.Action, r.Move, Csv(r.Note),
+                r.Action, r.Move,
+                r.StartZBeforeMm.ToString("0.0", inv), r.StartZAfterMm.ToString("0.0", inv),
+                r.EndZBeforeMm.ToString("0.0", inv), r.EndZAfterMm.ToString("0.0", inv),
+                Csv(r.Note),
             }));
         }
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));

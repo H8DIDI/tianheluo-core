@@ -12,6 +12,9 @@ namespace KaifaTools.DuctSnap;
 /// <summary>A point in plan view, millimetres.</summary>
 public readonly record struct Pt2(double X, double Y);
 
+/// <summary>A point in model space, millimetres. Z is the elevation (标高).</summary>
+public readonly record struct Pt3(double X, double Y, double Z);
+
 /// <summary>Inner cavity of a well: the inner faces of its four walls, millimetres.</summary>
 public readonly record struct Cavity(double XLeft, double XRight, double YBottom, double YTop);
 
@@ -98,6 +101,24 @@ public static class DuctSnapMath
         if (len < 1e-3) return end;
         return new Pt2(end.X + t * dx / len, end.Y + t * dy / len);
     }
+
+    /// <summary>
+    /// Compares the two ends read back from the model with the planned ends. Each read-back end is matched to the
+    /// nearer planned end in plan, so the order of the ends does not matter.
+    /// Returns the largest elevation change (Z, mm) and the largest plan error (mm) over both ends.
+    /// </summary>
+    public static (double ElevationDiffMm, double PlanErrorMm) CompareEnds(Pt3 plannedA, Pt3 plannedB, Pt3 readA, Pt3 readB)
+    {
+        bool direct = PlanDist(readA, plannedA) + PlanDist(readB, plannedB)
+                      <= PlanDist(readA, plannedB) + PlanDist(readB, plannedA);
+        var matchA = direct ? plannedA : plannedB;
+        var matchB = direct ? plannedB : plannedA;
+        double dz = Math.Max(Math.Abs(readA.Z - matchA.Z), Math.Abs(readB.Z - matchB.Z));
+        double dxy = Math.Max(PlanDist(readA, matchA), PlanDist(readB, matchB));
+        return (dz, dxy);
+    }
+
+    private static double PlanDist(Pt3 a, Pt3 b) => Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y));
 
     /// <summary>
     /// Inner cavity of a rectangular well from its vertical faces. Each wall's inner face has its normal pointing

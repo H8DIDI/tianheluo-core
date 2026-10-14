@@ -124,6 +124,21 @@ var ctel = DuctSnapMath.FindCavity(tel, 0.9, 0.4);
 Check("model TELCO 3320 well: cavity -72511..-69191 x 8050..11370 (0.9 m2 faces ignored)",
     ctel is { } t1 && Near(t1.XLeft, -72511) && Near(t1.XRight, -69191) && Near(t1.YBottom, 8050) && Near(t1.YTop, 11370), $"{ctel}");
 
+// ---- Elevation check after a write: read-back ends against the planned ends ----
+var pa = new Pt3(3000, 1500, 3300);
+var pb = new Pt3(10000, 1500, 4350);
+var same = DuctSnapMath.CompareEnds(pa, pb, pa, pb);
+Check("read-back equal to plan: no elevation change, no plan error", same.ElevationDiffMm == 0 && same.PlanErrorMm == 0, $"{same}");
+
+var swapped = DuctSnapMath.CompareEnds(pa, pb, pb, pa);
+Check("ends read back in reverse order still match (order does not matter)", swapped.ElevationDiffMm == 0 && swapped.PlanErrorMm == 0, $"{swapped}");
+
+var zMoved = DuctSnapMath.CompareEnds(pa, pb, new Pt3(3000, 1500, 3600), pb);
+Check("a 300 mm elevation change at the start is reported", Near(zMoved.ElevationDiffMm, 300), $"{zMoved}");
+
+var planOff = DuctSnapMath.CompareEnds(pa, pb, new Pt3(3040, 1500, 3300), pb);
+Check("a 40 mm plan error is reported, elevation unchanged", Near(planOff.PlanErrorMm, 40) && planOff.ElevationDiffMm == 0, $"{planOff}");
+
 Console.WriteLine();
 Console.WriteLine(failed == 0 ? "ALL PASS" : $"{failed} FAILED");
 return failed == 0 ? 0 : 1;
