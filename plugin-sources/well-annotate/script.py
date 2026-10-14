@@ -1258,9 +1258,11 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
 
 
 class _SilentFailures(DB.IFailuresPreprocessor):
-    """抑制标注引发的失败消息；绝不自己删元素。"""
+    """抑制标注引发的失败消息：警告直接删除；无法忽略的错误（如「尺寸标注参照无效」）不弹窗，
+    直接让当前这一步回滚（上层按步骤隔离，其余步骤不受影响）。绝不自己删元素。"""
 
     def PreprocessFailures(self, failuresAccessor):
+        has_error = False
         for f in failuresAccessor.GetFailureMessages():
             try:
                 sev = f.GetSeverity()
@@ -1272,10 +1274,9 @@ class _SilentFailures(DB.IFailuresPreprocessor):
                 except:
                     pass
                 continue
-            try:
-                failuresAccessor.ResolveFailure(f)
-            except:
-                pass
+            has_error = True
+        if has_error:
+            return DB.FailureProcessingResult.ProceedWithRollBack
         return DB.FailureProcessingResult.Continue
 
 
