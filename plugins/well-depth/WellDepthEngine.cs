@@ -97,7 +97,7 @@ public enum WellStatus
 /// <summary>One duct bank (structural framing) or conduit, in millimetres (absolute model coordinates).</summary>
 internal sealed record PipeInfo(long Id, WellSystem System, double X0, double Y0, double Z0, double X1, double Y1, double Z1);
 
-internal sealed record PipeHit(long PipeId, double BottomZ, bool IsGap, double GapMm);
+internal sealed record PipeHit(long PipeId, double BottomZ, bool IsGap, double GapMm, bool Ambiguous = false);
 
 /// <summary>Everything we know about one well: current values, matched pipes, proposed values.</summary>
 public sealed class WellResult
@@ -329,8 +329,14 @@ public static class WellDepthEngine
             {
                 if (!Clip(p, w.MinX - Rules.TightMm, w.MinY - Rules.TightMm, w.MaxX + Rules.TightMm, w.MaxY + Rules.TightMm, out double t0, out double t1))
                     continue;
-                double za = p.Z0 + (p.Z1 - p.Z0) * t0, zb = p.Z0 + (p.Z1 - p.Z0) * t1;
-                AddHit(w, new PipeHit(p.Id, Math.Min(za, zb), false, 0));
+                // The connection point is the bank END that lies in the well, with its exact elevation (not a point
+                // interpolated along the clipped part). A bank with both ends in the well, or one that simply passes
+                // through it, has no single connection point: keep it, but flag it for a person to check.
+                bool in0 = InFootprint(p.X0, p.Y0, w), in1 = InFootprint(p.X1, p.Y1, w);
+                if (in0 != in1)
+                    AddHit(w, new PipeHit(p.Id, in0 ? p.Z0 : p.Z1, false, 0));
+                else
+                    AddHit(w, new PipeHit(p.Id, Math.Min(p.Z0, p.Z1), false, 0, Ambiguous: true));
                 touched.Add(w.Id);
             }
 
@@ -356,6 +362,9 @@ public static class WellDepthEngine
         if (hit.BottomZ >= w.TopMm) { IgnoredAbovePipes++; return; }
         w.Hits.Add(hit);
     }
+
+    private static bool InFootprint(double x, double y, WellResult w) =>
+        x >= w.MinX - Rules.TightMm && x <= w.MaxX + Rules.TightMm && y >= w.MinY - Rules.TightMm && y <= w.MaxY + Rules.TightMm;
 
     private static double DistanceToBox(double x, double y, WellResult w)
     {
@@ -396,7 +405,13 @@ public static class WellDepthEngine
         }
 
         var bottoms = w.Hits.Select(h => h.BottomZ).OrderBy(z => z).ToList();
-        w.LowestPipeMm = bottoms[0];
+        w.LowestPipeMm = Math.Round(bottoms[0]);
+        if (w.Hits.Any(h => h.Ambiguous))
+        {
+            w.Status = WellStatus.Review;
+            w.Note = "有排管穿过井或两端都在井内，接入点不确定，请人工核对";
+            return;
+        }
         // rule: 井底 = 最低接入管底 - 300 (same absolute frame as the pipes and as the values typed by hand)
         //       井深 = 偏移 - 井底
         w.NewBottomMm = Math.Round(bottoms[0] - Rules.ClearanceMm);
