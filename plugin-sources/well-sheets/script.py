@@ -1355,6 +1355,10 @@ def main():
                         # 只套同类型的样板：平面视图只用平面样板，剖面只用剖面样板，详图只用详图样板。
                         # （旧逻辑没找到同类样板时退回第一个样板，把"详图"样板套到平面上，平面就空白了）
                         tid = chosen_templates.get(template_key) if template_key else None
+                        if tid is None and template_key == 'FloorPlan':
+                            # 没选平面样板时，平面套「详图」样板（项目里的标准图就是这样做的：平面也用井大样详图样板），
+                            # 再没有就用勾选的第一个样板；不留成没套样板的平面
+                            tid = chosen_templates.get('Detail') or (picked_template_ids[0] if picked_template_ids else None)
                         if tid is None:
                             continue
                         try:
