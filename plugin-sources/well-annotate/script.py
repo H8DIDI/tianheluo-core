@@ -4,7 +4,7 @@ __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 生成两类尺寸
            '① 外包总尺寸：按视图内可见构件（不含管道）的外包框，下方标宽、左侧标高；\n'
            '② 井内壁至排管尺寸链：识别井内壁，对位于井内的每根排管，下方/上方标水平尺寸链'
            '（内壁—排管边—排管宽—排管边—内壁，外侧标总内宽），左侧/右侧标竖向尺寸链（同理，外侧标总内高）。\n'
-           '排管尺寸链只在剖面/立面视图生成；每次运行先清除视图内引用井构件或排管的旧尺寸再重新生成（不动管道等其它尺寸）。')
+           '排管尺寸链在平面与剖面/立面视图都生成；每次运行先清除视图内引用井构件或排管的旧尺寸再重新生成（不动管道等其它尺寸）。')
 
 from pyrevit import revit, DB, UI, forms
 import System
@@ -26,6 +26,9 @@ _SPAN_RATIO = 2.0
 
 # 严格轴向判据（法线分量阈值，0.995 约等于偏角 5.7°）；越接近 1 越严格，只取严格平行于轴的面
 _AXIAL_TOL = 0.995
+
+# 排管尺寸用的更严格判据（0.9999 约 0.8°）：有坡度的排管，其面不能直接用来标尺寸（Revit 会得到无效值）
+_DIM_AXIAL_TOL = 0.9999
 
 # 同位置判重精度（英尺，0.01 约 3 mm）：同一视图内两道尺寸的端点在此精度内相同，视为同一位置，第二道跳过
 _SPOT_TOL_FT = 0.01
@@ -132,7 +135,9 @@ def _ints(cats):
     return out
 
 
-_EXCLUDE_IDS = _ints(_EXCLUDE_CATS)
+# 剖面框：是各视图的剖切范围，不是井的构件；计入会把外包框拉到模型很远的地方
+_SECTION_BOX_CAT = getattr(DB.BuiltInCategory, 'OST_SectionBox', None)
+_EXCLUDE_IDS = _ints(_EXCLUDE_CATS + [_SECTION_BOX_CAT])
 _PIPE_IDS = _ints(_PIPE_CATS)
 
 # 排管类别：本项目用结构框架族承载排管（只用来找排管，不计入井包围盒）
@@ -148,6 +153,7 @@ _ST_DUP = '同位置重复尺寸（已跳过）'
 _SKIP_WALL_FB = '没有识别到井内壁（用了外壁）'
 _SKIP_BANK_OUT = '排管不在井内（未标注）'
 _SKIP_BANK_DIR = '排管方向不水平/不垂直（未标注）'
+_SKIP_BANK_THROUGH = '排管穿过井（两侧都伸出井外，未标注）'
 _SKIP_BANK_ERR = '排管处理异常（未标注）'
 _SKIP_HIDDEN = '不可见'
 _SKIP_NOBB = '没有包围盒'
@@ -159,6 +165,7 @@ _REPORT_SKIPS = [
     (_SKIP_WALL_FB, '面'),
     (_SKIP_BANK_OUT, '根'),
     (_SKIP_BANK_DIR, '根'),
+    (_SKIP_BANK_THROUGH, '根'),
     (_SKIP_BANK_ERR, '根'),
     (_SKIP_HIDDEN, '个'),
     (_SKIP_NOBB, '个'),
@@ -274,7 +281,7 @@ def _axial_faces(elem, axis):
     return out
 
 
-def _axial_all(elem):
+def _axial_all(elem, tol=None):
     """构件三个方向的严格轴向面，返回 {'X':[(坐标,面),...],...}，按轴排序去重（排管尺寸链用）。"""
     res = {'X': [], 'Y': [], 'Z': []}
     seen = {'X': [], 'Y': [], 'Z': []}
@@ -284,7 +291,7 @@ def _axial_all(elem):
             for ax, v, c in (('X', abs(n.X), f['orig'].X),
                              ('Y', abs(n.Y), f['orig'].Y),
                              ('Z', abs(n.Z), f['orig'].Z)):
-                if v < _AXIAL_TOL:
+                if v < (tol or _AXIAL_TOL):
                     continue
                 dup = False
                 for s in seen[ax]:
@@ -337,7 +344,9 @@ def crop_world_range(view):
 
 
 def collect_target_elems(view, stats=None):
-    """收集视图内应计入包围盒的可见模型构件（排除注释、CAD 底图、管道类）。
+    """收集视图内应计入包围盒的可见模型构件（排除注释、CAD 底图、管道类、剖面框）。
+    只取与裁剪框相交的构件（框外的构件不参与定位，否则会把外包框拉到很远）；
+    跨度保险按视图的水平轴、竖向轴判断（不能直接用世界 X/Z，否则东/西立面会误判）。
     stats 若传入 dict，则按原因累计被跳过的构件数（见 _REPORT_SKIPS）。"""
     out = []
     try:
@@ -346,11 +355,14 @@ def collect_target_elems(view, stats=None):
         return out
 
     rng = crop_world_range(view)
+    fr = _frame(view)
     if rng:
-        crop_w = rng[1] - rng[0]
-        crop_h = rng[5] - rng[4]
+        hc0, hc1 = _rng_of(rng, fr['h'])
+        vc0, vc1 = _rng_of(rng, fr['v'])
+        crop_h = hc1 - hc0
+        crop_v = vc1 - vc0
     else:
-        crop_w = crop_h = 0.0
+        crop_h = crop_v = 0.0
 
     for e in col:
         try:
@@ -372,13 +384,15 @@ def collect_target_elems(view, stats=None):
             if bb is None:
                 _bump(stats, _SKIP_NOBB)
                 continue
-            w = abs(bb.Max.X - bb.Min.X)
-            h = abs(bb.Max.Z - bb.Min.Z)
-            if w <= 0 and h <= 0:
+            if rng and not _overlap(bb, rng):
+                continue
+            w = _bb_span(bb, fr['h'])
+            hh = _bb_span(bb, fr['v'])
+            if w <= 0 and hh <= 0:
                 _bump(stats, _SKIP_ZERO)
                 continue
-            if crop_w > 0 and crop_h > 0:
-                if w > crop_w * _SPAN_RATIO or h > crop_h * _SPAN_RATIO:
+            if crop_h > 0 and crop_v > 0:
+                if w > crop_h * _SPAN_RATIO or hh > crop_v * _SPAN_RATIO:
                     _bump(stats, _SKIP_SPAN)
                     continue
             out.append(e)
@@ -424,8 +438,23 @@ def _overlap(bb, rng):
         return False
 
 
-def _find_banks(rng, h_axis, stats=None):
-    """视图裁剪框内与之相交的排管（结构框架）；横断面宽度方向与视口水平不一致的计入 _SKIP_BANK_DIR。"""
+def _frame(view):
+    """视图框架：h 为图纸水平方向的世界轴，v 为图纸竖向的世界轴，d 为视图法线方向的世界轴。
+    平面视图：v 为另一条水平轴，d 为 Z；剖面/立面：v 为 Z，d 为另一条水平轴。"""
+    left = _view_left(view)
+    h = 'X' if abs(left.X) > 0.5 else 'Y'
+    try:
+        plan = (view.ViewType == DB.ViewType.FloorPlan)
+    except:
+        plan = False
+    other = 'Y' if h == 'X' else 'X'
+    if plan:
+        return {'h': h, 'v': other, 'd': 'Z', 'plan': True}
+    return {'h': h, 'v': 'Z', 'd': other, 'plan': False}
+
+
+def _find_banks(rng, fr, stats=None):
+    """视图裁剪框内与之相交的排管（结构框架）。是否标注、标哪条链由 make_chain_dims 按截面判断。"""
     out = []
     try:
         col = DB.FilteredElementCollector(doc).OfCategory(_BANK_CAT).WhereElementIsNotElementType().ToElements()
@@ -436,15 +465,9 @@ def _find_banks(rng, h_axis, stats=None):
             bb = e.get_BoundingBox(None)
             if bb is None:
                 continue
-            dx = abs(bb.Max.X - bb.Min.X)
-            dy = abs(bb.Max.Y - bb.Min.Y)
-            if dx <= 0 and dy <= 0:
-                continue
             if not _overlap(bb, rng):
                 continue
-            width_axis = 'Y' if dx > dy else 'X'
-            if width_axis != h_axis:
-                _bump(stats, _SKIP_BANK_DIR)
+            if _bb_span(bb, 'X') <= 0 and _bb_span(bb, 'Y') <= 0:
                 continue
             out.append(e)
         except:
@@ -493,29 +516,25 @@ def _grow_crop(view, wdir, amt):
         return False
 
 
-def _ensure_crop_need(view, h_axis, ext):
-    """幂等外扩裁剪框，四侧都照顾到（尺寸链可能在井的左右/上下任一侧）。
-    ext = (h_lo, h_hi, z_lo, z_hi)，世界坐标，为所有尺寸线与端点的范围；只在裁剪框盖不住时才加 _CROP_PAD 扩。"""
+def _ensure_crop_need(view, h_axis, v_axis, ext):
+    """幂等外扩裁剪框，使尺寸线及文字落在框内。ext = (h_lo, h_hi, v_lo, v_hi)，世界坐标。
+    h_axis / v_axis 为视图的水平与竖向世界轴；只在裁剪框盖不住时才加 _CROP_PAD 扩（平面的深度轴不动）。"""
     try:
         rng = crop_world_range(view)
         if rng is None:
             return
-        h_lo, h_hi, z_lo, z_hi = ext
+        h_lo, h_hi, v_lo, v_hi = ext
         pad = _CROP_PAD
-        if h_axis == 'X':
-            cmin, cmax = rng[0], rng[1]
-            wneg, wpos = DB.XYZ(-1, 0, 0), DB.XYZ(1, 0, 0)
-        else:
-            cmin, cmax = rng[2], rng[3]
-            wneg, wpos = DB.XYZ(0, -1, 0), DB.XYZ(0, 1, 0)
-        if cmin > h_lo - pad + 0.001:
-            _grow_crop(view, wneg, cmin - (h_lo - pad))
-        if cmax < h_hi + pad - 0.001:
-            _grow_crop(view, wpos, (h_hi + pad) - cmax)
-        if rng[4] > z_lo - pad + 0.001:
-            _grow_crop(view, DB.XYZ(0, 0, -1), rng[4] - (z_lo - pad))
-        if rng[5] < z_hi + pad - 0.001:
-            _grow_crop(view, DB.XYZ(0, 0, 1), (z_hi + pad) - rng[5])
+        hc0, hc1 = _rng_of(rng, h_axis)
+        vc0, vc1 = _rng_of(rng, v_axis)
+        if hc0 > h_lo - pad + 0.001:
+            _grow_crop(view, _unit(h_axis, -1), hc0 - (h_lo - pad))
+        if hc1 < h_hi + pad - 0.001:
+            _grow_crop(view, _unit(h_axis, 1), (h_hi + pad) - hc1)
+        if vc0 > v_lo - pad + 0.001:
+            _grow_crop(view, _unit(v_axis, -1), vc0 - (v_lo - pad))
+        if vc1 < v_hi + pad - 0.001:
+            _grow_crop(view, _unit(v_axis, 1), (v_hi + pad) - vc1)
     except:
         pass
 
@@ -560,14 +579,78 @@ def _find_dim_type_id():
     return None
 
 
+# 尺寸创建失败的原因（每个视图处理前清空，报告时汇总）
+_DIM_ERRS = []
+
+
+def _on_plane(view, p):
+    """把世界点投影到视图的注释平面上（过 view.Origin、法线为 view.ViewDirection）。
+    尺寸线必须在视图平面内；若放在模型中心深度，剖面/立面的尺寸会落在剖切面之外而看不见。"""
+    try:
+        o = view.Origin
+        n = view.ViewDirection
+        t = (p.X - o.X) * n.X + (p.Y - o.Y) * n.Y + (p.Z - o.Z) * n.Z
+        return DB.XYZ(p.X - t * n.X, p.Y - t * n.Y, p.Z - t * n.Z)
+    except:
+        return p
+
+
+def _dim_at_line(d, p1, p2):
+    """尺寸线的起点仍在请求的线段附近（约 300 mm 内）时返回 True。
+    Revit 有时会按参照面的位置把尺寸另放到别处（如长排管的另一端），这种要撤回。"""
+    try:
+        o = d.Curve.Origin
+        ax = p2.X - p1.X
+        ay = p2.Y - p1.Y
+        az = p2.Z - p1.Z
+        l2 = ax * ax + ay * ay + az * az
+        if l2 <= 0:
+            return True
+        t = ((o.X - p1.X) * ax + (o.Y - p1.Y) * ay + (o.Z - p1.Z) * az) / l2
+        t = max(0.0, min(1.0, t))
+        q = DB.XYZ(p1.X + t * ax, p1.Y + t * ay, p1.Z + t * az)
+        return o.DistanceTo(q) <= 1.0
+    except:
+        return True
+
+
+def _dim_ok(d, p1, p2):
+    """尺寸位置在请求的线段附近，且数值有效（大于 0）时返回 True。数值无效的尺寸不显示在视图里，只会残留在模型中。"""
+    try:
+        if d.Value is None or d.Value <= 1e-6:
+            return False
+    except:
+        return False
+    return _dim_at_line(d, p1, p2)
+
+
+def _err_text(ex):
+    """异常信息压成一行短文字，便于报告。"""
+    try:
+        return str(ex).strip().split('\n')[0][:60]
+    except:
+        return '未知错误'
+
+
+def _drop_dim(view, d):
+    """删除刚建的尺寸（失败或位置不对时用）。"""
+    try:
+        view.Document.Delete(d.Id)
+    except:
+        pass
+
+
 def _try_dim(view, ref_a, ref_b, world_p1, world_p2, ledger=None, dim_type=False):
-    """两个面引用之间建一条尺寸。传入 ledger 时，同位置已有尺寸则跳过并计入 ledger.dup。
-    dim_type=True 时改用 _find_dim_type_id() 找到的尺寸类型（仅排管尺寸链使用）。"""
+    """两个面引用之间建一条尺寸（两端先投影到视图平面）。传入 ledger 时，同位置已有尺寸则跳过并计入 ledger.dup。
+    dim_type=True 时改用 _find_dim_type_id() 找到的尺寸类型（仅排管尺寸链使用）。
+    Revit 换类型时会把尺寸挪到参照面的另一端：换类型后位置不对的，撤掉改用默认样式重画。失败原因记入 _DIM_ERRS。"""
     if view is None or ref_a is None or ref_b is None:
         return None
+    p1 = _on_plane(view, world_p1)
+    p2 = _on_plane(view, world_p2)
     key = None
     if ledger is not None:
-        key = _spot_key(world_p1, world_p2)
+        key = _spot_key(p1, p2)
         if key in ledger.keys:
             ledger.dup += 1
             return None
@@ -575,22 +658,41 @@ def _try_dim(view, ref_a, ref_b, world_p1, world_p2, ledger=None, dim_type=False
         arr = DB.ReferenceArray()
         arr.Append(ref_a)
         arr.Append(ref_b)
-        if arr.Size < 2:
-            return None
-        line = DB.Line.CreateBound(world_p1, world_p2)
+        line = DB.Line.CreateBound(p1, p2)
         d = view.Document.Create.NewDimension(view, line, arr)
-        if d is not None and dim_type:
-            try:
-                dt = _find_dim_type_id()
-                if dt is not None:
-                    d.ChangeTypeId(dt)
-            except:
-                pass
-        if d is not None and key is not None:
-            ledger.keys.add(key)
-        return d
-    except:
+    except Exception as ex:
+        _DIM_ERRS.append(_err_text(ex))
         return None
+    if d is None:
+        _DIM_ERRS.append('Revit 未返回尺寸')
+        return None
+    if not _dim_ok(d, p1, p2):
+        _drop_dim(view, d)
+        _DIM_ERRS.append('Revit 尺寸位置不对或数值无效（已撤回）')
+        return None
+    if dim_type:
+        dt = _find_dim_type_id()
+        if dt is not None:
+            try:
+                d.ChangeTypeId(dt)
+            except:
+                dt = None
+            if dt is not None and not _dim_ok(d, p1, p2):
+                _drop_dim(view, d)
+                d = None
+                try:
+                    d = view.Document.Create.NewDimension(view, line, arr)
+                except Exception as ex:
+                    _DIM_ERRS.append(_err_text(ex))
+                    return None
+                if d is None or not _dim_ok(d, p1, p2):
+                    if d is not None:
+                        _drop_dim(view, d)
+                    _DIM_ERRS.append('Revit 尺寸位置不对或数值无效（已撤回）')
+                    return None
+    if key is not None:
+        ledger.keys.add(key)
+    return d
 
 
 def _seg_dim(view, ra, rb, p1, p2, ledger, length):
@@ -601,21 +703,56 @@ def _seg_dim(view, ra, rb, p1, p2, ledger, length):
     return 1 if d is not None else 0
 
 
-def _pt(h_axis, hv, d_axis, dv, zv):
-    """按视图水平轴组装世界点：h_axis 为水平世界轴，dv 为深度（视图法向）坐标，zv 为竖向 Z。"""
-    if h_axis == 'X':
-        return DB.XYZ(hv, dv, zv)
-    return DB.XYZ(dv, hv, zv)
+def _coord(p, axis):
+    """点或向量在世界轴上的分量。"""
+    if axis == 'X':
+        return p.X
+    if axis == 'Y':
+        return p.Y
+    return p.Z
 
 
-def _to_s(h, lsign):
-    """世界水平坐标 → 图纸水平坐标 s（s 随图纸向右增大，图纸左侧 s 最小）。"""
-    return -lsign * h
+def _rng_of(r, axis):
+    """(x0,x1,y0,y1,z0,z1) 形式的范围在某世界轴上的 (最小, 最大)。"""
+    if axis == 'X':
+        return r[0], r[1]
+    if axis == 'Y':
+        return r[2], r[3]
+    return r[4], r[5]
 
 
-def _to_h(s, lsign):
-    """图纸水平坐标 s → 世界水平坐标（_to_s 的逆）。"""
-    return -lsign * s
+def _bb_span(bb, axis):
+    """包围盒在某世界轴上的长度（英尺，取正）。"""
+    lo, hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), axis)
+    return abs(hi - lo)
+
+
+def _mk(fr, hv, vv, dv):
+    """按视图框架组装世界点：hv 为水平坐标，vv 为竖向坐标，dv 为视图法线方向坐标。"""
+    c = {fr['h']: hv, fr['v']: vv, fr['d']: dv}
+    return DB.XYZ(c['X'], c['Y'], c['Z'])
+
+
+def _unit(axis, sign):
+    """世界轴方向的单位向量，sign 为 +1 或 -1。"""
+    if axis == 'X':
+        return DB.XYZ(sign, 0, 0)
+    if axis == 'Y':
+        return DB.XYZ(0, sign, 0)
+    return DB.XYZ(0, 0, sign)
+
+
+def _clip_box(box, rng):
+    """把外包框裁到视图裁剪框之内（只取框内部分，框外的构件不把总尺寸拉到很远）；
+    与裁剪框不相交时返回 None。"""
+    if box is None or rng is None:
+        return box
+    out = (max(box[0], rng[0]), min(box[1], rng[1]),
+           max(box[2], rng[2]), min(box[3], rng[3]),
+           max(box[4], rng[4]), min(box[5], rng[5]))
+    if out[0] > out[1] or out[2] > out[3] or out[4] > out[5]:
+        return None
+    return out
 
 
 def _total_margin(extents, key):
@@ -629,90 +766,63 @@ def _total_margin(extents, key):
 
 
 def make_total_dims(view, elems, box, ledger=None, extents=None):
-    """按外包框生成总尺寸：下方一道宽度、左侧一道高度。
+    """按外包框生成总尺寸：下方一道宽度（沿视图水平轴），左侧一道高度（沿视图竖向轴）。
 
-    轴的选择随视图类型走：
-      平面视图  横向=世界X，竖向=世界Y，尺寸线摆在某个 Z 深度上
-      剖面视图  横向=世界X，竖向=世界Z，尺寸线摆在某个 Y 深度上
-    参照面取"沿该轴最外侧的严格轴向面"；跨多个构件时取全局极值，
-    标出来的就是整个外包框的总尺寸。
-    extents 由 make_chain_dims 填好时，总线所在一侧若有尺寸链，总线外移到最外一道链线之外；
-    无尺寸链的侧位置不变。外移后补一次裁剪框外扩，保证总线落在裁剪框内。
+    视图框架见 _frame：平面视图的竖向轴为另一条水平轴；剖面/立面的竖向轴为 Z。
+    尺寸线摆在外包框之外，并投影到视图平面上（见 _try_dim）。
+    参照面取沿该轴最外侧的严格轴向面；跨多个构件时取全局极值，标出来的就是整个外包框的总尺寸。
+    extents 由 make_chain_dims 填好时，总线所在一侧若有尺寸链，总线外移到最外一道链线之外。
     """
     made = 0
-    x0, x1, y0, y1, z0, z1 = box
+    fr = _frame(view)
+    h, v, d = fr['h'], fr['v'], fr['d']
+    h0, h1 = _rng_of(box, h)
+    v0, v1 = _rng_of(box, v)
+    d0, d1 = _rng_of(box, d)
+    dep = (d0 + d1) / 2.0
 
-    try:
-        is_plan = (view.ViewType == DB.ViewType.FloorPlan)
-    except:
-        is_plan = False
+    m_w = _total_margin(extents, v + '-')
+    m_h = _total_margin(extents, h + '-')
 
-    # 宽度线在下方（平面为世界 Y 最小侧，剖面为 Z 最小侧）；高度线在世界 X 最小侧
-    m_w = _total_margin(extents, 'Y-' if is_plan else 'Z-')
-    m_h = _total_margin(extents, 'X-')
-    moved = (m_w > _DIM_MARGIN) or (m_h > _DIM_MARGIN)
-
-    if is_plan:
-        v_axis = 'Y'
-        v0, v1 = y0, y1
-        depth = (z0 + z1) / 2.0
-    else:
-        v_axis = 'Z'
-        v0, v1 = z0, z1
-        depth = (y0 + y1) / 2.0
-
-    def _wpt(a, b, c):
-        return DB.XYZ(a, b, c)
-
-    # ---- 宽度（下方）：X 方向最外两侧 ----
-    west = east = None
+    # ---- 宽度（下方）：沿 h 最外两侧 ----
+    lo_h = hi_h = None
     for e in elems:
-        fl = _axial_faces(e, 'X')
+        fl = _axial_faces(e, h)
         if not fl:
             continue
         c0, f0 = fl[0]
         c1, f1 = fl[-1]
-        if west is None or c0 < west[0]:
-            west = (c0, f0)
-        if east is None or c1 > east[0]:
-            east = (c1, f1)
-    # 线两端的延伸量仍为 _DIM_MARGIN（与原来一致），外移只改变线离框的距离 m_w / m_h
-    if west and east:
-        if is_plan:
-            p1 = _wpt(x0 - _DIM_MARGIN, v0 - m_w, depth)
-            p2 = _wpt(x1 + _DIM_MARGIN, v0 - m_w, depth)
-        else:
-            p1 = _wpt(x0 - _DIM_MARGIN, depth, v0 - m_w)
-            p2 = _wpt(x1 + _DIM_MARGIN, depth, v0 - m_w)
-        if _try_dim(view, west[1]['ref'], east[1]['ref'], p1, p2, ledger):
+        if lo_h is None or c0 < lo_h[0]:
+            lo_h = (c0, f0)
+        if hi_h is None or c1 > hi_h[0]:
+            hi_h = (c1, f1)
+    if lo_h and hi_h:
+        p1 = _mk(fr, h0 - _DIM_MARGIN, v0 - m_w, dep)
+        p2 = _mk(fr, h1 + _DIM_MARGIN, v0 - m_w, dep)
+        if _try_dim(view, lo_h[1]['ref'], hi_h[1]['ref'], p1, p2, ledger):
             made += 1
 
-    # ---- 高度（左侧）：竖向最外两侧 ----
-    lo = hi = None
+    # ---- 高度（左侧）：沿 v 最外两侧 ----
+    lo_v = hi_v = None
     for e in elems:
-        fl = _axial_faces(e, v_axis)
+        fl = _axial_faces(e, v)
         if not fl:
             continue
         c0, f0 = fl[0]
         c1, f1 = fl[-1]
-        if lo is None or c0 < lo[0]:
-            lo = (c0, f0)
-        if hi is None or c1 > hi[0]:
-            hi = (c1, f1)
-    if lo and hi:
-        if is_plan:
-            p1 = _wpt(x0 - m_h, v0 - _DIM_MARGIN, depth)
-            p2 = _wpt(x0 - m_h, v1 + _DIM_MARGIN, depth)
-        else:
-            p1 = _wpt(x0 - m_h, depth, v0 - _DIM_MARGIN)
-            p2 = _wpt(x0 - m_h, depth, v1 + _DIM_MARGIN)
-        if _try_dim(view, lo[1]['ref'], hi[1]['ref'], p1, p2, ledger):
+        if lo_v is None or c0 < lo_v[0]:
+            lo_v = (c0, f0)
+        if hi_v is None or c1 > hi_v[0]:
+            hi_v = (c1, f1)
+    if lo_v and hi_v:
+        p1 = _mk(fr, h0 - m_h, v0 - _DIM_MARGIN, dep)
+        p2 = _mk(fr, h0 - m_h, v1 + _DIM_MARGIN, dep)
+        if _try_dim(view, lo_v[1]['ref'], hi_v[1]['ref'], p1, p2, ledger):
             made += 1
 
-    # 外移后的总线须在裁剪框内（只有外移时才补；剖面才有这套外扩规则）
-    if moved and not is_plan:
-        _ensure_crop_need(view, 'X', (x0 - m_h, x1, z0 - m_w, z1))
-
+    # 尺寸线与外移后的总线都须落在裁剪框内（框被裁到模型之外时自动外扩）
+    _ensure_crop_need(view, h, v, (h0 - max(m_h, _DIM_MARGIN), h1 + _DIM_MARGIN,
+                                   v0 - max(m_w, _DIM_MARGIN), v1 + _DIM_MARGIN))
     return made
 
 
@@ -766,22 +876,23 @@ def _pick(lst, want_max):
     return min(lst, key=lambda t: t[0])
 
 
-def _inner_walls(elems, box, h_axis, lsign, stats=None):
-    """在井构件的大面中识别四侧内壁。图纸坐标：左右两侧用 s（向图纸右增大），上下两侧用 z。
+def _inner_walls(elems, box, fr, stats=None):
+    """在井构件的大面中识别四侧内壁（世界坐标）。L/R 为水平轴两侧，B/T 为竖向轴两侧；
+    L、B 为坐标较小的一侧，R、T 为坐标较大的一侧。
     返回 (walls, fb_sides)：walls = {'L','R','B','T': (坐标, 面字典, 是否用了外壁) 或 None}，
     fb_sides 为改用外壁的侧别列表。
-    内壁判据（设 s 向图纸右为正）：
-      左内壁：法线朝右（+s，指向井内）、位于外包框左 1/3 内的面中 s 最大者；
-      右内壁：法线朝左（-s）、位于外包框右 1/3 内的面中 s 最小者；
-      下内壁：法线朝上（+z）、位于外包框下 1/3 内的面中 z 最大者；
-      上内壁：法线朝下（-z）、位于外包框上 1/3 内的面中 z 最小者。
-    某侧找不到时改用外壁（法线朝外、位于同侧 1/3 内、最靠外者），不静默：记入 fb_sides，由报告显示。
+    内壁判据：
+      L：法线指向 +h（井内）、位于包围盒较小 h 侧 1/3 内的面中坐标最大者；
+      R：法线指向 -h、位于较大 h 侧 1/3 内的面中坐标最小者；
+      B：法线指向 +v、位于较小 v 侧 1/3 内的面中坐标最大者；
+      T：法线指向 -v、位于较大 v 侧 1/3 内的面中坐标最小者。
+    某侧找不到时改用外壁（法线朝外、位于同侧 1/3 内、最靠外者），记入 fb_sides，由报告显示。
     """
-    x0, x1, y0, y1, z0, z1 = box
-    h0, h1 = (x0, x1) if h_axis == 'X' else (y0, y1)
-    s_lo, s_hi = sorted((_to_s(h0, lsign), _to_s(h1, lsign)))
-    zone_s = (s_hi - s_lo) * _WALL_ZONE_FRAC
-    zone_z = (z1 - z0) * _WALL_ZONE_FRAC
+    h, v = fr['h'], fr['v']
+    h0, h1 = _rng_of(box, h)
+    v0, v1 = _rng_of(box, v)
+    zone_h = (h1 - h0) * _WALL_ZONE_FRAC
+    zone_v = (v1 - v0) * _WALL_ZONE_FRAC
     tol = _AXIAL_TOL
     inner_c = {'L': [], 'R': [], 'B': [], 'T': []}
     outer_c = {'L': [], 'R': [], 'B': [], 'T': []}
@@ -793,31 +904,20 @@ def _inner_walls(elems, box, h_axis, lsign, stats=None):
             try:
                 n = f['norm']
                 o = f['orig']
-                ns = -lsign * (n.X if h_axis == 'X' else n.Y)
-                s = _to_s(o.X if h_axis == 'X' else o.Y, lsign)
-                z = o.Z
-                if abs(ns) >= tol:
-                    if s_lo <= s <= s_lo + zone_s:
-                        if ns >= tol:
-                            inner_c['L'].append((s, f))
-                        else:
-                            outer_c['L'].append((s, f))
-                    if s_hi - zone_s <= s <= s_hi:
-                        if ns <= -tol:
-                            inner_c['R'].append((s, f))
-                        else:
-                            outer_c['R'].append((s, f))
-                if abs(n.Z) >= tol:
-                    if z0 <= z <= z0 + zone_z:
-                        if n.Z >= tol:
-                            inner_c['B'].append((z, f))
-                        else:
-                            outer_c['B'].append((z, f))
-                    if z1 - zone_z <= z <= z1:
-                        if n.Z <= -tol:
-                            inner_c['T'].append((z, f))
-                        else:
-                            outer_c['T'].append((z, f))
+                nh = _coord(n, h)
+                ph = _coord(o, h)
+                nv = _coord(n, v)
+                pv = _coord(o, v)
+                if abs(nh) >= tol:
+                    if h0 <= ph <= h0 + zone_h:
+                        (inner_c['L'] if nh >= tol else outer_c['L']).append((ph, f))
+                    if h1 - zone_h <= ph <= h1:
+                        (inner_c['R'] if nh <= -tol else outer_c['R']).append((ph, f))
+                if abs(nv) >= tol:
+                    if v0 <= pv <= v0 + zone_v:
+                        (inner_c['B'] if nv >= tol else outer_c['B']).append((pv, f))
+                    if v1 - zone_v <= pv <= v1:
+                        (inner_c['T'] if nv <= -tol else outer_c['T']).append((pv, f))
             except:
                 continue
 
@@ -842,117 +942,144 @@ def _note_reach(extents, key, dist):
 
 def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
     """为视图内位于井内的每根排管生成尺寸链。返回 (生成尺寸数, 原因)；原因为 None 表示正常处理。
-    每根排管两条链（每条链 3 段 + 1 道总内尺寸）：
-      水平链：排管在下半部 → 放在井外下侧；上半部 → 放在井外上侧。
-      竖向链：排管在左半部 → 放在井外左侧；否则放在井外右侧。
+    排管按截面判断两类链（平面与剖面/立面共用）：
+      水平链（沿视图水平轴）：排管截面的水平宽度在井内壁之间时（剖面/立面为端面朝向视线的排管，
+        平面为沿竖向轴走的排管）；放在井外下侧或上侧，取排管伸出井外的那一侧（都不伸出则看排管中心）。
+      竖向链（沿视图竖向轴）：排管截面的竖向宽度在井内壁之间时（剖面/立面为截面高度 Z，
+        平面为沿水平轴走的排管的另一水平宽度）；放在井外左侧或右侧，取排管伸出井外的那一侧。
+    两侧都伸出井外的排管（穿井）不标，计入「穿井」跳过原因。
     同一侧的链依次向外排，每道链占两层（链线 + 外侧总线），层间距为 _CHAIN_STEP_FT。
     extents 若传入 dict，则记下每个世界方向上最外一道链线离外包框的距离（键如 'Z-'、'X+'），
-    供 make_total_dims 把外包总尺寸线移到链线之外。"""
+    供 make_total_dims 把外包总尺寸线移到链线之外。
+    """
     made = 0
-    try:
-        if view.ViewType == DB.ViewType.FloorPlan:
-            return 0, '平面视图不生成排管尺寸链'
-    except:
-        pass
     rng = crop_world_range(view)
     if rng is None:
         return 0, '无裁剪框'
-    left = _view_left(view)
-    h_axis = 'X' if abs(left.X) > 0.5 else 'Y'
-    d_axis = 'X' if h_axis == 'Y' else 'Y'
-    lsign = 1.0 if ((left.X if h_axis == 'X' else left.Y) >= 0) else -1.0
+    fr = _frame(view)
+    h, v, d = fr['h'], fr['v'], fr['d']
+    plan = fr['plan']
 
-    banks = _find_banks(rng, h_axis, stats)
+    banks = _find_banks(rng, fr, stats)
     if not banks:
         return 0, '视图内无排管（结构框架）'
 
-    x0, x1, y0, y1, z0, z1 = box
-    d_mid = (x0 + x1) / 2.0 if d_axis == 'X' else (y0 + y1) / 2.0
-    walls, fb_sides = _inner_walls(elems, box, h_axis, lsign, stats)
-    if any(v is None for v in walls.values()):
+    h0, h1 = _rng_of(box, h)
+    v0, v1 = _rng_of(box, v)
+    d0, d1 = _rng_of(box, d)
+    d_mid = (d0 + d1) / 2.0
+    walls, fb_sides = _inner_walls(elems, box, fr, stats)
+    if any(x is None for x in walls.values()):
         for _ in banks:
             _bump(stats, _SKIP_BANK_ERR)
         return 0, '井内壁与外壁均无法识别'
 
-    h0, h1 = (x0, x1) if h_axis == 'X' else (y0, y1)
-    s_lo, s_hi = sorted((_to_s(h0, lsign), _to_s(h1, lsign)))
-    sL, wl = walls['L'][0], walls['L'][1]
-    sR, wr = walls['R'][0], walls['R'][1]
-    zB, wb = walls['B'][0], walls['B'][1]
-    zT, wt = walls['T'][0], walls['T'][1]
-    s_mid = (sL + sR) / 2.0
-    z_mid = (zB + zT) / 2.0
-    h_mid = (h0 + h1) / 2.0
+    wL, wl = walls['L'][0], walls['L'][1]
+    wR, wr = walls['R'][0], walls['R'][1]
+    wB, wb = walls['B'][0], walls['B'][1]
+    wT, wt = walls['T'][0], walls['T'][1]
+    h_mid = (wL + wR) / 2.0
+    v_mid = (wB + wT) / 2.0
 
-    def P(sv, zv):
-        """图纸坐标 (s, z) → 世界点（落在视图深度 d_mid 上）。"""
-        return _pt(h_axis, _to_h(sv, lsign), d_axis, d_mid, zv)
+    def PT(hv, vv):
+        return _mk(fr, hv, vv, d_mid)
 
-    cnt = {'L': 0, 'R': 0, 'B': 0, 'T': 0}   # 每侧已占用的尺寸线层数
-    ext_s = [s_lo, s_hi]
-    ext_z = [z0, z1]
+    cnt = {'L': 0, 'R': 0, 'B': 0, 'T': 0}   # 每侧已占用的层数（每道链占两层）
+    ext_h = [h0, h1]
+    ext_v = [v0, v1]
+
+    def _layers(side):
+        k = cnt[side]
+        cnt[side] += 2
+        off_seg = _CHAIN_OFFSET_FT + k * _CHAIN_STEP_FT
+        return off_seg, off_seg + _CHAIN_STEP_FT
+
+    def _pick_side(lo, hi, wlo, whi, mid, neg, pos):
+        """排管在某轴上的范围 [lo,hi] 相对井内壁 [wlo,whi]：只伸出一侧取该侧；都不伸出看中心；两侧都伸出返回 None（穿井）。"""
+        out_lo = lo < wlo - _IN_TOL_FT
+        out_hi = hi > whi + _IN_TOL_FT
+        if out_lo and out_hi:
+            return None
+        if out_lo:
+            return neg
+        if out_hi:
+            return pos
+        return neg if (lo + hi) / 2.0 < mid else pos
 
     for bank in banks:
         try:
-            bf = _axial_all(bank)
-            hf = bf[h_axis]
-            zf = bf['Z']
-            if len(hf) < 2 or len(zf) < 2:
+            bb = bank.get_BoundingBox(None)
+            if bb is None:
                 _bump(stats, _SKIP_BANK_DIR)
                 continue
-            bs = sorted([(_to_s(c, lsign), f) for c, f in hf], key=lambda t: t[0])
-            bl_s, bl_f = bs[0]
-            br_s, br_f = bs[-1]
-            bb_z, bb_f = zf[0]
-            bt_z, bt_f = zf[-1]
-            if br_s - bl_s <= 0 or bt_z - bb_z <= 0:
+            dh = _bb_span(bb, h)
+            dv = _bb_span(bb, v)
+            dd = _bb_span(bb, d)
+            if plan:
+                want_h = dh < dv      # 沿竖向轴走：水平截面宽 = dh
+                want_v = dv < dh      # 沿水平轴走：竖向截面宽 = dv
+            else:
+                want_h = dh < dd      # 端面朝向视线：水平截面宽 = dh
+                want_v = True         # 截面高度（Z）总可标
+            if not (want_h or want_v):
                 _bump(stats, _SKIP_BANK_DIR)
                 continue
-            if (bl_s < sL - _IN_TOL_FT or br_s > sR + _IN_TOL_FT or
-                    bb_z < zB - _IN_TOL_FT or bt_z > zT + _IN_TOL_FT):
+            bf = _axial_all(bank, _DIM_AXIAL_TOL)
+            hf = bf[h]
+            vf = bf[v]
+            if (want_h and len(hf) < 2) or (want_v and len(vf) < 2):
+                _bump(stats, _SKIP_BANK_DIR)
+                continue
+            hb_lo, hb_lo_f = hf[0]
+            hb_hi, hb_hi_f = hf[-1]
+            vb_lo, vb_lo_f = vf[0]
+            vb_hi, vb_hi_f = vf[-1]
+            # 水平链：截面水平宽在井内壁之间，且竖向范围与井相交
+            ok_h = (want_h and hb_lo >= wL - _IN_TOL_FT and hb_hi <= wR + _IN_TOL_FT
+                    and vb_lo < wT and vb_hi > wB)
+            # 竖向链：截面竖向范围在井内壁之间，且水平范围与井相交
+            ok_v = (want_v and vb_lo >= wB - _IN_TOL_FT and vb_hi <= wT + _IN_TOL_FT
+                    and hb_lo < wR and hb_hi > wL)
+            if not (ok_h or ok_v):
                 _bump(stats, _SKIP_BANK_OUT)
                 continue
-
-            v_side = 'B' if (bb_z + bt_z) / 2.0 < z_mid else 'T'
-            h_side = 'L' if (bl_s + br_s) / 2.0 < s_mid else 'R'
             n_ch = 0
-
-            # ---- 水平链：内壁—排管—内壁 + 总内宽（图纸 s 方向） ----
-            k = cnt[v_side]
-            off_seg = _CHAIN_OFFSET_FT + k * _CHAIN_STEP_FT
-            off_tot = off_seg + _CHAIN_STEP_FT
-            cnt[v_side] += 2
-            if v_side == 'B':
-                zs, zt = z0 - off_seg, z0 - off_tot
-                ext_z[0] = min(ext_z[0], zt)
-                _note_reach(extents, 'Z-', off_tot)
-            else:
-                zs, zt = z1 + off_seg, z1 + off_tot
-                ext_z[1] = max(ext_z[1], zt)
-                _note_reach(extents, 'Z+', off_tot)
-            n_ch += _seg_dim(view, wl['ref'], bl_f['ref'], P(sL, zs), P(bl_s, zs), ledger, bl_s - sL)
-            n_ch += _seg_dim(view, bl_f['ref'], br_f['ref'], P(bl_s, zs), P(br_s, zs), ledger, br_s - bl_s)
-            n_ch += _seg_dim(view, br_f['ref'], wr['ref'], P(br_s, zs), P(sR, zs), ledger, sR - br_s)
-            n_ch += _seg_dim(view, wl['ref'], wr['ref'], P(sL, zt), P(sR, zt), ledger, sR - sL)
-
-            # ---- 竖向链：内底—排管—内顶 + 总内高（图纸 z 方向） ----
-            k = cnt[h_side]
-            off_seg = _CHAIN_OFFSET_FT + k * _CHAIN_STEP_FT
-            off_tot = off_seg + _CHAIN_STEP_FT
-            cnt[h_side] += 2
-            if h_side == 'L':
-                ss, st = s_lo - off_seg, s_lo - off_tot
-                ext_s[0] = min(ext_s[0], st)
-            else:
-                ss, st = s_hi + off_seg, s_hi + off_tot
-                ext_s[1] = max(ext_s[1], st)
-            # 竖向链线在世界坐标中的方向（X+/X-，或视图为 X 向时 Y+/Y-）
-            _note_reach(extents, h_axis + ('+' if _to_h(st, lsign) > h_mid else '-'), off_tot)
-            n_ch += _seg_dim(view, wb['ref'], bb_f['ref'], P(ss, zB), P(ss, bb_z), ledger, bb_z - zB)
-            n_ch += _seg_dim(view, bb_f['ref'], bt_f['ref'], P(ss, bb_z), P(ss, bt_z), ledger, bt_z - bb_z)
-            n_ch += _seg_dim(view, bt_f['ref'], wt['ref'], P(ss, bt_z), P(ss, zT), ledger, zT - bt_z)
-            n_ch += _seg_dim(view, wb['ref'], wt['ref'], P(st, zB), P(st, zT), ledger, zT - zB)
-
+            if ok_h:
+                side = _pick_side(vb_lo, vb_hi, wB, wT, v_mid, 'B', 'T')
+                if side is None:
+                    _bump(stats, _SKIP_BANK_THROUGH)
+                else:
+                    off_seg, off_tot = _layers(side)
+                    if side == 'B':
+                        vs, vt = v0 - off_seg, v0 - off_tot
+                        _note_reach(extents, v + '-', off_tot)
+                        ext_v[0] = min(ext_v[0], vt)
+                    else:
+                        vs, vt = v1 + off_seg, v1 + off_tot
+                        _note_reach(extents, v + '+', off_tot)
+                        ext_v[1] = max(ext_v[1], vt)
+                    n_ch += _seg_dim(view, wl['ref'], hb_lo_f['ref'], PT(wL, vs), PT(hb_lo, vs), ledger, hb_lo - wL)
+                    n_ch += _seg_dim(view, hb_lo_f['ref'], hb_hi_f['ref'], PT(hb_lo, vs), PT(hb_hi, vs), ledger, hb_hi - hb_lo)
+                    n_ch += _seg_dim(view, hb_hi_f['ref'], wr['ref'], PT(hb_hi, vs), PT(wR, vs), ledger, wR - hb_hi)
+                    n_ch += _seg_dim(view, wl['ref'], wr['ref'], PT(wL, vt), PT(wR, vt), ledger, wR - wL)
+            if ok_v:
+                side = _pick_side(hb_lo, hb_hi, wL, wR, h_mid, 'L', 'R')
+                if side is None:
+                    _bump(stats, _SKIP_BANK_THROUGH)
+                else:
+                    off_seg, off_tot = _layers(side)
+                    if side == 'L':
+                        hs, ht = h0 - off_seg, h0 - off_tot
+                        _note_reach(extents, h + '-', off_tot)
+                        ext_h[0] = min(ext_h[0], ht)
+                    else:
+                        hs, ht = h1 + off_seg, h1 + off_tot
+                        _note_reach(extents, h + '+', off_tot)
+                        ext_h[1] = max(ext_h[1], ht)
+                    n_ch += _seg_dim(view, wb['ref'], vb_lo_f['ref'], PT(hs, wB), PT(hs, vb_lo), ledger, vb_lo - wB)
+                    n_ch += _seg_dim(view, vb_lo_f['ref'], vb_hi_f['ref'], PT(hs, vb_lo), PT(hs, vb_hi), ledger, vb_hi - vb_lo)
+                    n_ch += _seg_dim(view, vb_hi_f['ref'], wt['ref'], PT(hs, vb_hi), PT(hs, wT), ledger, wT - vb_hi)
+                    n_ch += _seg_dim(view, wb['ref'], wt['ref'], PT(ht, wB), PT(ht, wT), ledger, wT - wB)
             if n_ch:
                 made += n_ch
                 _bump(stats, _ST_BANK_OK)
@@ -963,8 +1090,7 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
     if made:
         for _ in fb_sides:
             _bump(stats, _SKIP_WALL_FB)
-        ha, hb = _to_h(ext_s[0], lsign), _to_h(ext_s[1], lsign)
-        _ensure_crop_need(view, h_axis, (min(ha, hb), max(ha, hb), ext_z[0], ext_z[1]))
+        _ensure_crop_need(view, h, v, (ext_h[0], ext_h[1], ext_v[0], ext_v[1]))
     return made, None
 
 
@@ -1167,9 +1293,11 @@ def main():
         ok_views = 0
         stats = {}
         notes = []
+        dim_errs = []
         try:
             for v in target_views:
                 try:
+                    del _DIM_ERRS[:]
                     purged += purge_dims(v)
 
                     elems = collect_target_elems(v, stats)
@@ -1177,7 +1305,7 @@ def main():
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
 
-                    box = union_box(v, elems)
+                    box = _clip_box(union_box(v, elems), crop_world_range(v))
                     if box is None:
                         notes.append(('{}（无法计算包围盒）'.format(v.Name), 0))
                         continue
@@ -1189,6 +1317,7 @@ def main():
                     n = make_total_dims(v, elems, box, led, ext)
                     _bump(stats, _ST_DUP, led.dup)
                     made += n + cn
+                    dim_errs.extend(_DIM_ERRS)
                     if n + cn:
                         ok_views += 1
                         notes.append(('{}'.format(v.Name), n + cn))
@@ -1220,6 +1349,12 @@ def main():
             msg += '• 重复选择的视图（已合并）：{} 个\n'.format(dup_views)
         if stats.get(_ST_DUP):
             msg += '• 同位置重复尺寸（已跳过）：{} 道\n'.format(stats[_ST_DUP])
+        if dim_errs:
+            uniq = []
+            for m in dim_errs:
+                if m not in uniq:
+                    uniq.append(m)
+            msg += '• 尺寸创建失败：{} 道（Revit 拒绝）：{}\n'.format(len(dim_errs), '；'.join(uniq[:3]))
         skip_txt = _fmt_skips(stats)
         if skip_txt:
             msg += '\n跳过的构件（按视图累计）：\n' + skip_txt
