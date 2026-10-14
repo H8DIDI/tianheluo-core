@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 __title__ = '一键井大样标注'
 __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 生成两类尺寸：\n'
-           '① 外包总尺寸：按视图内可见构件（不含管道）的外包框，下方标宽、左侧标高；\n'
+           '① 总尺寸：两侧内壁之间的净尺寸，下方标宽、左侧标高（平面、北只标宽；南标宽和高；东、西不标）；\n'
            '② 井内壁至排管尺寸链：识别井内壁，对位于井内的每根排管，下方/上方标水平尺寸链'
            '（内壁—排管边—排管宽—排管边—内壁，一条多段尺寸），左侧/右侧标竖向尺寸链（同理，一条多段尺寸）。\n'
            '排管尺寸链在平面与剖面/立面视图都生成；每次运行先清除视图内引用井构件或排管的旧尺寸再重新生成（不动管道等其它尺寸）。')
@@ -206,7 +206,7 @@ def _face_area(f):
     return None
 
 
-def _extract_faces(elem):
+def _extract_faces(elem, instance=False):
     """提取构件所有面引用，带世界法线、原点与面积（非平面面积为 None）。非平面取 UV 中心代表值。"""
     opt = DB.Options()
     opt.ComputeReferences = True
@@ -234,7 +234,10 @@ def _extract_faces(elem):
     def _walk(ge, tr):
         for obj in ge:
             if isinstance(obj, DB.GeometryInstance):
-                _walk(obj.GetSymbolGeometry(), tr.Multiply(obj.Transform))
+                if instance:
+                    _walk(obj.GetInstanceGeometry(), tr)
+                else:
+                    _walk(obj.GetSymbolGeometry(), tr.Multiply(obj.Transform))
             elif hasattr(obj, 'Faces') and obj.Faces.Size > 0:
                 for f in obj.Faces:
                     if f.Reference is None:
@@ -281,11 +284,11 @@ def _axial_faces(elem, axis):
     return out
 
 
-def _axial_all(elem, tol=None):
+def _axial_all(elem, tol=None, instance=False):
     """构件三个方向的严格轴向面，返回 {'X':[(坐标,面),...],...}，按轴排序去重（排管尺寸链用）。"""
     res = {'X': [], 'Y': [], 'Z': []}
     seen = {'X': [], 'Y': [], 'Z': []}
-    for f in _extract_faces(elem):
+    for f in _extract_faces(elem, instance):
         n = f['norm']
         try:
             for ax, v, c in (('X', abs(n.X), f['orig'].X),
@@ -293,12 +296,16 @@ def _axial_all(elem, tol=None):
                              ('Z', abs(n.Z), f['orig'].Z)):
                 if v < (tol or _AXIAL_TOL):
                     continue
-                dup = False
-                for s in seen[ax]:
+                idx = -1
+                for i, s in enumerate(seen[ax]):
                     if abs(s - c) < 0.005:
-                        dup = True
+                        idx = i
                         break
-                if dup:
+                if idx >= 0:
+                    # 同一坐标有多个面时，留面积最大的（主表面；小面多是内腔碎面，提交后引用会失效）
+                    old_a = res[ax][idx][1].get('area') or 0.0
+                    if (f.get('area') or 0.0) > old_a:
+                        res[ax][idx] = (c, f)
                     continue
                 seen[ax].append(c)
                 res[ax].append((c, f))
@@ -748,6 +755,53 @@ def _bb_span(bb, axis):
     return abs(hi - lo)
 
 
+def _end_edges(bank, run, m, near):
+    """排管靠近井的那一端的端面短边（与排管走向垂直、且垂直于测量轴 m 的直边）。
+    标准图用的就是这类线性参照：有坡度的排管也稳定，重新生成后不会失效。
+    返回 (小侧值, 小侧引用, 大侧值, 大侧引用)，找不到返回 None。run 为排管走向轴，near 为靠近的坐标。"""
+    third = [a for a in ('X', 'Y', 'Z') if a not in (run, m)][0]
+    opt = DB.Options()
+    opt.ComputeReferences = True
+    cand = []
+
+    def _walk(ge, tr):
+        for obj in ge:
+            if isinstance(obj, DB.GeometryInstance):
+                _walk(obj.GetSymbolGeometry(), tr.Multiply(obj.Transform))
+            elif isinstance(obj, DB.Solid):
+                for e in obj.Edges:
+                    try:
+                        if e.Reference is None:
+                            continue
+                        c = e.AsCurve()
+                        if not isinstance(c, DB.Line):
+                            continue
+                        p0 = tr.OfPoint(c.GetEndPoint(0))
+                        p1 = tr.OfPoint(c.GetEndPoint(1))
+                        ln = p0.DistanceTo(p1)
+                        if ln <= 0.01 or abs(_coord(p1, third) - _coord(p0, third)) / ln < 0.99:
+                            continue
+                        rc = (_coord(p0, run) + _coord(p1, run)) / 2.0
+                        mv = (_coord(p0, m) + _coord(p1, m)) / 2.0
+                        cand.append((abs(rc - near), mv, e.Reference))
+                    except:
+                        continue
+
+    try:
+        _walk(bank.get_Geometry(opt), DB.Transform.Identity)
+    except:
+        return None
+    if len(cand) < 2:
+        return None
+    best = min(c[0] for c in cand)
+    near_c = [c for c in cand if c[0] <= best + 0.05]
+    lo = min(near_c, key=lambda c: c[1])
+    hi = max(near_c, key=lambda c: c[1])
+    if hi[1] - lo[1] < 0.01:
+        return None
+    return lo[1], lo[2], hi[1], hi[2]
+
+
 def _bb_mid(bb, axis):
     """包围盒在某世界轴上的中点（排管侧别按它判断，比面的范围稳定）。"""
     lo, hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), axis)
@@ -792,15 +846,44 @@ def _total_margin(extents, key):
     return max(_DIM_MARGIN, reach + _TOTAL_GAP_FT)
 
 
-def make_total_dims(view, elems, box, ledger=None, extents=None):
-    """按外包框生成总尺寸：下方一道宽度（沿视图水平轴），左侧一道高度（沿视图竖向轴）。
+# 每张视图标哪条总线（与标准图一致）：W = 宽（下方），H = 高（左侧）；按视图名前缀判断，未列出的视图两条都标
+_TOTAL_RULES = {'平面': 'W', '北': 'W', '南': 'WH', '西': '', '东': ''}
 
-    视图框架见 _frame：平面视图的竖向轴为另一条水平轴；剖面/立面的竖向轴为 Z。
-    尺寸线摆在外包框之外，并投影到视图平面上（见 _try_dim）。
-    参照面取沿该轴最外侧的严格轴向面；跨多个构件时取全局极值，标出来的就是整个外包框的总尺寸。
+
+def _total_rule(view):
+    nm = view.Name or ''
+    for pref, rule in _TOTAL_RULES.items():
+        if nm.startswith(pref + '_'):
+            return rule
+    return 'WH'
+
+
+def _extremes(elems, axis):
+    """构件在某世界轴上最外侧的两个严格轴向面：返回 (最小侧, 最大侧)，每个为 (坐标, 面字典) 或 None。"""
+    lo = hi = None
+    for e in elems:
+        fl = _axial_faces(e, axis)
+        if not fl:
+            continue
+        c0, f0 = fl[0]
+        c1, f1 = fl[-1]
+        if lo is None or c0 < lo[0]:
+            lo = (c0, f0)
+        if hi is None or c1 > hi[0]:
+            hi = (c1, f1)
+    return lo, hi
+
+
+def make_total_dims(view, elems, box, ledger=None, extents=None):
+    """生成总尺寸，取两侧内壁之间的净尺寸（与标准图一致）：宽度在下方标，高度在左侧标。
+    哪些视图标哪条由 _total_rule 决定（平面、北只标宽；南标宽和高；东、西不标）。
+    找不到内壁时退回到构件最外侧的面。尺寸线摆在外包框之外，并投影到视图平面上（见 _try_dim）。
     extents 由 make_chain_dims 填好时，总线所在一侧若有尺寸链，总线外移到最外一道链线之外。
     """
     made = 0
+    rule = _total_rule(view)
+    if not rule:
+        return 0
     fr = _frame(view)
     h, v, d = fr['h'], fr['v'], fr['d']
     h0, h1 = _rng_of(box, h)
@@ -811,41 +894,37 @@ def make_total_dims(view, elems, box, ledger=None, extents=None):
     m_w = _total_margin(extents, v + '-')
     m_h = _total_margin(extents, h + '-')
 
-    # ---- 宽度（下方）：沿 h 最外两侧 ----
-    lo_h = hi_h = None
-    for e in elems:
-        fl = _axial_faces(e, h)
-        if not fl:
-            continue
-        c0, f0 = fl[0]
-        c1, f1 = fl[-1]
-        if lo_h is None or c0 < lo_h[0]:
-            lo_h = (c0, f0)
-        if hi_h is None or c1 > hi_h[0]:
-            hi_h = (c1, f1)
-    if lo_h and hi_h:
-        p1 = _mk(fr, h0 - _DIM_MARGIN, v0 - m_w, dep)
-        p2 = _mk(fr, h1 + _DIM_MARGIN, v0 - m_w, dep)
-        if _try_dim(view, [lo_h[1]['ref'], hi_h[1]['ref']], p1, p2, ledger, dim_type=True):
-            made += 1
+    walls, _fb = _inner_walls(elems, box, fr)
 
-    # ---- 高度（左侧）：沿 v 最外两侧 ----
-    lo_v = hi_v = None
-    for e in elems:
-        fl = _axial_faces(e, v)
-        if not fl:
-            continue
-        c0, f0 = fl[0]
-        c1, f1 = fl[-1]
-        if lo_v is None or c0 < lo_v[0]:
-            lo_v = (c0, f0)
-        if hi_v is None or c1 > hi_v[0]:
-            hi_v = (c1, f1)
-    if lo_v and hi_v:
-        p1 = _mk(fr, h0 - m_h, v0 - _DIM_MARGIN, dep)
-        p2 = _mk(fr, h0 - m_h, v1 + _DIM_MARGIN, dep)
-        if _try_dim(view, [lo_v[1]['ref'], hi_v[1]['ref']], p1, p2, ledger, dim_type=True):
-            made += 1
+    # ---- 宽度（下方）：两侧内壁之间 ----
+    if 'W' in rule:
+        if walls['L'] and walls['R']:
+            a = (walls['L'][0], walls['L'][1]['ref'])
+            b = (walls['R'][0], walls['R'][1]['ref'])
+        else:
+            lo, hi = _extremes(elems, h)
+            a = (lo[0], lo[1]['ref']) if lo else None
+            b = (hi[0], hi[1]['ref']) if hi else None
+        if a and b:
+            p1 = _mk(fr, a[0] - _DIM_MARGIN, v0 - m_w, dep)
+            p2 = _mk(fr, b[0] + _DIM_MARGIN, v0 - m_w, dep)
+            if _try_dim(view, [a[1], b[1]], p1, p2, ledger, dim_type=True):
+                made += 1
+
+    # ---- 高度（左侧）：上下内壁之间 ----
+    if 'H' in rule:
+        if walls['B'] and walls['T']:
+            a = (walls['B'][0], walls['B'][1]['ref'])
+            b = (walls['T'][0], walls['T'][1]['ref'])
+        else:
+            lo, hi = _extremes(elems, v)
+            a = (lo[0], lo[1]['ref']) if lo else None
+            b = (hi[0], hi[1]['ref']) if hi else None
+        if a and b:
+            p1 = _mk(fr, h0 - m_h, a[0] - _DIM_MARGIN, dep)
+            p2 = _mk(fr, h0 - m_h, b[0] + _DIM_MARGIN, dep)
+            if _try_dim(view, [a[1], b[1]], p1, p2, ledger, dim_type=True):
+                made += 1
 
     # 尺寸线与外移后的总线都须落在裁剪框内（框被裁到模型之外时自动外扩）
     _ensure_crop_need(view, h, v, (h0 - max(m_h, _DIM_MARGIN), h1 + _DIM_MARGIN,
@@ -1068,13 +1147,40 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
             bf = _axial_all(bank, _DIM_AXIAL_TOL)
             hf = bf[h]
             vf = bf[v]
-            if (want_h and len(hf) < 2) or (want_v and len(vf) < 2):
+            # 排管走向（水平面内较长的轴）与靠近井的端面短边：优先用端面短边做参照，没有再用面
+            run = 'X' if _bb_span(bb, 'X') >= _bb_span(bb, 'Y') else 'Y'
+            he = ve = None
+            if want_h and run != h:
+                he = _end_edges(bank, run, h, (d0 + d1) / 2.0 if run == d else (wL if abs(_bb_mid(bb, run) - wL) < abs(_bb_mid(bb, run) - wR) else wR))
+            if want_v and run != v:
+                ve = _end_edges(bank, run, v, (d0 + d1) / 2.0 if run == d else (wL if abs(_bb_mid(bb, run) - wL) < abs(_bb_mid(bb, run) - wR) else wR))
+            if he:
+                hb_lo, hb_lo_r, hb_hi, hb_hi_r = he
+            elif len(hf) >= 2:
+                (hb_lo, hb_lo_f), (hb_hi, hb_hi_f) = hf[0], hf[-1]
+                hb_lo_r, hb_hi_r = hb_lo_f['ref'], hb_hi_f['ref']
+            else:
+                hb_lo = hb_hi = hb_lo_r = hb_hi_r = None
+            if ve:
+                vb_lo, vb_lo_r, vb_hi, vb_hi_r = ve
+            elif len(vf) >= 2:
+                (vb_lo, vb_lo_f), (vb_hi, vb_hi_f) = vf[0], vf[-1]
+                vb_lo_r, vb_hi_r = vb_lo_f['ref'], vb_hi_f['ref']
+            else:
+                vb_lo = vb_hi = vb_lo_r = vb_hi_r = None
+            if hb_lo is None:
+                want_h = False
+            if vb_lo is None:
+                want_v = False
+            if not (want_h or want_v):
                 _bump(stats, _SKIP_BANK_DIR)
                 continue
-            hb_lo, hb_lo_f = hf[0]
-            hb_hi, hb_hi_f = hf[-1]
-            vb_lo, vb_lo_f = vf[0]
-            vb_hi, vb_hi_f = vf[-1]
+            if hb_lo is None or vb_lo is None:
+                # 另一个方向缺数据时，用包围盒范围参与判断（链本身仍只在有参照的方向生成）
+                if hb_lo is None:
+                    hb_lo, hb_hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), h)
+                if vb_lo is None:
+                    vb_lo, vb_hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), v)
             # 水平链：截面水平宽在井内壁之间，且竖向范围与井相交
             ok_h = (want_h and hb_lo >= wL - _IN_TOL_FT and hb_hi <= wR + _IN_TOL_FT
                     and vb_lo < wT and vb_hi > wB)
@@ -1100,7 +1206,7 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
                         _note_reach(extents, v + '+', off)
                         ext_v[1] = max(ext_v[1], vs)
                     refs = _chain_refs((wL, wl['ref']), (wR, wr['ref']),
-                                       [(hb_lo, hb_lo_f['ref']), (hb_hi, hb_hi_f['ref'])])
+                                       [(hb_lo, hb_lo_r), (hb_hi, hb_hi_r)])
                     if len(refs) >= 3:
                         n_ch += _chain_dim(view, refs, PT(wL, vs), PT(wR, vs), ledger)
             if ok_v:
@@ -1118,7 +1224,7 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
                         _note_reach(extents, h + '+', off)
                         ext_h[1] = max(ext_h[1], hs)
                     refs = _chain_refs((wB, wb['ref']), (wT, wt['ref']),
-                                       [(vb_lo, vb_lo_f['ref']), (vb_hi, vb_hi_f['ref'])])
+                                       [(vb_lo, vb_lo_r), (vb_hi, vb_hi_r)])
                     if len(refs) >= 3:
                         n_ch += _chain_dim(view, refs, PT(hs, wB), PT(hs, wT), ledger)
             if n_ch:
@@ -1321,13 +1427,26 @@ def main():
         dup_views = len(target_views) - len(uniq_views)
         target_views = uniq_views
 
-        # ---------- 3. 执行（整次运行在一个事务内，Ctrl+Z 可整体撤销） ----------
-        t = DB.Transaction(doc, "KAIFA 一键井大样标注")
-        fho = t.GetFailureHandlingOptions()
-        fho.SetFailuresPreprocessor(_SilentFailures())
-        fho.SetClearAfterRollback(True)
-        t.SetFailureHandlingOptions(fho)
-        t.Start()
+        # ---------- 3. 执行（每张视图分「清旧尺寸、排管链、总尺寸」三步，各自一个事务；
+        #   Revit 提交时才会发现某些参照失效，失效的那一步整体回滚，其余步骤照常保留；整次运行合并为一次撤销） ----------
+        tg = DB.TransactionGroup(doc, "KAIFA 一键井大样标注")
+        tg.Start()
+
+        def _step(name, work):
+            """在独立事务里执行 work()；提交成功返回 True，失败（已回滚）返回 False。"""
+            t = DB.Transaction(doc, name)
+            fho = t.GetFailureHandlingOptions()
+            fho.SetFailuresPreprocessor(_SilentFailures())
+            fho.SetClearAfterRollback(True)
+            t.SetFailureHandlingOptions(fho)
+            t.Start()
+            try:
+                work()
+                return t.Commit() == DB.TransactionStatus.Committed
+            except Exception:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+                return False
 
         purged = 0
         made = 0
@@ -1335,49 +1454,78 @@ def main():
         stats = {}
         notes = []
         dim_errs = []
+        failed_steps = []
         try:
             for v in target_views:
                 try:
                     del _DIM_ERRS[:]
-                    purged += purge_dims(v)
-
                     elems = collect_target_elems(v, stats)
                     if not elems:
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
-
                     box = _clip_box(union_box(v, elems), crop_world_range(v))
                     if box is None:
                         notes.append(('{}（无法计算包围盒）'.format(v.Name), 0))
                         continue
 
+                    res = {'purged': 0, 'cn': 0, 'n': 0, 'why': None}
+
+                    def _purge():
+                        res['purged'] = purge_dims(v)
+                    _step("清除旧尺寸", _purge)
+                    purged += res['purged']
+
                     # 先排尺寸链，再排总尺寸：总尺寸需要知道各侧最外一道链线的位置
                     led = _SpotLedger()
                     ext = {}
-                    cn, creason = make_chain_dims(v, elems, box, led, stats, ext)
-                    n = make_total_dims(v, elems, box, led, ext)
+
+                    def _chains():
+                        res['cn'], res['why'] = make_chain_dims(v, elems, box, led, stats, ext)
+                    if not _step("排管尺寸链", _chains):
+                        res['cn'] = 0
+                        ext = {}
+                        led = _SpotLedger()
+                        failed_steps.append('{}：排管尺寸链（Revit 判定参照失效）'.format(v.Name))
+
+                    def _totals():
+                        res['n'] = make_total_dims(v, elems, box, led, ext)
+                    if not _step("总尺寸", _totals):
+                        # 个别视图总线与链放在一起时 Revit 判定参照失效：清掉重做，改成先总线、后链
+                        res['n'] = 0
+                        _step("清除旧尺寸", _purge)
+                        led = _SpotLedger()
+                        ext = {}
+                        ok_t = _step("总尺寸", _totals)
+                        ok_c = _step("排管尺寸链", _chains)
+                        if not ok_t:
+                            res['n'] = 0
+                            failed_steps.append('{}：总尺寸（Revit 判定参照失效）'.format(v.Name))
+                        if not ok_c:
+                            res['cn'] = 0
+                            failed_steps.append('{}：排管尺寸链（Revit 判定参照失效）'.format(v.Name))
+
                     _bump(stats, _ST_DUP, led.dup)
+                    cn = res['cn']
+                    n = res['n']
                     made += n + cn
                     dim_errs.extend(_DIM_ERRS)
                     if n + cn:
                         ok_views += 1
                         notes.append(('{}'.format(v.Name), n + cn))
                     else:
-                        why = creason if (creason and creason != '视图内无排管（结构框架）') else '未生成尺寸'
+                        why = res['why'] if (res['why'] and res['why'] != '视图内无排管（结构框架）') else '未生成尺寸'
                         notes.append(('{}（{}）'.format(v.Name, why), 0))
                 except Exception as ev:
                     notes.append(('{}（异常：{}）'.format(v.Name, ev), 0))
-            st = t.Commit()
-            committed = (st == DB.TransactionStatus.Committed)
+            tg.Assimilate()
+            committed = True
         except Exception as inner:
-            if t.HasStarted() and not t.HasEnded():
-                t.RollBack()
+            try:
+                tg.RollBack()
+            except Exception:
+                pass
             forms.alert('标注过程出错：\n' + str(inner) + '\n\n' + traceback.format_exc(),
                         title='一键井大样标注')
-            return
-
-        if not committed:
-            forms.alert('标注未能写入模型，本次修改未保存（Revit 事务状态：{}）。'.format(st), title='一键井大样标注')
             return
 
         # ---------- 4. 报告 ----------
@@ -1396,6 +1544,10 @@ def main():
                 if m not in uniq:
                     uniq.append(m)
             msg += '• 尺寸创建失败：{} 道（Revit 拒绝）：{}\n'.format(len(dim_errs), '；'.join(uniq[:3]))
+        if failed_steps:
+            msg += '• 未能写入的部分（已跳过，其余照常）：\n'
+            for x in failed_steps[:10]:
+                msg += '    - {}\n'.format(x)
         skip_txt = _fmt_skips(stats)
         if skip_txt:
             msg += '\n跳过的构件（按视图累计）：\n' + skip_txt
