@@ -39,7 +39,7 @@ RULES_PATH = _os.path.join(
     System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), "KaifaTools", "井展开图规则.json")
 DEFAULT_RULES = {
     "view_scale": 50,               # 视图比例 1:N
-    "crop_margin_mm": 1371.6,       # 平面裁剪框在井外的余量（原 4.5 ft）
+    "crop_margin_mm": 100,          # 平面裁剪框在井外的余量：井外边缘外延 100 mm
     "face_out_mm": 100,             # 剖切面在井外墙外移的距离
     "face_depth_mm": 1100,          # 剖面框沿视线方向的厚度
     "spacing_x_mm": 228.6,          # 左右剖面视图离平面的距离（图纸mm，原 0.75 ft）
@@ -1187,9 +1187,18 @@ def main():
                                     igeom = obj.GetInstanceGeometry()
                                     if igeom:
                                         for s in igeom:
-                                            if isinstance(s, DB.Solid) and s.Volume > 0.001:
-                                                found_s = True
+                                            if isinstance(s, DB.Solid) and s.Faces.Size > 0:
+                                                is_real = s.Volume > 0.001
                                                 for f in s.Faces:
+                                                    if not is_real:
+                                                        # 薄壳族（如 TELCO、LV 井，体积为 0）：只取竖直的大墙面，
+                                                        # 排除盖板、爬梯等小碎片，避免外轮廓被撑大
+                                                        try:
+                                                            if f.Area < 10.0 or abs(f.ComputeNormal(DB.UV(0.5, 0.5)).Z) > 0.2:
+                                                                continue
+                                                        except:
+                                                            continue
+                                                    found_s = True
                                                     mesh = f.Triangulate()
                                                     if mesh:
                                                         for pt in mesh.Vertices:
