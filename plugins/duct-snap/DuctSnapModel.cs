@@ -92,7 +92,7 @@ public sealed class SnapRow
 
     // Display helpers for the grid
     public string End => EndIndex == 0 ? "起点" : "终点";
-    public string Move => Kind is SnapKind.Extend or SnapKind.Trim or SnapKind.TrimToWellEdge or SnapKind.ExtendTooFar or SnapKind.TrimTooFar
+    public string Move => Kind is SnapKind.Extend or SnapKind.Trim or SnapKind.ToInnerWall or SnapKind.ExtendTooFar or SnapKind.TrimTooFar
         ? Math.Abs(MoveMm).ToString("0", System.Globalization.CultureInfo.InvariantCulture) : "";
     public string StartZ => ZText(StartZBeforeMm, StartZAfterMm);
     public string EndZ => ZText(EndZBeforeMm, EndZAfterMm);

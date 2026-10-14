@@ -80,14 +80,18 @@ public static class DuctSnapEngine
                 {
                     // The end is inside a well's footprint but the bank line never crosses the inner cavity
                     // (e.g. the bank runs along a wall). Do not skip silently: list it for a person to check.
+                    // 10 mm slack: an end already moved to the footprint edge must still count as "at the well".
                     var inside = wells.FirstOrDefault(w =>
-                        pts[k].X >= w.MinX && pts[k].X <= w.MaxX && pts[k].Y >= w.MinY && pts[k].Y <= w.MaxY);
+                        pts[k].X >= w.MinX - 10 && pts[k].X <= w.MaxX + 10 && pts[k].Y >= w.MinY - 10 && pts[k].Y <= w.MaxY + 10);
                     if (inside is not null)
                     {
-                        // The bank runs inside the wall and leaves the footprint: the excess (end -> footprint edge) is trimmed.
-                        var exit = DuctSnapMath.ExitDistance(pts[k], pts[1 - k], inside.MinX, inside.MaxX, inside.MinY, inside.MaxY);
-                        var dec = exit is { } e && e <= rules.MaxEdgeTrimMm
-                            ? new SnapDecision(SnapKind.TrimToWellEdge, e)
+                        // The bank runs inside the wall: move the end along the bank to the nearest inner wall face ahead of it.
+                        var cavInside = CavityOf(inside, rules);
+                        var toPlane = cavInside is { } ci ? DuctSnapMath.DistanceToInnerPlane(pts[k], pts[1 - k], ci) : null;
+                        // Trim (positive) may be long: the excess lies in the wall. Extend (negative) must be short: the end
+                        // is already at the well, so a long move means it belongs to a different place.
+                        var dec = toPlane is { } e && (e > 0 ? e <= rules.MaxEdgeTrimMm : -e <= rules.MaxExtendMm) && Math.Abs(e) > 1e-6
+                            ? new SnapDecision(SnapKind.ToInnerWall, e)
                             : new SnapDecision(SnapKind.Unrelated, 0);
                         picked[k] = (inside, dec);
                     }
@@ -104,7 +108,7 @@ public static class DuctSnapEngine
             {
                 var d = picked[k].Dec;
                 if (picked[k].Well is null) continue;
-                if (d.Kind is SnapKind.Extend or SnapKind.Trim or SnapKind.TrimToWellEdge && Math.Abs(d.T) >= rules.ToleranceMm)
+                if (d.Kind is SnapKind.Extend or SnapKind.Trim or SnapKind.ToInnerWall && Math.Abs(d.T) >= rules.ToleranceMm)
                 {
                     moved[k] = true;
                     newMm[k] = DuctSnapMath.Move(pts[k], pts[1 - k], d.T);
@@ -387,12 +391,18 @@ public static class DuctSnapEngine
                 (status, action) = ("需人工", "不动");
                 note = "无法识别这口井的内壁（井族几何不规则），未自动处理";
                 break;
-            case SnapKind.TrimToWellEdge:
-                if (willMove)
+            case SnapKind.ToInnerWall:
+                if (willMove && d.T > 0)
                 {
                     status = "可修改";
-                    action = "修剪到井的外缘";
-                    note = $"排管沿井墙走，端点在墙里；修剪掉井内多出的 {d.T:0} mm，端点停在井的外缘";
+                    action = "修剪到井的内壁";
+                    note = $"排管沿井墙走，端点在墙里；修剪掉墙里多出的 {d.T:0} mm，端点停在井的内壁";
+                }
+                else if (willMove)
+                {
+                    status = "可修改";
+                    action = "延伸到井的内壁";
+                    note = $"排管端点已在井外缘，延伸 {-d.T:0} mm 回到井的内壁";
                 }
                 else
                 {

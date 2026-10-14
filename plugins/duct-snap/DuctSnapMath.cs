@@ -26,7 +26,7 @@ public enum SnapKind
     Fit,           // already on the inner wall, within tolerance: no change
     Extend,        // stops short of the inner wall: extend into the well
     Trim,          // overshoots into the well: trim back to the inner wall on the bank side
-    TrimToWellEdge, // runs inside the well's wall, parallel to it: trim the excess back to the footprint edge
+    ToInnerWall, // runs inside the well's wall, parallel to it: move the end to the nearest inner-wall face ahead
     TrimTooFar,    // would need a trim longer than the limit: end sits in the middle of the well, a person decides
     ExtendTooFar,  // would need an extension longer than the limit: a person decides
     Through,       // the well lies ahead of this end on the bank side: the bank passes through the well
@@ -95,23 +95,35 @@ public static class DuctSnapMath
     }
 
     /// <summary>
-    /// Distance from an end, along the bank toward the other end, to where the bank leaves a rectangle (the well's
-    /// footprint). Used when the bank runs inside a wall and never crosses the inner cavity: the part inside the
-    /// footprint is the excess, and it is trimmed back to the footprint edge. Returns null when the end is outside the
-    /// rectangle or the other end is inside it (the bank does not leave the footprint, so there is no edge to trim to).
+    /// Signed distance from an end, along the bank, to the inner-wall face it should sit on (the cavity's four
+    /// boundary planes). Positive = trim ahead toward the other end (the end sits in the wall, outside the inner face).
+    /// Negative = extend back into the well (the end is already outside the well, beyond the inner face).
+    /// Returns null when no inner plane is in reach. Used when the bank runs inside a wall and never crosses the cavity.
     /// </summary>
-    public static double? ExitDistance(Pt2 end, Pt2 other, double minX, double maxX, double minY, double maxY)
+    public static double? DistanceToInnerPlane(Pt2 end, Pt2 other, Cavity cav)
     {
-        bool InBox(Pt2 p) => p.X >= minX && p.X <= maxX && p.Y >= minY && p.Y <= maxY;
-        if (!InBox(end) || InBox(other)) return null;
         double dx = other.X - end.X, dy = other.Y - end.Y;
         double len = Math.Sqrt(dx * dx + dy * dy);
         if (len < 1e-3) return null;
         double ux = dx / len, uy = dy / len;
-        double t = double.PositiveInfinity;
-        if (Math.Abs(ux) > 1e-9) t = Math.Min(t, ux > 0 ? (maxX - end.X) / ux : (minX - end.X) / ux);
-        if (Math.Abs(uy) > 1e-9) t = Math.Min(t, uy > 0 ? (maxY - end.Y) / uy : (minY - end.Y) / uy);
-        return double.IsPositiveInfinity(t) ? null : Math.Max(0, t);
+        // Signed distances to the four inner planes along the bank: positive = ahead (toward the other end).
+        double ahead = double.PositiveInfinity;   // nearest plane ahead
+        double behind = double.NegativeInfinity;  // nearest plane behind (closest to zero, i.e. the largest negative)
+        void Take(double t)
+        {
+            if (t > 1e-6) ahead = Math.Min(ahead, t);
+            else if (t < -1e-6) behind = Math.Max(behind, t);
+        }
+        if (Math.Abs(ux) > 1e-9)
+            foreach (double plane in new[] { cav.XLeft, cav.XRight }) Take((plane - end.X) / ux);
+        if (Math.Abs(uy) > 1e-9)
+            foreach (double plane in new[] { cav.YBottom, cav.YTop }) Take((plane - end.Y) / uy);
+
+        // Trim: an inner face lies ahead of the end (the end sits in the wall or the cavity's outer side).
+        if (!double.IsPositiveInfinity(ahead) && ahead <= len) return ahead;
+        // Extend: the end is already outside the well; the nearest inner face is behind it. Move back into the well.
+        if (!double.IsNegativeInfinity(behind)) return behind;
+        return null;
     }
 
     /// <summary>The end moved by T along the bank direction. Plan position only.</summary>

@@ -139,21 +139,22 @@ Check("a 300 mm elevation change at the start is reported", Near(zMoved.Elevatio
 var planOff = DuctSnapMath.CompareEnds(pa, pb, new Pt3(3040, 1500, 3300), pb);
 Check("a 40 mm plan error is reported, elevation unchanged", Near(planOff.PlanErrorMm, 40) && planOff.ElevationDiffMm == 0, $"{planOff}");
 
-// ---- ExitDistance: a bank running inside a well's wall, trimmed back to the footprint edge ----
-// Values from the live model: well TELCO-1600x2000 (footprint x 87665.5..89765.5, y -463199.8..-461699.8),
-// bank 8738118 starts at (88716.3, -461915.1) and runs west to (56716.3, -461915.1).
-var wellBox = (minX: 87665.5, maxX: 89765.5, minY: -463199.8, maxY: -461699.8);
-var exitModel = DuctSnapMath.ExitDistance(new Pt2(88716.3, -461915.1), new Pt2(56716.3, -461915.1),
-    wellBox.minX, wellBox.maxX, wellBox.minY, wellBox.maxY);
-Check("model bank in the wall: excess to the well edge is about 1051 mm", exitModel is { } ex1 && Near(ex1, 1050.8, 0.5), $"{exitModel:0.0}");
+// ---- DistanceToInnerPlane: a bank running inside a well's wall, moved to the inner wall face ahead ----
+// Values from the live model: well TELCO-1600x2000, inner cavity x 87915.5..89515.5, y -462949.8..-461949.8.
+// Bank 8738118 starts at (88716.3, -461915.1), 35 mm into the top wall, and runs west to (56716.3, -461915.1).
+var cavModel = new Cavity(87915.5, 89515.5, -462949.8, -461949.8);
+var toPlane = DuctSnapMath.DistanceToInnerPlane(new Pt2(88716.3, -461915.1), new Pt2(56716.3, -461915.1), cavModel);
+Check("model bank in the top wall: moves to the west inner face (about 801 mm)", toPlane is { } tp1 && Near(tp1, 800.8, 0.5), $"{toPlane:0.0}");
+var movedModel = toPlane is { } tp2 ? DuctSnapMath.Move(new Pt2(88716.3, -461915.1), new Pt2(56716.3, -461915.1), tp2) : default;
+Check("the end lands on the inner face x = 87915.5", Near(movedModel.X, 87915.5, 0.05), $"({movedModel.X:0.0},{movedModel.Y:0.0})");
 
-var exitDiag = DuctSnapMath.ExitDistance(new Pt2(0, 0), new Pt2(10, 10), -1, 1, -1, 1);
-Check("diagonal exit uses the nearer edge", exitDiag is { } ex2 && Near(ex2, Math.Sqrt(2)), $"{exitDiag}");
-
-Check("other end inside the footprint -> no edge to trim to (null)",
-    DuctSnapMath.ExitDistance(new Pt2(0, 0), new Pt2(0.5, 0.5), -1, 1, -1, 1) is null);
-Check("end outside the footprint -> null",
-    DuctSnapMath.ExitDistance(new Pt2(5, 0), new Pt2(10, 0), -1, 1, -1, 1) is null);
+var toPlaneDiag = DuctSnapMath.DistanceToInnerPlane(new Pt2(0, 0), new Pt2(10, 10), new Cavity(1, 5, 1, 5));
+Check("diagonal: nearest inner plane ahead is the one at 1", toPlaneDiag is { } tp3 && Near(tp3, Math.Sqrt(2)), $"{toPlaneDiag}");
+// The end already sits outside the well (at the outer edge, 250 mm outside the west inner face): extend back into the well.
+var toPlaneOut = DuctSnapMath.DistanceToInnerPlane(new Pt2(87665.5, -461915.1), new Pt2(56716.3, -461915.1), cavModel);
+Check("end already at the outer edge: extend back 250 mm to the inner face (negative)", toPlaneOut is { } tp4 && Near(tp4, -250, 0.5), $"{toPlaneOut:0.0}");
+Check("no inner plane ahead: the nearest one behind is used (negative)",
+    DuctSnapMath.DistanceToInnerPlane(new Pt2(10, 0), new Pt2(20, 0), new Cavity(-5, -1, -5, 5)) is { } tp5 && Near(tp5, -11, 0.01));
 
 Console.WriteLine();
 Console.WriteLine(failed == 0 ? "ALL PASS" : $"{failed} FAILED");
