@@ -3,7 +3,7 @@ __title__ = '一键井大样标注'
 __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 生成两类尺寸：\n'
            '① 外包总尺寸：按视图内可见构件（不含管道）的外包框，下方标宽、左侧标高；\n'
            '② 井内壁至排管尺寸链：识别井内壁，对位于井内的每根排管，下方/上方标水平尺寸链'
-           '（内壁—排管边—排管宽—排管边—内壁，外侧标总内宽），左侧/右侧标竖向尺寸链（同理，外侧标总内高）。\n'
+           '（内壁—排管边—排管宽—排管边—内壁，一条多段尺寸），左侧/右侧标竖向尺寸链（同理，一条多段尺寸）。\n'
            '排管尺寸链在平面与剖面/立面视图都生成；每次运行先清除视图内引用井构件或排管的旧尺寸再重新生成（不动管道等其它尺寸）。')
 
 from pyrevit import revit, DB, UI, forms
@@ -42,7 +42,7 @@ def mm_to_ft(mm):
 
 
 # 第一道尺寸链线离井外包边的距离（mm，改这里）：第一道链的内侧线（链段线）位于此处，外侧总线在其外一层
-_CHAIN_OFFSET_MM = 600.0
+_CHAIN_OFFSET_MM = 300.0
 _CHAIN_OFFSET_FT = mm_to_ft(_CHAIN_OFFSET_MM)
 
 # 同一侧相邻两道尺寸线之间的间距（mm，改这里）：每道尺寸链占两层（链线 + 外侧总线），层间距均为此值
@@ -51,7 +51,7 @@ _CHAIN_STEP_FT = mm_to_ft(_CHAIN_STEP_MM)
 
 # 外包总尺寸线与同侧最外一道尺寸链线之间的净距（mm，改这里）：应大于一道尺寸文字的高度，避免文字叠压；
 # 只在该侧有尺寸链时生效，无尺寸链的侧仍用 _DIM_MARGIN
-_TOTAL_GAP_MM = 500.0
+_TOTAL_GAP_MM = 250.0
 _TOTAL_GAP_FT = mm_to_ft(_TOTAL_GAP_MM)
 
 # 井内壁搜索分区（占外包框对应方向长度的比例）：左/右内壁只在外包框左/右各 1/3 内找，上/下内壁只在上/下各 1/3 内找
@@ -67,7 +67,7 @@ _GAP_MIN_FT = 0.005
 _IN_TOL_FT = 0.01
 
 # 尺寸类型名：只用于排管尺寸链（外包总尺寸保持原默认类型不变）
-_DIM_TYPE_NAME = '井大样 - 4mm(1比100)'
+_DIM_TYPE_NAME = '标注尺寸 - 4mm(1比100)'
 _DIM_TYPE_ID = [None]  # 惰性缓存
 
 # ============================================================
@@ -562,21 +562,28 @@ def _spot_key(p1, p2):
 
 
 def _find_dim_type_id():
-    """按名称找尺寸类型（井大样 4mm 1:100）；找不到返回 None，则用默认类型。结果缓存。"""
+    """按名称找尺寸类型（标注尺寸 4mm 1:100，与标准视图一致）；找不到时用名称含 4mm(1比100) 的类型；都没有返回 None。结果缓存。"""
     if _DIM_TYPE_ID[0] is not None:
         return _DIM_TYPE_ID[0]
     try:
-        for t in DB.FilteredElementCollector(doc).OfClass(DB.DimensionType).ToElements():
-            try:
-                nm = (t.Name or '').strip()
-                if nm == _DIM_TYPE_NAME or ('井大样' in nm and '4mm' in nm):
-                    _DIM_TYPE_ID[0] = t.Id
-                    return t.Id
-            except:
-                pass
+        types = list(DB.FilteredElementCollector(doc).OfClass(DB.DimensionType).ToElements())
     except:
-        pass
-    return None
+        return None
+    pick = None
+    for t in types:
+        try:
+            nm = (t.Name or '').strip()
+        except:
+            continue
+        if nm == _DIM_TYPE_NAME:
+            pick = t
+            break
+        if pick is None and '4mm(1比100)' in nm:
+            pick = t
+    if pick is None:
+        return None
+    _DIM_TYPE_ID[0] = pick.Id
+    return pick.Id
 
 
 # 尺寸创建失败的原因（每个视图处理前清空，报告时汇总）
@@ -614,14 +621,27 @@ def _dim_at_line(d, p1, p2):
         return True
 
 
-def _dim_ok(d, p1, p2):
-    """尺寸位置在请求的线段附近，且数值有效（大于 0）时返回 True。数值无效的尺寸不显示在视图里，只会残留在模型中。"""
+def _dim_valid(d):
+    """尺寸数值有效时返回 True：单段看 Value，多段（链）逐段看每段的值都大于 0。
+    无效的尺寸不显示在视图里，只会残留在模型中。"""
     try:
-        if d.Value is None or d.Value <= 1e-6:
-            return False
+        n = d.NumberOfSegments
+    except:
+        n = 0
+    try:
+        if n and n > 0:
+            for seg in d.Segments:
+                if seg.Value is None or seg.Value <= 1e-6:
+                    return False
+            return True
+        return d.Value is not None and d.Value > 1e-6
     except:
         return False
-    return _dim_at_line(d, p1, p2)
+
+
+def _dim_ok(d, p1, p2):
+    """尺寸位置在请求的线段附近，且数值有效时返回 True。"""
+    return _dim_valid(d) and _dim_at_line(d, p1, p2)
 
 
 def _err_text(ex):
@@ -640,11 +660,11 @@ def _drop_dim(view, d):
         pass
 
 
-def _try_dim(view, ref_a, ref_b, world_p1, world_p2, ledger=None, dim_type=False):
-    """两个面引用之间建一条尺寸（两端先投影到视图平面）。传入 ledger 时，同位置已有尺寸则跳过并计入 ledger.dup。
-    dim_type=True 时改用 _find_dim_type_id() 找到的尺寸类型（仅排管尺寸链使用）。
-    Revit 换类型时会把尺寸挪到参照面的另一端：换类型后位置不对的，撤掉改用默认样式重画。失败原因记入 _DIM_ERRS。"""
-    if view is None or ref_a is None or ref_b is None:
+def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
+    """用一组面引用建尺寸：两个引用是一条线性尺寸，三个及以上是多段尺寸（链，按坐标顺序，相邻引用之间各为一段）。
+    两端先投影到视图平面。传入 ledger 时，同位置已有尺寸则跳过并计入 ledger.dup。
+    dim_type=True 时改用 _find_dim_type_id() 找到的尺寸类型。换类型后位置不对的，撤掉改用默认样式重画。失败原因记入 _DIM_ERRS。"""
+    if view is None or len(refs) < 2 or any(r is None for r in refs):
         return None
     p1 = _on_plane(view, world_p1)
     p2 = _on_plane(view, world_p2)
@@ -654,12 +674,16 @@ def _try_dim(view, ref_a, ref_b, world_p1, world_p2, ledger=None, dim_type=False
         if key in ledger.keys:
             ledger.dup += 1
             return None
+
+    def _arr():
+        a = DB.ReferenceArray()
+        for r in refs:
+            a.Append(r)
+        return a
+
     try:
-        arr = DB.ReferenceArray()
-        arr.Append(ref_a)
-        arr.Append(ref_b)
         line = DB.Line.CreateBound(p1, p2)
-        d = view.Document.Create.NewDimension(view, line, arr)
+        d = view.Document.Create.NewDimension(view, line, _arr())
     except Exception as ex:
         _DIM_ERRS.append(_err_text(ex))
         return None
@@ -681,7 +705,7 @@ def _try_dim(view, ref_a, ref_b, world_p1, world_p2, ledger=None, dim_type=False
                 _drop_dim(view, d)
                 d = None
                 try:
-                    d = view.Document.Create.NewDimension(view, line, arr)
+                    d = view.Document.Create.NewDimension(view, line, _arr())
                 except Exception as ex:
                     _DIM_ERRS.append(_err_text(ex))
                     return None
@@ -695,12 +719,9 @@ def _try_dim(view, ref_a, ref_b, world_p1, world_p2, ledger=None, dim_type=False
     return d
 
 
-def _seg_dim(view, ra, rb, p1, p2, ledger, length):
-    """排管尺寸链的一段：长度小于 _GAP_MIN_FT（如排管贴壁）不标，返回生成数 0/1。"""
-    if length < _GAP_MIN_FT:
-        return 0
-    d = _try_dim(view, ra, rb, p1, p2, ledger, dim_type=True)
-    return 1 if d is not None else 0
+def _chain_dim(view, refs, p1, p2, ledger):
+    """排管链：一条多段尺寸。返回生成数 0/1。"""
+    return 1 if _try_dim(view, refs, p1, p2, ledger, dim_type=True) else 0
 
 
 def _coord(p, axis):
@@ -725,6 +746,12 @@ def _bb_span(bb, axis):
     """包围盒在某世界轴上的长度（英尺，取正）。"""
     lo, hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), axis)
     return abs(hi - lo)
+
+
+def _bb_mid(bb, axis):
+    """包围盒在某世界轴上的中点（排管侧别按它判断，比面的范围稳定）。"""
+    lo, hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), axis)
+    return (lo + hi) / 2.0
 
 
 def _mk(fr, hv, vv, dv):
@@ -799,7 +826,7 @@ def make_total_dims(view, elems, box, ledger=None, extents=None):
     if lo_h and hi_h:
         p1 = _mk(fr, h0 - _DIM_MARGIN, v0 - m_w, dep)
         p2 = _mk(fr, h1 + _DIM_MARGIN, v0 - m_w, dep)
-        if _try_dim(view, lo_h[1]['ref'], hi_h[1]['ref'], p1, p2, ledger):
+        if _try_dim(view, [lo_h[1]['ref'], hi_h[1]['ref']], p1, p2, ledger, dim_type=True):
             made += 1
 
     # ---- 高度（左侧）：沿 v 最外两侧 ----
@@ -817,7 +844,7 @@ def make_total_dims(view, elems, box, ledger=None, extents=None):
     if lo_v and hi_v:
         p1 = _mk(fr, h0 - m_h, v0 - _DIM_MARGIN, dep)
         p2 = _mk(fr, h0 - m_h, v1 + _DIM_MARGIN, dep)
-        if _try_dim(view, lo_v[1]['ref'], hi_v[1]['ref'], p1, p2, ledger):
+        if _try_dim(view, [lo_v[1]['ref'], hi_v[1]['ref']], p1, p2, ledger, dim_type=True):
             made += 1
 
     # 尺寸线与外移后的总线都须落在裁剪框内（框被裁到模型之外时自动外扩）
@@ -941,14 +968,15 @@ def _note_reach(extents, key, dist):
 
 
 def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
-    """为视图内位于井内的每根排管生成尺寸链。返回 (生成尺寸数, 原因)；原因为 None 表示正常处理。
+    """为视图内位于井内的每根排管生成尺寸链：每侧每根排管一条多段尺寸（内壁 → 排管边 → 排管宽 → 排管边 → 内壁），
+    与标准视图一致；链本身不另加总线，外包总尺寸由 make_total_dims 负责。返回 (生成尺寸数, 原因)；原因为 None 表示正常处理。
     排管按截面判断两类链（平面与剖面/立面共用）：
       水平链（沿视图水平轴）：排管截面的水平宽度在井内壁之间时（剖面/立面为端面朝向视线的排管，
         平面为沿竖向轴走的排管）；放在井外下侧或上侧，取排管伸出井外的那一侧（都不伸出则看排管中心）。
       竖向链（沿视图竖向轴）：排管截面的竖向宽度在井内壁之间时（剖面/立面为截面高度 Z，
         平面为沿水平轴走的排管的另一水平宽度）；放在井外左侧或右侧，取排管伸出井外的那一侧。
     两侧都伸出井外的排管（穿井）不标，计入「穿井」跳过原因。
-    同一侧的链依次向外排，每道链占两层（链线 + 外侧总线），层间距为 _CHAIN_STEP_FT。
+    同一侧的链依次向外排，每条链占一层，层间距为 _CHAIN_STEP_FT。
     extents 若传入 dict，则记下每个世界方向上最外一道链线离外包框的距离（键如 'Z-'、'X+'），
     供 make_total_dims 把外包总尺寸线移到链线之外。
     """
@@ -984,17 +1012,16 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
     def PT(hv, vv):
         return _mk(fr, hv, vv, d_mid)
 
-    cnt = {'L': 0, 'R': 0, 'B': 0, 'T': 0}   # 每侧已占用的层数（每道链占两层）
+    cnt = {'L': 0, 'R': 0, 'B': 0, 'T': 0}   # 每侧已占用的层数（每条链占一层）
     ext_h = [h0, h1]
     ext_v = [v0, v1]
 
-    def _layers(side):
+    def _layer(side):
         k = cnt[side]
-        cnt[side] += 2
-        off_seg = _CHAIN_OFFSET_FT + k * _CHAIN_STEP_FT
-        return off_seg, off_seg + _CHAIN_STEP_FT
+        cnt[side] += 1
+        return _CHAIN_OFFSET_FT + k * _CHAIN_STEP_FT
 
-    def _pick_side(lo, hi, wlo, whi, mid, neg, pos):
+    def _pick_side(lo, hi, wlo, whi, mid, neg, pos, center):
         """排管在某轴上的范围 [lo,hi] 相对井内壁 [wlo,whi]：只伸出一侧取该侧；都不伸出看中心；两侧都伸出返回 None（穿井）。"""
         out_lo = lo < wlo - _IN_TOL_FT
         out_hi = hi > whi + _IN_TOL_FT
@@ -1004,7 +1031,21 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
             return neg
         if out_hi:
             return pos
-        return neg if (lo + hi) / 2.0 < mid else pos
+        return neg if center < mid else pos
+
+    def _chain_refs(lo, hi, edges):
+        """多段尺寸的参照，按坐标从小到大：井内壁、排管边…、井内壁。
+        lo、hi 为 (坐标, 面引用)；edges 为已按坐标排序的排管边 [(坐标, 面引用), ...]。
+        与前一参照或井内壁的距离小于 _GAP_MIN_FT 的排管边不留（排管贴墙时不生成零长段）。"""
+        refs = [lo[1]]
+        last = lo[0]
+        for c, ref in edges:
+            if c - last < _GAP_MIN_FT or hi[0] - c < _GAP_MIN_FT:
+                continue
+            refs.append(ref)
+            last = c
+        refs.append(hi[1])
+        return refs
 
     for bank in banks:
         try:
@@ -1045,41 +1086,41 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None):
                 continue
             n_ch = 0
             if ok_h:
-                side = _pick_side(vb_lo, vb_hi, wB, wT, v_mid, 'B', 'T')
+                side = _pick_side(vb_lo, vb_hi, wB, wT, v_mid, 'B', 'T', _bb_mid(bb, v))
                 if side is None:
                     _bump(stats, _SKIP_BANK_THROUGH)
                 else:
-                    off_seg, off_tot = _layers(side)
+                    off = _layer(side)
                     if side == 'B':
-                        vs, vt = v0 - off_seg, v0 - off_tot
-                        _note_reach(extents, v + '-', off_tot)
-                        ext_v[0] = min(ext_v[0], vt)
+                        vs = v0 - off
+                        _note_reach(extents, v + '-', off)
+                        ext_v[0] = min(ext_v[0], vs)
                     else:
-                        vs, vt = v1 + off_seg, v1 + off_tot
-                        _note_reach(extents, v + '+', off_tot)
-                        ext_v[1] = max(ext_v[1], vt)
-                    n_ch += _seg_dim(view, wl['ref'], hb_lo_f['ref'], PT(wL, vs), PT(hb_lo, vs), ledger, hb_lo - wL)
-                    n_ch += _seg_dim(view, hb_lo_f['ref'], hb_hi_f['ref'], PT(hb_lo, vs), PT(hb_hi, vs), ledger, hb_hi - hb_lo)
-                    n_ch += _seg_dim(view, hb_hi_f['ref'], wr['ref'], PT(hb_hi, vs), PT(wR, vs), ledger, wR - hb_hi)
-                    n_ch += _seg_dim(view, wl['ref'], wr['ref'], PT(wL, vt), PT(wR, vt), ledger, wR - wL)
+                        vs = v1 + off
+                        _note_reach(extents, v + '+', off)
+                        ext_v[1] = max(ext_v[1], vs)
+                    refs = _chain_refs((wL, wl['ref']), (wR, wr['ref']),
+                                       [(hb_lo, hb_lo_f['ref']), (hb_hi, hb_hi_f['ref'])])
+                    if len(refs) >= 3:
+                        n_ch += _chain_dim(view, refs, PT(wL, vs), PT(wR, vs), ledger)
             if ok_v:
-                side = _pick_side(hb_lo, hb_hi, wL, wR, h_mid, 'L', 'R')
+                side = _pick_side(hb_lo, hb_hi, wL, wR, h_mid, 'L', 'R', _bb_mid(bb, h))
                 if side is None:
                     _bump(stats, _SKIP_BANK_THROUGH)
                 else:
-                    off_seg, off_tot = _layers(side)
+                    off = _layer(side)
                     if side == 'L':
-                        hs, ht = h0 - off_seg, h0 - off_tot
-                        _note_reach(extents, h + '-', off_tot)
-                        ext_h[0] = min(ext_h[0], ht)
+                        hs = h0 - off
+                        _note_reach(extents, h + '-', off)
+                        ext_h[0] = min(ext_h[0], hs)
                     else:
-                        hs, ht = h1 + off_seg, h1 + off_tot
-                        _note_reach(extents, h + '+', off_tot)
-                        ext_h[1] = max(ext_h[1], ht)
-                    n_ch += _seg_dim(view, wb['ref'], vb_lo_f['ref'], PT(hs, wB), PT(hs, vb_lo), ledger, vb_lo - wB)
-                    n_ch += _seg_dim(view, vb_lo_f['ref'], vb_hi_f['ref'], PT(hs, vb_lo), PT(hs, vb_hi), ledger, vb_hi - vb_lo)
-                    n_ch += _seg_dim(view, vb_hi_f['ref'], wt['ref'], PT(hs, vb_hi), PT(hs, wT), ledger, wT - vb_hi)
-                    n_ch += _seg_dim(view, wb['ref'], wt['ref'], PT(ht, wB), PT(ht, wT), ledger, wT - wB)
+                        hs = h1 + off
+                        _note_reach(extents, h + '+', off)
+                        ext_h[1] = max(ext_h[1], hs)
+                    refs = _chain_refs((wB, wb['ref']), (wT, wt['ref']),
+                                       [(vb_lo, vb_lo_f['ref']), (vb_hi, vb_hi_f['ref'])])
+                    if len(refs) >= 3:
+                        n_ch += _chain_dim(view, refs, PT(hs, wB), PT(hs, wT), ledger)
             if n_ch:
                 made += n_ch
                 _bump(stats, _ST_BANK_OK)
