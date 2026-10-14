@@ -883,6 +883,7 @@ def main():
             last_sheet = None
             generated_sheet_ids = []
             replaced_count = 0
+            old_removed = 0
 
             # 查找视图类型
             plan_type_id = DB.ElementId.InvalidElementId
@@ -975,6 +976,31 @@ def main():
             except:
                 pass
 
+            # 游离视图索引：视图名形如 北_AG-<井号>-<4位随机码>。图纸被删、视图却留着时，这些视图不在上面的图纸索引里，
+            # 会一直堆积。这里按井号把所有这类视图登记下来，重新生成这口井之前先全部删掉。
+            old_views = {}
+            try:
+                for _v in DB.FilteredElementCollector(doc).OfClass(DB.View).ToElements():
+                    try:
+                        if _v.IsTemplate:
+                            continue
+                        _nm = _v.Name or ""
+                        _dir = None
+                        for _pre in ("平面", "南", "北", "西", "东"):
+                            if _nm.startswith(_pre + "_AG-"):
+                                _dir = _pre
+                                break
+                        if _dir is None:
+                            continue
+                        _seg = _nm[len(_dir) + 1:].split("-")
+                        if len(_seg) < 3:
+                            continue
+                        old_views.setdefault("-".join(_seg[1:-1]), []).append(_v.Id)
+                    except:
+                        pass
+            except:
+                pass
+
             pb = forms.ProgressBar(title='正在批量生成井大样图... ({value}/{max_value})', cancellable=True)
             for idx, elem in enumerate(valid_elems):
                 if pb.cancelled:
@@ -1011,6 +1037,16 @@ def main():
 
                     # 「重新生成即替换」：按预扫描索引清掉这口井既有的井大样图纸，
                     # 连同落在该图纸上的平面/东南西北剖面视图一起删除，再由下面重建。
+                    # 出图之前先删掉这口井以前出过的视图（包括已经没有图纸的游离视图），再建新的。
+                    for _oid in old_views.pop(base_name, []):
+                        try:
+                            _ov = doc.GetElement(_oid)
+                            if _ov and not _ov.IsTemplate:
+                                doc.Delete(_oid)
+                                old_removed += 1
+                        except:
+                            pass
+
                     for _sid, _kids in stale_sheets.get(base_name, []):
                         try:
                             doc.Delete(_sid)
@@ -1199,21 +1235,21 @@ def main():
                     # 实测(Revit 2026)：View.ViewDirection == CropBox.Transform.BasisZ == -输入BasisZ，
                     # RightDirection == -输入BasisX；观察者(视点)位于剖面框局部 Z 的 Min 端、朝 Max 端看，
                     # 剖切面即观察者所在端面。
-                    # 「北」「南」两视图统一采用“朝北看”呈现约定（与历史图纸一致）：
-                    #   BasisZ=(0,1,0) => ViewDirection=(0,-1,0)、Right=(1,0,0)，东在右。
-                    # 2026-10-07 曾把「北」改成 BasisZ=(0,-1,0)、BasisX=(1,0,0)（“观察者在北”读法），
-                    # 造成北视图相对历史版本左右镜像（东在左）；2026-10-08 已恢复，勿再改动。
-                    # 四面剖面框统一：剖面框均外延 100mm(face_out)，框深 face_depth(1100mm)。
-                    # 南/西/东：观察者在井外 → 局部 Min.Z = -half - face_out（剖切在外墙面外 100mm）。
-                    # 北：沿用历史“井内向北看” → 局部 Z 取 [+(half+face_out-face_depth), +(half+face_out)]。
+                    # 四个立面统一：观察者站在井的外侧（剖切在外墙面外 100mm），框深 face_depth(1100mm)。
+                    # 实测(Revit 2026)：视图 RightDirection == -输入BasisX，ViewDirection == -输入BasisZ；
+                    # 观察者位于局部 Z 的 Min 端朝 Max 端看。
+                    #   南：BasisZ=(0,1,0) 观察者在南侧朝北看，东在右。
+                    #   北：BasisZ=(0,-1,0)、BasisX=(1,0,0) 观察者在北侧朝南看，东在左（标准北立面）。
+                    #   西/东：观察者在西/东侧，见下方调用。
+                    # 北视图原先是“井内朝北看北墙内面”，东西与标准北立面左右相反，已改为标准方向。
                     _z_near_ns = -pit_dy - face_out
                     _z_near_ew = -pit_dx - face_out
 
-                    # 北视图：BasisZ=(0,1,0) → ViewDirection=(0,-1,0)、Right=(1,0,0)（东在右），
-                    # 局部 Z 正向 = 世界 +Y = 北；观察者在井内侧向北看（与历史图纸一致）。
+                    # 北视图：BasisZ=(0,-1,0) 使局部 Z 的 Min 端位于北侧外墙外，观察者在北侧朝南看；
+                    # BasisX=(1,0,0) → 视图 Right=(-1,0,0)，东在左。剖面框与南视图相同（外墙外 100mm 起算）。
                     view_back = create_elevation(
-                        DB.XYZ(0, 1, 0), DB.XYZ(0, 0, 1), DB.XYZ(-1, 0, 0),
-                        "北", -_z_near_ns - face_depth, -_z_near_ns)
+                        DB.XYZ(0, -1, 0), DB.XYZ(0, 0, 1), DB.XYZ(1, 0, 0),
+                        "北", _z_near_ns, _z_near_ns + face_depth)
 
                     # 南立面 (下面)：观察者在南侧朝北看，ViewDirection=(0,-1,0)
                     view_front = create_elevation(
@@ -1414,10 +1450,10 @@ def main():
                 _tpl_msg = '未选择样板（所有视图均未套）'
 
             forms.alert(
-                '批量生成大样图完毕！\n共成功生成 {} 张图纸，替换（删除重建）旧图 {} 张。\n'
+                '批量生成大样图完毕！\n共成功生成 {} 张图纸，替换（删除重建）旧图 {} 张，删除这些井以前出的旧视图 {} 个。\n'
                 '视图样板：{}\n'
                 '提示：套了样板的视图，其"视图范围/显示样式"由样板决定，脚本不再覆盖。{}'.format(
-                    success_count, replaced_count, _tpl_msg, export_result),
+                    success_count, replaced_count, old_removed, _tpl_msg, export_result),
                 title='成功')
         else:
             forms.alert('执行完成，但没有图纸生成成功。请查看上面的打印日志。', title='警告')
