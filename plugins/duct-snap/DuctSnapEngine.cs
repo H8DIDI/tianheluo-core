@@ -87,12 +87,14 @@ public static class DuctSnapEngine
                     {
                         // The bank runs inside the wall: move the end along the bank to the nearest inner wall face ahead of it.
                         var cavInside = CavityOf(inside, rules);
-                        var toPlane = cavInside is { } ci ? DuctSnapMath.DistanceToInnerPlane(pts[k], pts[1 - k], ci) : null;
+                        var toPlane = cavInside is { } ci ? DuctSnapMath.DistanceToInnerPlane(pts[k], pts[1 - k], ci, rules.ToleranceMm) : null;
                         // Trim (positive) may be long: the excess lies in the wall. Extend (negative) must be short: the end
                         // is already at the well, so a long move means it belongs to a different place.
-                        var dec = toPlane is { } e && (e > 0 ? e <= rules.MaxEdgeTrimMm : -e <= rules.MaxExtendMm) && Math.Abs(e) > 1e-6
-                            ? new SnapDecision(SnapKind.ToInnerWall, e)
-                            : new SnapDecision(SnapKind.Unrelated, 0);
+                        var dec = toPlane is { } e0 && Math.Abs(e0) <= rules.ToleranceMm
+                            ? new SnapDecision(SnapKind.Fit, 0)   // already on the inner wall, within tolerance
+                            : toPlane is { } e && (e > 0 ? e <= rules.MaxEdgeTrimMm : -e <= rules.MaxExtendMm)
+                                ? new SnapDecision(SnapKind.ToInnerWall, e)
+                                : new SnapDecision(SnapKind.Unrelated, 0);
                         picked[k] = (inside, dec);
                     }
                 }

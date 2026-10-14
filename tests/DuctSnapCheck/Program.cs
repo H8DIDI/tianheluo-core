@@ -148,11 +148,13 @@ Check("model bank in the top wall: moves to the west inner face (about 801 mm)",
 var movedModel = toPlane is { } tp2 ? DuctSnapMath.Move(new Pt2(88716.3, -461915.1), new Pt2(56716.3, -461915.1), tp2) : default;
 Check("the end lands on the inner face x = 87915.5", Near(movedModel.X, 87915.5, 0.05), $"({movedModel.X:0.0},{movedModel.Y:0.0})");
 
-var toPlaneDiag = DuctSnapMath.DistanceToInnerPlane(new Pt2(0, 0), new Pt2(10, 10), new Cavity(1, 5, 1, 5));
+var toPlaneDiag = DuctSnapMath.DistanceToInnerPlane(new Pt2(0, 0), new Pt2(10, 10), new Cavity(1, 5, 1, 5), toleranceMm: 0.01);
 Check("diagonal: nearest inner plane ahead is the one at 1", toPlaneDiag is { } tp3 && Near(tp3, Math.Sqrt(2)), $"{toPlaneDiag}");
 // The end already sits outside the well (at the outer edge, 250 mm outside the west inner face): extend back into the well.
 var toPlaneOut = DuctSnapMath.DistanceToInnerPlane(new Pt2(87665.5, -461915.1), new Pt2(56716.3, -461915.1), cavModel);
 Check("end already at the outer edge: extend back 250 mm to the inner face (negative)", toPlaneOut is { } tp4 && Near(tp4, -250, 0.5), $"{toPlaneOut:0.0}");
+Check("end already on the inner face, within tolerance: no move (0)",
+    DuctSnapMath.DistanceToInnerPlane(new Pt2(0.2, 1500), new Pt2(-10000, 1500), new Cavity(0, 3000, 0, 3000)) is { } onFace && onFace == 0, "");
 Check("no inner plane ahead: the nearest one behind is used (negative)",
     DuctSnapMath.DistanceToInnerPlane(new Pt2(10, 0), new Pt2(20, 0), new Cavity(-5, -1, -5, 5)) is { } tp5 && Near(tp5, -11, 0.01));
 

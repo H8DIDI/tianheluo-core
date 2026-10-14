@@ -100,7 +100,7 @@ public static class DuctSnapMath
     /// Negative = extend back into the well (the end is already outside the well, beyond the inner face).
     /// Returns null when no inner plane is in reach. Used when the bank runs inside a wall and never crosses the cavity.
     /// </summary>
-    public static double? DistanceToInnerPlane(Pt2 end, Pt2 other, Cavity cav)
+    public static double? DistanceToInnerPlane(Pt2 end, Pt2 other, Cavity cav, double toleranceMm = 5)
     {
         double dx = other.X - end.X, dy = other.Y - end.Y;
         double len = Math.Sqrt(dx * dx + dy * dy);
@@ -109,16 +109,20 @@ public static class DuctSnapMath
         // Signed distances to the four inner planes along the bank: positive = ahead (toward the other end).
         double ahead = double.PositiveInfinity;   // nearest plane ahead
         double behind = double.NegativeInfinity;  // nearest plane behind (closest to zero, i.e. the largest negative)
+        bool onPlane = false;                     // an inner face is already at the end, within tolerance
         void Take(double t)
         {
-            if (t > 1e-6) ahead = Math.Min(ahead, t);
-            else if (t < -1e-6) behind = Math.Max(behind, t);
+            if (Math.Abs(t) <= toleranceMm) onPlane = true;
+            else if (t > 0) ahead = Math.Min(ahead, t);
+            else behind = Math.Max(behind, t);
         }
         if (Math.Abs(ux) > 1e-9)
             foreach (double plane in new[] { cav.XLeft, cav.XRight }) Take((plane - end.X) / ux);
         if (Math.Abs(uy) > 1e-9)
             foreach (double plane in new[] { cav.YBottom, cav.YTop }) Take((plane - end.Y) / uy);
 
+        // Already on an inner face, within tolerance (the end sits on the inner wall line): nothing to move.
+        if (onPlane) return 0;
         // Trim: an inner face lies ahead of the end (the end sits in the wall or the cavity's outer side).
         if (!double.IsPositiveInfinity(ahead) && ahead <= len) return ahead;
         // Extend: the end is already outside the well; the nearest inner face is behind it. Move back into the well.
