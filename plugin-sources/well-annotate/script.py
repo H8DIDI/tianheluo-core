@@ -439,9 +439,14 @@ def union_box(view, elems):
     return (x0, x1, y0, y1, z0, z1)
 
 
-def _main_well(view, elems):
+def _main_well(view, elems, mark=None):
     """视图里可能同时出现几口井（邻井也在裁剪框内）：只认最大的那口作为本井，其余忽略，
     否则外包框会把邻井也算进去、排管链会标到邻井上。"""
+    if mark:
+        # 图纸编号（井大样_E-022 → E-022）与井的「标记」一致的构件才是本井；邻井体积再大也不是
+        same = [e for e in elems if _mark_of(e) == mark]
+        if same:
+            return same
     if len(elems) <= 1:
         return elems
     fr = _frame(view)
@@ -475,6 +480,26 @@ def _main_well(view, elems):
 _HIDE_CATS = [DB.BuiltInCategory.OST_GenericModel] + _PIPE_CATS
 
 
+_WELLS_BY_MARK = {}
+
+
+def unhide_well(view, mark):
+    """本井如果在这张视图里被隐藏（以前运行误隐藏的），先恢复显示，否则收集不到本井。"""
+    if not mark:
+        return
+    try:
+        if not _WELLS_BY_MARK:
+            for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().ToElements():
+                m = _mark_of(e)
+                if m:
+                    _WELLS_BY_MARK.setdefault(m, []).append(e)
+        back = [e.Id for e in _WELLS_BY_MARK.get(mark, []) if e.IsHidden(view)]
+        if back:
+            view.UnhideElements(System.Collections.Generic.List[DB.ElementId](back))
+    except:
+        pass
+
+
 def hide_irrelevant(view, main_elems):
     """隐藏本视图里与本井无关的井和排管/管线：类别为常规模型（别的井）或管线类，且包围盒与本井不相交的构件。
     只对这一张出图视图做元素级隐藏，不改模型；需要时在视图里用「显示隐藏的图元」可恢复。返回隐藏数。"""
@@ -493,6 +518,22 @@ def hide_irrelevant(view, main_elems):
             return 0
         pad = 0.3
         keep = set(int(e.Id.Value) for e in main_elems)
+        # 先把本井和与本井相交的排管取消隐藏（以前运行误隐藏的，或上一次判错本井留下的）
+        try:
+            flt = DB.BoundingBoxIntersectsFilter(DB.Outline(DB.XYZ(mb[0] - pad, mb[1] - pad, mb[2] - pad),
+                                                            DB.XYZ(mb[3] + pad, mb[4] + pad, mb[5] + pad)))
+            back = []
+            hc = set(int(c) for c in _HIDE_CATS)
+            for e in DB.FilteredElementCollector(doc).WherePasses(flt).WhereElementIsNotElementType().ToElements():
+                try:
+                    if e.Category is not None and int(e.Category.Id.Value) in hc and e.IsHidden(view):
+                        back.append(e.Id)
+                except:
+                    continue
+            if back:
+                view.UnhideElements(System.Collections.Generic.List[DB.ElementId](back))
+        except:
+            pass
         hide_ids = []
         hide_cats = set(int(c) for c in _HIDE_CATS)
         for e in DB.FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType().ToElements():
@@ -1546,6 +1587,11 @@ def main():
         if not target_views:
             return
 
+        mark_of_view = {}
+        for sh in sheets:
+            for _k, _nm, _v in _views_of(sh):
+                mark_of_view[str(_v.Id)] = (sh.Name or '')[len('井大样_'):]
+
         # 同一视图若放在多张图纸上会被重复选中：只处理一次，避免重复计数
         uniq_views = []
         uniq_ids = set()
@@ -1595,7 +1641,8 @@ def main():
             for v in target_views:
                 try:
                     del _DIM_ERRS[:]
-                    elems = _main_well(v, collect_target_elems(v, stats))
+                    _step('恢复本井显示', lambda: unhide_well(v, mark_of_view.get(str(v.Id))))
+                    elems = _main_well(v, collect_target_elems(v, stats), mark_of_view.get(str(v.Id)))
                     if not elems:
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
