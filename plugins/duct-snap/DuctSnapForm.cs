@@ -42,8 +42,8 @@ public sealed class DuctSnapForm : Form
         Text = "排管贴井内壁";
         Font = new Font("Microsoft YaHei UI", 9F);
         StartPosition = FormStartPosition.CenterScreen;
-        Size = new Size(1280, 680);
-        MinimumSize = new Size(820, 480);
+        Size = new Size(1280, 800);
+        MinimumSize = new Size(820, 540);
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 5, ColumnCount = 1 };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -61,13 +61,13 @@ public sealed class DuctSnapForm : Form
         _filter.Width = 240;
         _filter.SelectedIndexChanged += (_, _) => RefreshShown();
         top.Controls.Add(_filter);
-        top.Controls.Add(new Label { AutoSize = true, Text = "    查找（排管ID / 井ID / 族名）：", Padding = new Padding(0, 6, 0, 0) });
+        top.Controls.Add(new Label { AutoSize = true, Text = "查找（排管ID / 井ID / 族名）：", Padding = new Padding(0, 6, 0, 0) });
         _search.Width = 220;
         _search.TextChanged += (_, _) => RefreshShown();
         top.Controls.Add(_search);
         _pin.AutoSize = true;
         _pin.Text = "锁定在最前";
-        _pin.Margin = new Padding(24, 4, 0, 0);
+        _pin.Margin = new Padding(12, 4, 0, 0);
         _pin.CheckedChanged += (_, _) => TopMost = _pin.Checked;
         top.Controls.Add(_pin);
         root.Controls.Add(top, 0, 0);
@@ -87,42 +87,45 @@ public sealed class DuctSnapForm : Form
         _grid.MultiSelect = false;
         _grid.BackgroundColor = Color.White;
         _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+        _grid.ColumnHeadersDefaultCellStyle.WrapMode = DataGridViewTriState.False; // one-line headers: the columns size to them
         _grid.DataSource = _shown;
         _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) Jump(); };
         _grid.DataBindingComplete += (_, _) => ColourRows();
-        void Col(string header, string prop, int width, bool fill = false)
+        // Columns fit their content (short headers); the note takes the rest of the width and does not wrap,
+        // so every row keeps one height. The full note is in the cell's tooltip.
+        void Col(string header, string prop, bool fill = false)
         {
             _grid.Columns.Add(new DataGridViewTextBoxColumn
             {
-                Name = prop, HeaderText = header, DataPropertyName = prop, Width = width,
-                AutoSizeMode = fill ? DataGridViewAutoSizeColumnMode.Fill : DataGridViewAutoSizeColumnMode.NotSet,
+                Name = prop, HeaderText = header, DataPropertyName = prop,
+                AutoSizeMode = fill ? DataGridViewAutoSizeColumnMode.Fill : DataGridViewAutoSizeColumnMode.DisplayedCells,
             });
         }
         _grid.Columns.Insert(0, new DataGridViewCheckBoxColumn
         {
-            Name = nameof(SnapRow.Checked), HeaderText = "执行", DataPropertyName = nameof(SnapRow.Checked), Width = 50,
+            Name = nameof(SnapRow.Checked), HeaderText = "执行", DataPropertyName = nameof(SnapRow.Checked),
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.None, Width = 52,
         });
-        Col("状态", nameof(SnapRow.Status), 70);
-        Col("动作", nameof(SnapRow.Action), 130);
-        Col("移动(mm)", nameof(SnapRow.Move), 70);
-        Col("排管ID", nameof(SnapRow.BankId), 80);
-        Col("端点", nameof(SnapRow.End), 50);
-        Col("本端坐标 X,Y,Z (mm)", nameof(SnapRow.EndXyz), 170);
-        Col("另一端坐标 X,Y,Z (mm)", nameof(SnapRow.OtherXyz), 170);
-        Col("排管长(mm)", nameof(SnapRow.LengthMm), 80);
-        Col("井ID", nameof(SnapRow.WellId), 80);
-        Col("井族", nameof(SnapRow.WellFamily), 150);
-        Col("井转角(°)", nameof(SnapRow.TurnDeg), 70);
-        Col("井内腔 (mm, 外接框)", nameof(SnapRow.CavityText), 190);
-        Col("起点标高 改前→改后", nameof(SnapRow.StartZ), 130);
-        Col("终点标高 改前→改后", nameof(SnapRow.EndZ), 130);
-        Col("排管族", nameof(SnapRow.BankFamily), 200);
-        Col("说明", nameof(SnapRow.Note), 320, fill: true);
-        _grid.Columns[nameof(SnapRow.Note)]!.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
-        // commit a checkbox click at once, so the count below and the apply see it
-        _grid.CurrentCellDirtyStateChanged += (_, _) => { if (_grid.IsCurrentCellDirty) _grid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
-        _grid.CellValueChanged += (_, _) => UpdateSummaryCounts();
-        _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.DisplayedCellsExceptHeaders;
+        Col("状态", nameof(SnapRow.Status));
+        Col("动作", nameof(SnapRow.Action));
+        Col("移动mm", nameof(SnapRow.Move));
+        Col("排管ID", nameof(SnapRow.BankId));
+        Col("端", nameof(SnapRow.End));
+        Col("本端 X,Y,Z", nameof(SnapRow.EndXyz));
+        Col("对端 X,Y,Z", nameof(SnapRow.OtherXyz));
+        Col("长mm", nameof(SnapRow.LengthMm));
+        Col("井ID", nameof(SnapRow.WellId));
+        Col("井族", nameof(SnapRow.WellFamily));
+        Col("转角°", nameof(SnapRow.TurnDeg));
+        Col("井内腔(外接框)", nameof(SnapRow.CavityText));
+        Col("起点标高 改前→后", nameof(SnapRow.StartZ));
+        Col("终点标高 改前→后", nameof(SnapRow.EndZ));
+        Col("排管族", nameof(SnapRow.BankFamily));
+        Col("说明", nameof(SnapRow.Note), fill: true);
+        _grid.Columns[nameof(SnapRow.Note)]!.MinimumWidth = 260;
+        _grid.DefaultCellStyle.Padding = new Padding(4, 0, 4, 0);
+        _grid.RowTemplate.Height = 22;
+        _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
         root.Controls.Add(_grid, 0, 2);
 
         _notes.AutoSize = true;
@@ -211,6 +214,7 @@ public sealed class DuctSnapForm : Form
                 "需人工" => ManualColour,
                 _ => Color.White,
             };
+            r.Cells[nameof(SnapRow.Note)].ToolTipText = row.Note; // the full note, since the cell does not wrap
         }
     }
 
