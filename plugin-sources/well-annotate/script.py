@@ -66,6 +66,9 @@ _GAP_MIN_FT = 0.005
 # 排管是否位于井内壁之内的容差（英尺，0.01 约 3 mm）
 _IN_TOL_FT = 0.01
 
+# 排管伸到井壁的容差（英尺，0.25 约 75 mm）：排管端面离井内壁差几毫米到几厘米也算接入这口井
+_REACH_TOL_FT = 0.25
+
 # 尺寸类型名：只用于排管尺寸链（外包总尺寸保持原默认类型不变）
 _DIM_TYPE_NAME = '标注尺寸 - 4mm(1比100)'
 _DIM_TYPE_ID = [None]  # 惰性缓存
@@ -467,6 +470,91 @@ def _main_well(view, elems):
         except:
             continue
     return out or [best]
+
+
+_HIDE_CATS = [DB.BuiltInCategory.OST_GenericModel] + _PIPE_CATS
+
+
+def hide_irrelevant(view, main_elems):
+    """隐藏本视图里与本井无关的井和排管/管线：类别为常规模型（别的井）或管线类，且包围盒与本井不相交的构件。
+    只对这一张出图视图做元素级隐藏，不改模型；需要时在视图里用「显示隐藏的图元」可恢复。返回隐藏数。"""
+    try:
+        mb = None
+        for e in main_elems:
+            bb = e.get_BoundingBox(None)
+            if bb is None:
+                continue
+            if mb is None:
+                mb = [bb.Min.X, bb.Min.Y, bb.Min.Z, bb.Max.X, bb.Max.Y, bb.Max.Z]
+            else:
+                mb = [min(mb[0], bb.Min.X), min(mb[1], bb.Min.Y), min(mb[2], bb.Min.Z),
+                      max(mb[3], bb.Max.X), max(mb[4], bb.Max.Y), max(mb[5], bb.Max.Z)]
+        if mb is None:
+            return 0
+        pad = 0.3
+        keep = set(int(e.Id.Value) for e in main_elems)
+        hide_ids = []
+        hide_cats = set(int(c) for c in _HIDE_CATS)
+        for e in DB.FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType().ToElements():
+            try:
+                if e.Category is None or int(e.Category.Id.Value) not in hide_cats:
+                    continue
+                if int(e.Id.Value) in keep or e.IsHidden(view):
+                    continue
+                bb = e.get_BoundingBox(None)
+                if bb is None:
+                    continue
+                touch = (bb.Max.X > mb[0] - pad and bb.Min.X < mb[3] + pad and
+                         bb.Max.Y > mb[1] - pad and bb.Min.Y < mb[4] + pad and
+                         bb.Max.Z > mb[2] - pad and bb.Min.Z < mb[5] + pad)
+                if not touch:
+                    hide_ids.append(e.Id)
+            except:
+                continue
+        n = 0
+        if hide_ids:
+            try:
+                lst = System.Collections.Generic.List[DB.ElementId](hide_ids)
+                view.HideElements(lst)
+                n = len(hide_ids)
+            except:
+                for i in hide_ids:
+                    try:
+                        view.HideElements(System.Collections.Generic.List[DB.ElementId]([i]))
+                        n += 1
+                    except:
+                        pass
+        return n
+    except:
+        return 0
+
+
+def _face_box(elems, fallback):
+    """用本井大面（面积够大的墙面/底面）的位置求外包框，比包围盒准：有的井族包围盒比井体大一倍
+    （带着盖板、爬梯等），按包围盒分区会把内壁认错。某个轴找不到足够的面时，该轴沿用 fallback。"""
+    xs = {'X': [], 'Y': [], 'Z': []}
+    for e in elems:
+        try:
+            for f in _extract_faces(e):
+                a = f.get('area')
+                if a is None or a < _WALL_AREA_MIN_FT2:
+                    continue
+                n = f['norm']
+                o = f['orig']
+                for ax in ('X', 'Y', 'Z'):
+                    if abs(_coord(n, ax)) >= _AXIAL_TOL:
+                        xs[ax].append(_coord(o, ax))
+        except:
+            continue
+    out = []
+    for i, ax in enumerate(('X', 'Y', 'Z')):
+        if len(xs[ax]) >= 2 and max(xs[ax]) - min(xs[ax]) > 0.5:
+            out += [min(xs[ax]), max(xs[ax])]
+        elif fallback is not None:
+            out += [fallback[2 * i], fallback[2 * i + 1]]
+        else:
+            return fallback
+    return tuple(out)
 
 
 def _overlap(bb, rng):
@@ -1229,10 +1317,10 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                     vb_lo, vb_hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), v)
             # 水平链：截面水平宽在井内壁之间，且竖向范围与井相交
             ok_h = (want_h and hb_lo >= wL - _IN_TOL_FT and hb_hi <= wR + _IN_TOL_FT
-                    and vb_lo < wT + _IN_TOL_FT and vb_hi > wB - _IN_TOL_FT)
+                    and vb_lo < wT + _REACH_TOL_FT and vb_hi > wB - _REACH_TOL_FT)
             # 竖向链：截面竖向范围在井内壁之间，且水平范围与井相交
             ok_v = (want_v and vb_lo >= wB - _IN_TOL_FT and vb_hi <= wT + _IN_TOL_FT
-                    and hb_lo < wR + _IN_TOL_FT and hb_hi > wL - _IN_TOL_FT)
+                    and hb_lo < wR + _REACH_TOL_FT and hb_hi > wL - _REACH_TOL_FT)
             if not (ok_h or ok_v) or not _overlap(bb, (box[0] - 0.3, box[1] + 0.3, box[2] - 0.3, box[3] + 0.3, box[4] - 0.3, box[5] + 0.3)):
                 _bump(stats, _SKIP_BANK_OUT)
                 continue
@@ -1240,8 +1328,8 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
             if ok_h:
                 side = _pick_side(vb_lo, vb_hi, wB, wT, v_mid, 'B', 'T', _bb_mid(bb, v))
                 if side is None:
-                    _bump(stats, _SKIP_BANK_THROUGH)
-                else:
+                    side = 'B' if cnt['B'] <= cnt['T'] else 'T'   # 穿井的排管：标在目前链较少的一侧
+                if True:
                     off = _layer(side)
                     if side == 'B':
                         vs = v0 - off
@@ -1258,8 +1346,8 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
             if ok_v:
                 side = _pick_side(hb_lo, hb_hi, wL, wR, h_mid, 'L', 'R', _bb_mid(bb, h))
                 if side is None:
-                    _bump(stats, _SKIP_BANK_THROUGH)
-                else:
+                    side = 'L' if cnt['L'] <= cnt['R'] else 'R'
+                if True:
                     off = _layer(side)
                     if side == 'L':
                         hs = h0 - off
@@ -1502,6 +1590,7 @@ def main():
         notes = []
         dim_errs = []
         failed_steps = []
+        hidden_total = 0
         try:
             for v in target_views:
                 try:
@@ -1511,11 +1600,18 @@ def main():
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
                     box = _clip_box(union_box(v, elems), crop_world_range(v))
+                    if box is not None:
+                        box = _face_box(elems, box)
                     if box is None:
                         notes.append(('{}（无法计算包围盒）'.format(v.Name), 0))
                         continue
 
-                    res = {'purged': 0, 'cn': 0, 'n': 0, 'why': None}
+                    res = {'purged': 0, 'cn': 0, 'n': 0, 'why': None, 'hid': 0}
+
+                    def _hide():
+                        res['hid'] = hide_irrelevant(v, elems)
+                    _step("隐藏无关构件", _hide)
+                    hidden_total += res['hid']
 
                     def _purge():
                         res['purged'] = purge_dims(v)
@@ -1606,6 +1702,8 @@ def main():
                 if m not in uniq:
                     uniq.append(m)
             msg += '• 尺寸创建失败：{} 道（Revit 拒绝）：{}\n'.format(len(dim_errs), '；'.join(uniq[:3]))
+        if hidden_total:
+            msg += '• 已隐藏与本井无关的井和排管：{} 个（视图内元素级隐藏，不改模型；「显示隐藏的图元」可恢复）'.format(hidden_total) + chr(10)
         if failed_steps:
             msg += '• 未能写入的部分（已跳过，其余照常）：\n'
             for x in failed_steps[:10]:
