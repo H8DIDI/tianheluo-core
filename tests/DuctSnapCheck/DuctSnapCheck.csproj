@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Offline check for 排管贴井内壁: the plan-view maths and the rules file. No Revit needed. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\plugins\duct-snap\DuctSnapMath.cs" Link="DuctSnapMath.cs" />
+    <Compile Include="..\..\plugins\duct-snap\DuctSnapModel.cs" Link="DuctSnapModel.cs" />
+  </ItemGroup>
+</Project>

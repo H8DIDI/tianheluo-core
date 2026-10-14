@@ -139,17 +139,23 @@ def main():
     ap.add_argument("-m", "--message", required=True, help="本次发布的说明（用作 git 提交说明）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--skip-tests", action="store_true")
+    ap.add_argument("--skip-build", action="store_true",
+                    help="不重新编译打包，沿用 dist/ 和网站清单里已经生成的结果（Revit 锁住某个 DLL、无法覆盖时使用；"
+                         "发布前先确认 dist/ 是本次改动之后生成的）")
     ap.add_argument("--allow-same-version", default="", help="逗号分隔的插件 id，或 all / host")
     a = ap.parse_args()
     allow = {x.strip() for x in a.allow_same_version.split(",") if x.strip()}
 
     print("== 1/5 构建 ==")
-    run([sys.executable, "tools/build_all.py"], quiet=True)
+    if a.skip_build:
+        print("  （--skip-build：沿用已生成的 dist/ 与网站清单，未重新编译）")
+    else:
+        run([sys.executable, "tools/build_all.py"], quiet=True)
     run([sys.executable, str(SITE / "tools" / "build_seo.py")], quiet=True)  # 插件详情页、导航页脚、sitemap
     run([sys.executable, str(SITE / "tools" / "check_site.py")], quiet=True)  # 链接/JSON/标签静态检查，有问题就停在这里
     if not a.skip_tests:
         print("== 2/5 单元测试 ==")
-        for t in ("tests/StoreTests", "tests/UpdateTests"):
+        for t in ("tests/StoreTests", "tests/UpdateTests", "tests/DuctSnapCheck"):
             r = run(["dotnet", "run", "--project", t], quiet=True)
             if "ALL PASS" not in r.stdout:
                 sys.exit(f"测试未全部通过：{t}\n{r.stdout[-1500:]}")
