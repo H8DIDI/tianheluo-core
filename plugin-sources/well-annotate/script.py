@@ -148,7 +148,7 @@ _BANK_CAT = DB.BuiltInCategory.OST_StructuralFraming
 _BANK_IDS = _ints([_BANK_CAT])
 
 # 裁剪框自动外扩量（英尺，1.8 约 550 mm）：保证尺寸链线及文字落在裁剪框内
-_CROP_PAD = 1.8
+_CROP_PAD = 0.5
 
 # 统计用：跳过原因与同位置重复计数键（报告按 _REPORT_SKIPS 顺序列出，元组为 (键, 单位)）
 _ST_BANK_OK = '标注成功的排管'
@@ -209,8 +209,16 @@ def _face_area(f):
     return None
 
 
+_FACE_CACHE = {}
+_EDGE_CACHE = {}
+
+
 def _extract_faces(elem, instance=False):
-    """提取构件所有面引用，带世界法线、原点与面积（非平面面积为 None）。非平面取 UV 中心代表值。"""
+    """提取构件所有面引用，带世界法线、原点与面积（非平面面积为 None）。非平面取 UV 中心代表值。
+    同一次运行内按构件缓存（几何读取是最慢的一步，一口井会被读很多遍）。"""
+    ckey = (str(elem.Id), bool(instance))
+    if ckey in _FACE_CACHE:
+        return _FACE_CACHE[ckey]
     opt = DB.Options()
     opt.ComputeReferences = True
     opt.IncludeNonVisibleObjects = False
@@ -257,6 +265,7 @@ def _extract_faces(elem, instance=False):
                     })
 
     _walk(geom, DB.Transform.Identity)
+    _FACE_CACHE[ckey] = faces
     return faces
 
 
@@ -483,10 +492,10 @@ _HIDE_CATS = [DB.BuiltInCategory.OST_GenericModel] + _PIPE_CATS
 _WELLS_BY_MARK = {}
 
 
-def unhide_well(view, mark):
+def unhide_well(view, mark, apply=True):
     """本井如果在这张视图里被隐藏（以前运行误隐藏的），先恢复显示，否则收集不到本井。"""
     if not mark:
-        return
+        return 0
     try:
         if not _WELLS_BY_MARK:
             for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().ToElements():
@@ -494,10 +503,11 @@ def unhide_well(view, mark):
                 if m:
                     _WELLS_BY_MARK.setdefault(m, []).append(e)
         back = [e.Id for e in _WELLS_BY_MARK.get(mark, []) if e.IsHidden(view)]
-        if back:
+        if apply and back:
             view.UnhideElements(System.Collections.Generic.List[DB.ElementId](back))
+        return len(back)
     except:
-        pass
+        return 0
 
 
 def hide_irrelevant(view, main_elems):
@@ -596,6 +606,58 @@ def _face_box(elems, fallback):
         else:
             return fallback
     return tuple(out)
+
+
+_FIT_PAD_FT = 0.6   # 适配裁剪框：井和标注之外再留的余量（英尺，0.6 约 180 mm）
+
+
+def fit_crop(view, box):
+    """把视图裁剪框收紧到「井 + 本视图全部尺寸线」之外各留 _FIT_PAD_FT。裁剪框过大会缩小，不足会撑大
+    （深度方向不动）。用于出图后让视口只比内容大一圈。"""
+    try:
+        fr = _frame(view)
+        h, v, d = fr['h'], fr['v'], fr['d']
+        h0, h1 = _rng_of(box, h)
+        v0, v1 = _rng_of(box, v)
+        for dm in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension).ToElements():
+            try:
+                c = dm.Curve
+                o = c.Origin
+                try:
+                    length = sum(sg.Value for sg in dm.Segments) if dm.NumberOfSegments else dm.Value
+                except:
+                    length = dm.Value
+                p1 = DB.XYZ(o.X + c.Direction.X * length, o.Y + c.Direction.Y * length, o.Z + c.Direction.Z * length)
+                for p in (o, p1):
+                    ph = _coord(p, h)
+                    pv = _coord(p, v)
+                    h0 = min(h0, ph)
+                    h1 = max(h1, ph)
+                    v0 = min(v0, pv)
+                    v1 = max(v1, pv)
+            except:
+                continue
+        pad = _FIT_PAD_FT
+        cb = view.CropBox
+        T = cb.Transform
+        inv = T.Inverse
+        rng = crop_world_range(view)
+        dmid = sum(_rng_of(rng, d)) / 2.0
+        xs = []
+        ys = []
+        for hv in (h0 - pad, h1 + pad):
+            for vv in (v0 - pad, v1 + pad):
+                q = inv.OfPoint(_mk(fr, hv, vv, dmid))
+                xs.append(q.X)
+                ys.append(q.Y)
+        nb = DB.BoundingBoxXYZ()
+        nb.Transform = T
+        nb.Min = DB.XYZ(min(xs), min(ys), cb.Min.Z)
+        nb.Max = DB.XYZ(max(xs), max(ys), cb.Max.Z)
+        view.CropBox = nb
+        return True
+    except:
+        return False
 
 
 def _overlap(bb, rng):
@@ -918,11 +980,8 @@ def _bb_span(bb, axis):
     return abs(hi - lo)
 
 
-def _end_edges(bank, run, m, near):
-    """排管靠近井的那一端的端面短边（与排管走向垂直、且垂直于测量轴 m 的直边）。
-    标准图用的就是这类线性参照：有坡度的排管也稳定，重新生成后不会失效。
-    返回 (小侧值, 小侧引用, 大侧值, 大侧引用)，找不到返回 None。run 为排管走向轴，near 为靠近的坐标。"""
-    third = [a for a in ('X', 'Y', 'Z') if a not in (run, m)][0]
+def _collect_edges(bank, run, m, third):
+    """排管所有与 third 轴平行的短直边：[(沿走向坐标, 沿测量轴坐标, 引用), ...]。"""
     opt = DB.Options()
     opt.ComputeReferences = True
     opt.DetailLevel = DB.ViewDetailLevel.Fine
@@ -947,16 +1006,31 @@ def _end_edges(bank, run, m, near):
                             continue
                         rc = (_coord(p0, run) + _coord(p1, run)) / 2.0
                         mv = (_coord(p0, m) + _coord(p1, m)) / 2.0
-                        cand.append((abs(rc - near), mv, e.Reference))
+                        cand.append((rc, mv, e.Reference))
                     except:
                         continue
 
     try:
         _walk(bank.get_Geometry(opt), DB.Transform.Identity)
     except:
+        return []
+    return cand
+
+
+def _end_edges(bank, run, m, near):
+    """排管靠近井的那一端的端面短边（与排管走向垂直、且垂直于测量轴 m 的直边）。
+    标准图用的就是这类线性参照：有坡度的排管也稳定，重新生成后不会失效。
+    返回 (小侧值, 小侧引用, 大侧值, 大侧引用)，找不到返回 None。run 为排管走向轴，near 为靠近的坐标。"""
+    third = [a for a in ('X', 'Y', 'Z') if a not in (run, m)][0]
+    ekey = (str(bank.Id), run, m)
+    if ekey in _EDGE_CACHE:
+        cand = _EDGE_CACHE[ekey]
+    else:
+        cand = _collect_edges(bank, run, m, third)
+        _EDGE_CACHE[ekey] = cand
+    if not cand or len(cand) < 2:
         return None
-    if len(cand) < 2:
-        return None
+    cand = [(abs(c[0] - near), c[1], c[2]) for c in cand]
     best = min(c[0] for c in cand)
     near_c = [c for c in cand if c[0] <= best + 0.15]
     lo = min(near_c, key=lambda c: c[1])
@@ -1523,6 +1597,9 @@ class _ViewOption(forms.TemplateListItem):
 
 def main():
     try:
+        _FACE_CACHE.clear()
+        _EDGE_CACHE.clear()
+        _WELLS_BY_MARK.clear()
         # ---------- 1. 收集目标图纸 ----------
         sheets = []
         try:
@@ -1554,37 +1631,36 @@ def main():
                 pass
 
         if not sheets:
-            forms.alert('没有可处理的井大样图纸。\n请先选中井大样图纸（或模型里的井），或切换到井大样图纸上再运行。',
-                        title='一键井大样标注')
-            return
+            # 没有选中图纸、当前也不在井大样图纸上：列出全部井大样图纸，由你勾选（按图纸标注，不再逐个视图选）
+            all_sheets = [x for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements()
+                          if (x.Name or "").startswith("井大样_")]
+            all_sheets.sort(key=lambda x: x.Name or "")
+            if not all_sheets:
+                forms.alert('项目里没有井大样图纸（名称以「井大样_」开头）。', title='一键井大样标注')
+                return
+            by_name = {}
+            for x in all_sheets:
+                by_name[x.Name] = x
+            picked_names = forms.SelectFromList.show(
+                [x.Name for x in all_sheets],
+                title='选择要标注的井大样图纸（可多选；也可以先在项目浏览器里选中图纸再运行）',
+                button_name='开始标注',
+                multiselect=True)
+            if not picked_names:
+                return
+            if not isinstance(picked_names, (list, tuple)):
+                picked_names = [picked_names]
+            for nm_ in picked_names:
+                if nm_ in by_name and by_name[nm_] not in sheets:
+                    sheets.append(by_name[nm_])
 
-        # ---------- 2. 合并所有视图成一个总列表 ----------
-        options = []
+        # ---------- 2. 取所选图纸上的全部视图 ----------
+        target_views = []
         for sh in sheets:
             for k, nm, v in _views_of(sh):
-                options.append((k, (sh.Name, str(v.ViewType), v)))
-
-        if not options:
-            forms.alert('选中的图纸上没有可用视图。', title='一键井大样标注')
-            return
-        options.sort(key=lambda t: t[0])
-
-        picked = forms.SelectFromList.show(
-            [_ViewOption(o[1]) for o in options],
-            title='选择要标注的视图（可多选；下方标宽、左侧标高）',
-            button_name='开始标注',
-            multiselect=True)
-        if not picked:
-            return
-        if not isinstance(picked, (list, tuple)):
-            picked = [picked]
-        target_views = []
-        for p in picked:
-            try:
-                target_views.append(p[2])
-            except:
-                pass
+                target_views.append(v)
         if not target_views:
+            forms.alert('所选图纸上没有可用视图。', title='一键井大样标注')
             return
 
         mark_of_view = {}
@@ -1641,7 +1717,8 @@ def main():
             for v in target_views:
                 try:
                     del _DIM_ERRS[:]
-                    _step('恢复本井显示', lambda: unhide_well(v, mark_of_view.get(str(v.Id))))
+                    if unhide_well(v, mark_of_view.get(str(v.Id)), False):
+                        _step('恢复本井显示', lambda: unhide_well(v, mark_of_view.get(str(v.Id))))
                     elems = _main_well(v, collect_target_elems(v, stats), mark_of_view.get(str(v.Id)))
                     if not elems:
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
@@ -1655,14 +1732,14 @@ def main():
 
                     res = {'purged': 0, 'cn': 0, 'n': 0, 'why': None, 'hid': 0}
 
-                    def _hide():
-                        res['hid'] = hide_irrelevant(v, elems)
-                    _step("隐藏无关构件", _hide)
-                    hidden_total += res['hid']
-
                     def _purge():
                         res['purged'] = purge_dims(v)
-                    _step("清除旧尺寸", _purge)
+
+                    def _prep():
+                        res['hid'] = hide_irrelevant(v, elems)
+                        _purge()
+                    _step("隐藏无关构件并清除旧尺寸", _prep)
+                    hidden_total += res['hid']
                     purged += res['purged']
 
                     # 先排尺寸链，再排总尺寸：总尺寸需要知道各侧最外一道链线的位置
@@ -1671,7 +1748,24 @@ def main():
 
                     def _chains():
                         res['cn'], res['why'] = make_chain_dims(v, elems, box, led, stats, ext)
-                    if not _step("排管尺寸链", _chains):
+                    def _totals():
+                        res['n'] = make_total_dims(v, elems, box, led, ext)
+
+                    def _both():
+                        _chains()
+                        _totals()
+                    if _step("标注", _both):
+                        chains_ok = True
+                    else:
+                        chains_ok = False
+                        res['cn'] = 0
+                        res['n'] = 0
+                        led = _SpotLedger()
+                        ext = {}
+                        del _DIM_ERRS[:]
+                    if chains_ok:
+                        pass
+                    elif not _step("排管尺寸链", _chains):
                         # 整体提交失败：逐根排管各自提交，只丢弃参照失效的那一根
                         res['cn'] = 0
                         ext = {}
@@ -1692,9 +1786,9 @@ def main():
                                 else:
                                     failed_steps.append('{}：排管 {} 的{}向尺寸链（Revit 判定参照失效）'.format(v.Name, bk.Id, '水平' if dr == 'h' else '竖'))
 
-                    def _totals():
-                        res['n'] = make_total_dims(v, elems, box, led, ext)
-                    if not _step("总尺寸", _totals):
+                    if chains_ok:
+                        pass
+                    elif not _step("总尺寸", _totals):
                         # 个别视图总线与链放在一起时 Revit 判定参照失效：清掉重做，改成先总线、后链
                         res['n'] = 0
                         _step("清除旧尺寸", _purge)
@@ -1709,6 +1803,7 @@ def main():
                             res['cn'] = 0
                             failed_steps.append('{}：排管尺寸链（Revit 判定参照失效）'.format(v.Name))
 
+                    _step('适配裁剪框', lambda: fit_crop(v, box))
                     _bump(stats, _ST_DUP, led.dup)
                     cn = res['cn']
                     n = res['n']
