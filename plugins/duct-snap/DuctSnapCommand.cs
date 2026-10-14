@@ -89,7 +89,9 @@ internal sealed class DuctSnapHandler : IExternalEventHandler
                 case DuctSnapRequestKind.Apply:
                     // Analyse again right before writing, so the edits match the model as it is now.
                     var fresh = DuctSnapEngine.Analyse(doc, uidoc.Selection.GetElementIds());
-                    var result = DuctSnapEngine.Apply(doc, fresh.Edits);
+                    // Ends the user unchecked in the 执行 column are put back to where they are in the model.
+                    var chosenEdits = DuctSnapEngine.WithoutEnds(doc, fresh.Edits, req.Excluded ?? new List<(long BankId, int End)>());
+                    var result = DuctSnapEngine.Apply(doc, chosenEdits);
                     var after = DuctSnapEngine.Analyse(doc, uidoc.Selection.GetElementIds());
                     string text;
                     if (result.RolledBack)

@@ -55,7 +55,10 @@ public static class DuctSnapEngine
     /// A well that moves or is changed gets a new key, so stale values are never reused. The plugin is hot-loaded
     /// per click, so this cache lasts for one window session (first check reads the wells, later checks are fast).
     /// </summary>
-    private static readonly Dictionary<string, Cavity?> CavityCache = new();
+    private static readonly Dictionary<string, CavityFrame?> CavityCache = new();
+
+    /// <summary>A well's inner cavity in its own frame: the well is turned by Theta, and Local is axis-aligned in that frame.</summary>
+    private sealed record CavityFrame(double Theta, Cavity Local);
 
     public static SnapReport Analyse(Document doc, ICollection<ElementId>? selection)
     {
@@ -87,7 +90,9 @@ public static class DuctSnapEngine
                     {
                         // The bank runs inside the wall: move the end along the bank to the nearest inner wall face ahead of it.
                         var cavInside = CavityOf(inside, rules);
-                        var toPlane = cavInside is { } ci ? DuctSnapMath.DistanceToInnerPlane(pts[k], pts[1 - k], ci, rules.ToleranceMm) : null;
+                        var toPlane = cavInside is { } ci
+                            ? DuctSnapMath.DistanceToInnerPlane(InFrame(pts[k], ci), InFrame(pts[1 - k], ci), ci.Local, rules.ToleranceMm)
+                            : null;
                         // Trim (positive) may be long: the excess lies in the wall. Extend (negative) must be short: the end
                         // is already at the well, so a long move means it belongs to a different place.
                         var dec = toPlane is { } e0 && Math.Abs(e0) <= rules.ToleranceMm
@@ -140,7 +145,12 @@ public static class DuctSnapEngine
                 bool willMove = moved[k] && canEdit;
                 rep.Rows.Add(MakeRow(bank, k, w, picked[k].Dec, willMove, shortNote, rules,
                     startBeforeMm: bank.A.Z * MmPerFoot, endBeforeMm: bank.B.Z * MmPerFoot,
-                    startAfterMm: plannedStart.Z * MmPerFoot, endAfterMm: plannedEnd.Z * MmPerFoot));
+                    startAfterMm: plannedStart.Z * MmPerFoot, endAfterMm: plannedEnd.Z * MmPerFoot,
+                    endXyz: XyzText(pts[k], k == 0 ? bank.A.Z : bank.B.Z),
+                    otherXyz: XyzText(pts[1 - k], k == 0 ? bank.B.Z : bank.A.Z),
+                    lengthMm: Dist(pts[0], pts[1]),
+                    turnDeg: TurnOf(picked[k].Well, rules),
+                    cavityText: CavityWorldText(picked[k].Well, rules)));
                 if (willMove) rep.EndsChanged++;
             }
         }
@@ -289,10 +299,10 @@ public static class DuctSnapEngine
         foreach (var w in wells)
         {
             if (end.X < w.MinX - margin || end.X > w.MaxX + margin || end.Y < w.MinY - margin || end.Y > w.MaxY + margin) continue;
-            var cav = CavityOf(w, rules);
-            var dec = cav is null
+            var cf = CavityOf(w, rules);
+            var dec = cf is null
                 ? new SnapDecision(SnapKind.NoCavity, 0)
-                : DuctSnapMath.Classify(end, other, cav.Value, rules.Limits);
+                : DuctSnapMath.Classify(InFrame(end, cf), InFrame(other, cf), cf.Local, rules.Limits);
             if (dec.Kind == SnapKind.Unrelated) continue;
             int rank = Rank(dec.Kind);
             double abs = Math.Abs(dec.T);
@@ -307,7 +317,7 @@ public static class DuctSnapEngine
         return (best, bestDec);
     }
 
-    private static Cavity? CavityOf(WellBox w, DuctSnapRules rules)
+    private static CavityFrame? CavityOf(WellBox w, DuctSnapRules rules)
     {
         if (CavityCache.TryGetValue(w.Key, out var known)) return known;
         var faces = new List<WallFace>();
@@ -325,10 +335,21 @@ public static class DuctSnapEngine
                 }
             }
         }
-        var cav = DuctSnapMath.FindCavity(faces, rules.MinFaceAreaM2, rules.FaceAreaRatio);
-        CavityCache[w.Key] = cav;
-        return cav;
+        // Find the well's own turn, then read the cavity in that frame (a slightly turned well is still a rectangle).
+        CavityFrame? frame = null;
+        if (faces.Count > 0)
+        {
+            double theta = DuctSnapMath.DominantAngle(faces);
+            var local = faces.Select(f => DuctSnapMath.RotateFace(f, -theta)).ToList();
+            if (DuctSnapMath.FindCavity(local, rules.MinFaceAreaM2, rules.FaceAreaRatio) is { } cav)
+                frame = new CavityFrame(theta, cav);
+        }
+        CavityCache[w.Key] = frame;
+        return frame;
     }
+
+    /// <summary>A plan point in the well's own frame (the same frame as its cavity).</summary>
+    private static Pt2 InFrame(Pt2 p, CavityFrame f) => DuctSnapMath.Rotate(p, -f.Theta);
 
     private static IEnumerable<Solid> Solids(IEnumerable<GeometryObject> geometry)
     {
@@ -346,7 +367,8 @@ public static class DuctSnapEngine
     }
 
     private static SnapRow MakeRow(BankRec bank, int k, WellBox w, SnapDecision d, bool willMove, string? shortNote, DuctSnapRules rules,
-        double startBeforeMm, double endBeforeMm, double startAfterMm, double endAfterMm)
+        double startBeforeMm, double endBeforeMm, double startAfterMm, double endAfterMm,
+        string endXyz, string otherXyz, double lengthMm, double turnDeg, string cavityText)
     {
         string status, action, note;
         double shown = d.T;
@@ -439,7 +461,53 @@ public static class DuctSnapEngine
             StartZAfterMm = startAfterMm,
             EndZBeforeMm = endBeforeMm,
             EndZAfterMm = endAfterMm,
+            EndXyz = endXyz,
+            OtherXyz = otherXyz,
+            LengthMm = lengthMm,
+            TurnDeg = turnDeg,
+            CavityText = cavityText,
+            Checked = status == "可修改",
         };
+    }
+
+    /// <summary>X, Y in mm and Z (elevation) in mm, for the table.</summary>
+    private static string XyzText(Pt2 pMm, double zFeet) => $"{pMm.X:0.0}, {pMm.Y:0.0}, {zFeet * MmPerFoot:0.0}";
+
+    /// <summary>The well's turn in plan, degrees (0 when its cavity is unknown).</summary>
+    private static double TurnOf(WellBox? w, DuctSnapRules rules)
+        => w is null || CavityOf(w, rules) is not { } cf ? 0 : cf.Theta * 180 / Math.PI;
+
+    /// <summary>The well's inner cavity as the bounding box of its four corners in world coordinates, mm.</summary>
+    private static string CavityWorldText(WellBox? w, DuctSnapRules rules)
+    {
+        if (w is null || CavityOf(w, rules) is not { } cf) return "无（未识别内壁）";
+        var c = cf.Local;
+        var corners = new[] { new Pt2(c.XLeft, c.YBottom), new Pt2(c.XRight, c.YBottom), new Pt2(c.XLeft, c.YTop), new Pt2(c.XRight, c.YTop) }
+            .Select(q => DuctSnapMath.Rotate(q, cf.Theta)).ToList();
+        double x0 = corners.Min(q => q.X), x1 = corners.Max(q => q.X), y0 = corners.Min(q => q.Y), y1 = corners.Max(q => q.Y);
+        return $"X {x0:0}..{x1:0}, Y {y0:0}..{y1:0}";
+    }
+
+    /// <summary>
+    /// The edits with the ends the user unchecked put back to where they are in the model. An edit with both ends
+    /// unchecked is dropped. Used by 执行 so the table's 执行 column decides which ends are written.
+    /// </summary>
+    public static List<BankEdit> WithoutEnds(Document doc, IEnumerable<BankEdit> edits, IReadOnlyCollection<(long BankId, int End)> excluded)
+    {
+        var skip = new HashSet<(long, int)>(excluded);
+        var result = new List<BankEdit>();
+        foreach (var e in edits)
+        {
+            bool keepStart = !skip.Contains((e.BankId, 0));
+            bool keepEnd = !skip.Contains((e.BankId, 1));
+            if (keepStart && keepEnd) { result.Add(e); continue; }
+            if (!keepStart && !keepEnd) continue;
+            if (doc.GetElement(new ElementId(e.BankId))?.Location is not LocationCurve orig) continue;
+            var start = keepStart ? e.Start : orig.Curve.GetEndPoint(0);
+            var end = keepEnd ? e.End : orig.Curve.GetEndPoint(1);
+            result.Add(new BankEdit(e.BankId, start, end));
+        }
+        return result;
     }
 
     private static Pt2 ToMm(XYZ p) => new(p.X * MmPerFoot, p.Y * MmPerFoot);

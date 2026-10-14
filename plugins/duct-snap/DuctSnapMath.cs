@@ -130,6 +130,38 @@ public static class DuctSnapMath
         return null;
     }
 
+    /// <summary>Rotates a plan point about the origin by theta (radians, counter-clockwise).</summary>
+    public static Pt2 Rotate(Pt2 p, double theta)
+    {
+        double c = Math.Cos(theta), s = Math.Sin(theta);
+        return new Pt2(p.X * c - p.Y * s, p.X * s + p.Y * c);
+    }
+
+    /// <summary>
+    /// The rotation of a well in plan (radians, in (-45°, 45°]), from its vertical faces. Walls of a rectangular well
+    /// have normals 90° apart, so the area-weighted mean of 4×angle gives the well's own orientation. A well drawn
+    /// slightly turned (for example 4.6°) gets its real frame, so its cavity can still be read as a rectangle.
+    /// </summary>
+    public static double DominantAngle(IReadOnlyList<WallFace> faces)
+    {
+        double s = 0, c = 0;
+        foreach (var f in faces)
+        {
+            double a = Math.Atan2(f.Ny, f.Nx);
+            s += f.AreaM2 * Math.Sin(4 * a);
+            c += f.AreaM2 * Math.Cos(4 * a);
+        }
+        return Math.Atan2(s, c) / 4;
+    }
+
+    /// <summary>A vertical face turned by theta: its normal and its point are rotated the same way as the plan points.</summary>
+    public static WallFace RotateFace(WallFace f, double theta)
+    {
+        var n = Rotate(new Pt2(f.Nx, f.Ny), theta);
+        var o = Rotate(new Pt2(f.X, f.Y), theta);
+        return new WallFace(n.X, n.Y, o.X, o.Y, f.AreaM2);
+    }
+
     /// <summary>The end moved by T along the bank direction. Plan position only.</summary>
     public static Pt2 Move(Pt2 end, Pt2 other, double t)
     {
@@ -168,18 +200,23 @@ public static class DuctSnapMath
         double minSpanMm = 500, double maxSpanMm = 6000)
     {
         if (faces.Count == 0) return null;
-        double largest = 0;
-        foreach (var f in faces) largest = Math.Max(largest, f.AreaM2);
-        double floor = Math.Max(minAreaM2, areaRatio * largest);
+        // Each wall direction is judged against the largest face of its own direction. A short wall (the inner face
+        // of a small well) must not be dropped just because a long wall in another direction is big.
+        double Floor(double nx, double ny)
+        {
+            double largest = 0;
+            foreach (var f in faces) if (IsAxis(f.Nx, nx) && IsAxis(f.Ny, ny)) largest = Math.Max(largest, f.AreaM2);
+            return Math.Max(minAreaM2, areaRatio * largest);
+        }
+        double fxp = Floor(1, 0), fxm = Floor(-1, 0), fyp = Floor(0, 1), fym = Floor(0, -1);
 
         double? xl = null, xr = null, yb = null, yt = null;
         foreach (var f in faces)
         {
-            if (f.AreaM2 < floor) continue;
-            if (IsAxis(f.Nx, 1) && IsAxis(f.Ny, 0)) xl = xl is null ? f.X : Math.Min(xl.Value, f.X);
-            else if (IsAxis(f.Nx, -1) && IsAxis(f.Ny, 0)) xr = xr is null ? f.X : Math.Max(xr.Value, f.X);
-            else if (IsAxis(f.Nx, 0) && IsAxis(f.Ny, 1)) yb = yb is null ? f.Y : Math.Min(yb.Value, f.Y);
-            else if (IsAxis(f.Nx, 0) && IsAxis(f.Ny, -1)) yt = yt is null ? f.Y : Math.Max(yt.Value, f.Y);
+            if (IsAxis(f.Nx, 1) && IsAxis(f.Ny, 0) && f.AreaM2 >= fxp) xl = xl is null ? f.X : Math.Min(xl.Value, f.X);
+            else if (IsAxis(f.Nx, -1) && IsAxis(f.Ny, 0) && f.AreaM2 >= fxm) xr = xr is null ? f.X : Math.Max(xr.Value, f.X);
+            else if (IsAxis(f.Nx, 0) && IsAxis(f.Ny, 1) && f.AreaM2 >= fyp) yb = yb is null ? f.Y : Math.Min(yb.Value, f.Y);
+            else if (IsAxis(f.Nx, 0) && IsAxis(f.Ny, -1) && f.AreaM2 >= fym) yt = yt is null ? f.Y : Math.Max(yt.Value, f.Y);
         }
         if (xl is null || xr is null || yb is null || yt is null) return null;
 

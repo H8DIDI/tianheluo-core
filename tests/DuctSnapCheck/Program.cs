@@ -158,6 +158,36 @@ Check("end already on the inner face, within tolerance: no move (0)",
 Check("no inner plane ahead: the nearest one behind is used (negative)",
     DuctSnapMath.DistanceToInnerPlane(new Pt2(10, 0), new Pt2(20, 0), new Cavity(-5, -1, -5, 5)) is { } tp5 && Near(tp5, -11, 0.01));
 
+// ---- Cavity with per-direction thresholds: a short inner wall next to a long outer wall must not be dropped ----
+// LV handhole 9462763 (live model): the 1200-high walls are long (10.77 m2), the inner x-walls are short (3.35 m2).
+var lvFaces = new List<WallFace>
+{
+    W(0, 1, -14691, 20259, 10.77), W(0, -1, -17741, 19059, 10.77), W(0, 1, -14791, 19159, 9.55), W(0, -1, -17641, 20159, 9.55),
+    W(-1, 0, -17741, 20259, 4.24), W(1, 0, -14691, 19059, 4.24), W(-1, 0, -14791, 20159, 3.35), W(1, 0, -17641, 19159, 3.35),
+};
+var clv2 = DuctSnapMath.FindCavity(lvFaces, 0.2, 0.4);
+Check("LV handhole 9462763: inner walls kept (cavity -17641..-14791 x 19159..20159)",
+    clv2 is { } l2 && Near(l2.XLeft, -17641) && Near(l2.XRight, -14791) && Near(l2.YBottom, 19159) && Near(l2.YTop, 20159), $"{clv2}");
+
+// ELV PIT 8979299 (live model): 1200 outer walls, 700 mm inner cavity with 0.63 m2 inner faces.
+var pitFaces = new List<WallFace>
+{
+    W(0, 1, 423881, -702482, 1.08), W(0, -1, 422881, -703482, 1.08), W(-1, 0, 422881, -702482, 1.08), W(1, 0, 423881, -703482, 1.08),
+    W(-1, 0, 423731, -702632, 0.63), W(1, 0, 423031, -703332, 0.63), W(0, 1, 423731, -703332, 0.63), W(0, -1, 423031, -702632, 0.63),
+};
+var cpit = DuctSnapMath.FindCavity(pitFaces, 0.2, 0.4);
+Check("ELV PIT 8979299: 700 mm cavity is found (0.63 m2 walls kept)",
+    cpit is { } p1 && Near(p1.XLeft, 423031) && Near(p1.XRight, 423731) && Near(p1.YBottom, -703332) && Near(p1.YTop, -702632), $"{cpit}");
+
+// A whole well turned by 4.6 degrees (EM1-I 8979654 in the live model): the turn is found and the cavity is read in its frame.
+double turn = 0.08; // radians, about 4.6 degrees
+var turned = walls.Select(f => DuctSnapMath.RotateFace(f, turn)).ToList();
+double found = DuctSnapMath.DominantAngle(turned);
+Check("turned well: its turn is found (about 4.6 degrees)", Math.Abs(found - turn) < 1e-3, $"{found * 180 / Math.PI:0.00} deg");
+var inFrame = DuctSnapMath.FindCavity(turned.Select(f => DuctSnapMath.RotateFace(f, -found)).ToList(), 0.2, 0.4);
+Check("turned well: cavity read in its own frame is the 3 m square",
+    inFrame is { } tw && Near(tw.XLeft, 0, 0.5) && Near(tw.XRight, 3000, 0.5) && Near(tw.YBottom, 0, 0.5) && Near(tw.YTop, 3000, 0.5), $"{inFrame}");
+
 Console.WriteLine();
 Console.WriteLine(failed == 0 ? "ALL PASS" : $"{failed} FAILED");
 return failed == 0 ? 0 : 1;

@@ -5,7 +5,7 @@
 
 | 插件 id | 名称 | 版本 | 类型 | 作者 | 许可 |
 |---|---|---|---|---|---|
-| [`duct-snap`](duct-snap/) | 排管贴井内壁 | 0.1.6 | C#（源码在 `plugins/`） | didi | MIT |
+| [`duct-snap`](duct-snap/) | 排管贴井内壁 | 0.1.7 | C#（源码在 `plugins/`） | didi | MIT |
 | [`elv-merge`](elv-merge/) | 强电井清洗合并 | 0.1.0 | Python | didi | MIT |
 | [`export-dwg`](export-dwg/) | 一键导出井大样DWG | 0.1.0 | Python | didi | MIT |
 | [`export-nwc`](export-nwc/) | 一键导出NWC | 0.1.0 | Python | didi | MIT |

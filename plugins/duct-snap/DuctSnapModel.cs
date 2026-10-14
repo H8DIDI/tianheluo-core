@@ -11,11 +11,11 @@ namespace KaifaTools.DuctSnap;
 public sealed class DuctSnapRules
 {
     public double MaxExtendMm { get; set; } = 1000;      // an end this far (or less) short of the inner wall is extended to it
-    public double MaxTrimMm { get; set; } = 600;         // an end this far (or less) inside the well is trimmed back; deeper -> a person decides
+    public double MaxTrimMm { get; set; } = 2500;        // an end inside the well is trimmed back to the inner face on the bank side, up to this distance (about the well size)
     public double MaxEdgeTrimMm { get; set; } = 2500;    // a bank running inside a well's wall is trimmed back to the well's edge if the excess is this long or less
     public double ToleranceMm { get; set; } = 5;         // within this distance the end already sits on the wall: no change
     public double MinLengthMm { get; set; } = 500;       // a bank shorter than this after the change is not edited
-    public double MinFaceAreaM2 { get; set; } = 0.9;     // wall faces smaller than this are ignored
+    public double MinFaceAreaM2 { get; set; } = 0.2;     // wall faces smaller than this are ignored (small wells have ~0.6 m2 inner faces)
     public double FaceAreaRatio { get; set; } = 0.4;     // ...and so are faces below this share of the largest wall face
 
     // Which structural framing counts as a 排管 (matched inside the family name)
@@ -81,6 +81,15 @@ public sealed class SnapRow
     public SnapKind Kind { get; init; }
     public double MoveMm { get; init; }           // signed; + = along the bank toward its other end
     public string Status { get; init; } = "";     // 可修改 / 已贴合 / 需人工
+    public bool Checked { get; set; }             // in the 执行 column: whether this end is applied (default: the 可修改 rows)
+
+    // The data behind the decision, so the table can be checked against the model (millimetres, plan + elevation)
+    public string EndXyz { get; init; } = "";     // this end: X, Y, Z
+    public string OtherXyz { get; init; } = "";   // the bank's other end: X, Y, Z
+    public double LengthMm { get; init; }         // bank length
+    public double TurnDeg { get; init; }          // turn of the well in plan, degrees
+    public string CavityText { get; init; } = ""; // inner cavity of the well (world box), mm
+
     public string Action { get; init; } = "";     // 延伸到内壁 / 修剪伸入井内的部分 / 不动
     public string Note { get; init; } = "";       // why, in words
 

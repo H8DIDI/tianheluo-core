@@ -7,7 +7,7 @@ namespace KaifaTools.DuctSnap;
 
 public enum DuctSnapRequestKind { Jump, Recheck, Apply }
 
-public sealed record DuctSnapRequest(DuctSnapRequestKind Kind, long Id = 0);
+public sealed record DuctSnapRequest(DuctSnapRequestKind Kind, long Id = 0, IReadOnlyList<(long BankId, int End)>? Excluded = null);
 
 /// <summary>
 /// Modeless list of the bank ends near wells. Revit work is only requested here, never done here, so the window
@@ -30,6 +30,8 @@ public sealed class DuctSnapForm : Form
     private readonly Label _summary = new();
     private readonly Label _notes = new();
     private readonly ComboBox _filter = new();
+    private readonly TextBox _search = new();
+    private string _summaryBase = "";
     private readonly CheckBox _pin = new();
 
     public Action<DuctSnapRequest>? Requested { get; set; }
@@ -59,6 +61,10 @@ public sealed class DuctSnapForm : Form
         _filter.Width = 240;
         _filter.SelectedIndexChanged += (_, _) => RefreshShown();
         top.Controls.Add(_filter);
+        top.Controls.Add(new Label { AutoSize = true, Text = "    查找（排管ID / 井ID / 族名）：", Padding = new Padding(0, 6, 0, 0) });
+        _search.Width = 220;
+        _search.TextChanged += (_, _) => RefreshShown();
+        top.Controls.Add(_search);
         _pin.AutoSize = true;
         _pin.Text = "锁定在最前";
         _pin.Margin = new Padding(24, 4, 0, 0);
@@ -92,17 +98,30 @@ public sealed class DuctSnapForm : Form
                 AutoSizeMode = fill ? DataGridViewAutoSizeColumnMode.Fill : DataGridViewAutoSizeColumnMode.NotSet,
             });
         }
-        Col("状态", nameof(SnapRow.Status), 80);
-        Col("动作", nameof(SnapRow.Action), 150);
-        Col("移动(mm)", nameof(SnapRow.Move), 80);
-        Col("排管ID", nameof(SnapRow.BankId), 90);
-        Col("排管族", nameof(SnapRow.BankFamily), 230);
-        Col("端点", nameof(SnapRow.End), 60);
-        Col("起点标高(mm) 改前 → 改后", nameof(SnapRow.StartZ), 170);
-        Col("终点标高(mm) 改前 → 改后", nameof(SnapRow.EndZ), 170);
-        Col("井族", nameof(SnapRow.WellFamily), 180);
+        _grid.Columns.Insert(0, new DataGridViewCheckBoxColumn
+        {
+            Name = nameof(SnapRow.Checked), HeaderText = "执行", DataPropertyName = nameof(SnapRow.Checked), Width = 50,
+        });
+        Col("状态", nameof(SnapRow.Status), 70);
+        Col("动作", nameof(SnapRow.Action), 130);
+        Col("移动(mm)", nameof(SnapRow.Move), 70);
+        Col("排管ID", nameof(SnapRow.BankId), 80);
+        Col("端点", nameof(SnapRow.End), 50);
+        Col("本端坐标 X,Y,Z (mm)", nameof(SnapRow.EndXyz), 170);
+        Col("另一端坐标 X,Y,Z (mm)", nameof(SnapRow.OtherXyz), 170);
+        Col("排管长(mm)", nameof(SnapRow.LengthMm), 80);
+        Col("井ID", nameof(SnapRow.WellId), 80);
+        Col("井族", nameof(SnapRow.WellFamily), 150);
+        Col("井转角(°)", nameof(SnapRow.TurnDeg), 70);
+        Col("井内腔 (mm, 外接框)", nameof(SnapRow.CavityText), 190);
+        Col("起点标高 改前→改后", nameof(SnapRow.StartZ), 130);
+        Col("终点标高 改前→改后", nameof(SnapRow.EndZ), 130);
+        Col("排管族", nameof(SnapRow.BankFamily), 200);
         Col("说明", nameof(SnapRow.Note), 320, fill: true);
         _grid.Columns[nameof(SnapRow.Note)]!.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+        // commit a checkbox click at once, so the count below and the apply see it
+        _grid.CurrentCellDirtyStateChanged += (_, _) => { if (_grid.IsCurrentCellDirty) _grid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
+        _grid.CellValueChanged += (_, _) => UpdateSummaryCounts();
         _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.DisplayedCellsExceptHeaders;
         root.Controls.Add(_grid, 0, 2);
 
@@ -133,7 +152,8 @@ public sealed class DuctSnapForm : Form
 
     private void ShowReport(SnapReport report, string? message)
     {
-        _summary.Text = report.Summary + (message is null ? "" : "\n" + message);
+        _summaryBase = report.Summary + (message is null ? "" : "\n" + message);
+        UpdateSummaryCounts();
         var notes = new List<string>();
         if (report.RulesError is not null) notes.Add("⚠ " + report.RulesError);
         notes.AddRange(report.Notes);
@@ -166,6 +186,12 @@ public sealed class DuctSnapForm : Form
             FilterAll => _report.Rows,
             _ => _report.Rows.Where(r => r.Status != "已贴合"),
         };
+        string text = _search.Text.Trim();
+        if (text.Length > 0)
+            q = q.Where(r => r.BankId.ToString().Contains(text, StringComparison.Ordinal)
+                          || r.WellId.ToString().Contains(text, StringComparison.Ordinal)
+                          || r.BankFamily.Contains(text, StringComparison.OrdinalIgnoreCase)
+                          || r.WellFamily.Contains(text, StringComparison.OrdinalIgnoreCase));
         var list = q.ToList();
         _shown.RaiseListChangedEvents = false;
         _shown.Clear();
@@ -198,19 +224,28 @@ public sealed class DuctSnapForm : Form
         Requested?.Invoke(new DuctSnapRequest(DuctSnapRequestKind.Jump, row.BankId));
     }
 
+    /// <summary>How many ends the 执行 column currently selects; shown under the summary so the user sees what will be written.</summary>
+    private void UpdateSummaryCounts()
+    {
+        int chosen = _report.Rows.Count(r => r.Checked && r.Status == "可修改");
+        _summary.Text = _summaryBase + $"\n当前勾选执行 {chosen} 个端点（取消勾选的不会写入模型）。";
+    }
+
     private void ApplyWithConfirm()
     {
-        if (_report.Edits.Count == 0)
+        var excluded = _report.Rows.Where(r => r.Status == "可修改" && !r.Checked).Select(r => (r.BankId, r.EndIndex)).ToList();
+        int chosen = _report.Rows.Count(r => r.Status == "可修改" && r.Checked);
+        if (chosen == 0)
         {
-            _notes.Text = "当前没有可以自动修改的端点。\n" + _notes.Text;
+            _notes.Text = "没有勾选任何可以修改的端点。\n" + _notes.Text;
             return;
         }
-        string text = $"将修改 {_report.EndsChanged} 个端点（{_report.Edits.Count} 根排管）。\n"
+        string text = $"将修改 {chosen} 个端点（取消勾选的 {excluded.Count} 个不改）。\n"
             + "只改平面位置，端点标高保持不变。需人工的端点不会被改动。\n"
             + "写入后会从模型里逐根读回核对两端标高；有任何一根标高变了，整次修改全部撤销。\n"
             + "一次操作，可用 Ctrl+Z 撤销。\n\n继续吗？";
         var r = MessageBox.Show(this, text, "排管贴井内壁", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-        if (r == DialogResult.Yes) Requested?.Invoke(new DuctSnapRequest(DuctSnapRequestKind.Apply));
+        if (r == DialogResult.Yes) Requested?.Invoke(new DuctSnapRequest(DuctSnapRequestKind.Apply, Excluded: excluded));
     }
 
     private void ExportCsv()
