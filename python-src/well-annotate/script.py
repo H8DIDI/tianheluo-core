@@ -211,6 +211,7 @@ def _extract_faces(elem, instance=False):
     opt = DB.Options()
     opt.ComputeReferences = True
     opt.IncludeNonVisibleObjects = False
+    opt.DetailLevel = DB.ViewDetailLevel.Fine   # 视图是精细级别；默认的中等级别下有些族（如 LV 拉线井）只出碎片面，认不出内壁
     geom = elem.get_Geometry(opt)
     faces = []
     if not geom:
@@ -433,6 +434,39 @@ def union_box(view, elems):
     if x0 is None:
         return None
     return (x0, x1, y0, y1, z0, z1)
+
+
+def _main_well(view, elems):
+    """视图里可能同时出现几口井（邻井也在裁剪框内）：只认最大的那口作为本井，其余忽略，
+    否则外包框会把邻井也算进去、排管链会标到邻井上。"""
+    if len(elems) <= 1:
+        return elems
+    fr = _frame(view)
+    best = None
+    best_a = -1.0
+    for e in elems:
+        try:
+            bb = e.get_BoundingBox(view)
+            a = _bb_span(bb, fr['h']) * _bb_span(bb, fr['v']) * _bb_span(bb, fr['d'])
+        except:
+            continue
+        if a > best_a:
+            best, best_a = e, a
+    if best is None:
+        return elems
+    bb0 = best.get_BoundingBox(view)
+    out = []
+    for e in elems:
+        try:
+            bb = e.get_BoundingBox(view)
+            cx = (bb.Min.X + bb.Max.X) / 2.0
+            cy = (bb.Min.Y + bb.Max.Y) / 2.0
+            cz = (bb.Min.Z + bb.Max.Z) / 2.0
+            if (bb0.Min.X <= cx <= bb0.Max.X and bb0.Min.Y <= cy <= bb0.Max.Y and bb0.Min.Z <= cz <= bb0.Max.Z):
+                out.append(e)
+        except:
+            continue
+    return out or [best]
 
 
 def _overlap(bb, rng):
@@ -762,6 +796,7 @@ def _end_edges(bank, run, m, near):
     third = [a for a in ('X', 'Y', 'Z') if a not in (run, m)][0]
     opt = DB.Options()
     opt.ComputeReferences = True
+    opt.DetailLevel = DB.ViewDetailLevel.Fine
     cand = []
 
     def _walk(ge, tr):
@@ -1194,11 +1229,11 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                     vb_lo, vb_hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), v)
             # 水平链：截面水平宽在井内壁之间，且竖向范围与井相交
             ok_h = (want_h and hb_lo >= wL - _IN_TOL_FT and hb_hi <= wR + _IN_TOL_FT
-                    and vb_lo < wT and vb_hi > wB)
+                    and vb_lo < wT + _IN_TOL_FT and vb_hi > wB - _IN_TOL_FT)
             # 竖向链：截面竖向范围在井内壁之间，且水平范围与井相交
             ok_v = (want_v and vb_lo >= wB - _IN_TOL_FT and vb_hi <= wT + _IN_TOL_FT
-                    and hb_lo < wR and hb_hi > wL)
-            if not (ok_h or ok_v):
+                    and hb_lo < wR + _IN_TOL_FT and hb_hi > wL - _IN_TOL_FT)
+            if not (ok_h or ok_v) or not _overlap(bb, (box[0] - 0.3, box[1] + 0.3, box[2] - 0.3, box[3] + 0.3, box[4] - 0.3, box[5] + 0.3)):
                 _bump(stats, _SKIP_BANK_OUT)
                 continue
             n_ch = 0
@@ -1471,7 +1506,7 @@ def main():
             for v in target_views:
                 try:
                     del _DIM_ERRS[:]
-                    elems = collect_target_elems(v, stats)
+                    elems = _main_well(v, collect_target_elems(v, stats))
                     if not elems:
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
