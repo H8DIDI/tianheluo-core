@@ -564,6 +564,59 @@ uidoc = revit.uidoc
 
 
 
+def _old_detail_candidates(doc):
+    """老旧的井大样详图视图：Detail 类型、没有放在任何图纸上、裁剪框离某口井不超过 1 m。
+    返回 [(视图 ElementId, 视图名, 最近井的 Mark)]。名字以 SL 开头的标准图集详图不算（不是井大样）。"""
+    placed = set()
+    for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
+        try:
+            placed.add(_vp.ViewId.Value)
+        except:
+            pass
+    wells = []
+    for _w in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType():
+        try:
+            if not isinstance(_w, DB.FamilyInstance):
+                continue
+            _bb = _w.get_BoundingBox(None)
+            if _bb is None:
+                continue
+            _mp = _w.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+            _mk = _mp.AsString().strip() if (_mp and _mp.AsString()) else ""
+            wells.append((_bb, _mk))
+        except:
+            pass
+    out = []
+    for _v in DB.FilteredElementCollector(doc).OfClass(DB.View).ToElements():
+        try:
+            if _v.IsTemplate or str(_v.ViewType) != "Detail":
+                continue
+            if _v.Id.Value in placed:
+                continue
+            _nm = _v.Name or ""
+            if _nm.startswith("SL"):
+                continue
+            _cb = _v.CropBox
+            _mn = _cb.Transform.OfPoint(_cb.Min)
+            _mx = _cb.Transform.OfPoint(_cb.Max)
+            _cx = (_mn.X + _mx.X) / 2.0
+            _cy = (_mn.Y + _mx.Y) / 2.0
+            _best = None
+            _best_mk = ""
+            for _bb, _mk in wells:
+                _dx = max(_bb.Min.X - _cx, 0, _cx - _bb.Max.X)
+                _dy = max(_bb.Min.Y - _cy, 0, _cy - _bb.Max.Y)
+                _d = (_dx * _dx + _dy * _dy) ** 0.5
+                if _best is None or _d < _best:
+                    _best = _d
+                    _best_mk = _mk
+            if _best is not None and _best * 304.8 <= 1000:
+                out.append((_v.Id, _nm, _best_mk))
+        except:
+            pass
+    return out
+
+
 def main():
     try:
         global doc, uidoc
@@ -619,10 +672,11 @@ def main():
                 _cnt_before = len([s for s in DB.FilteredElementCollector(doc)
                                    .OfClass(DB.ViewSheet).ToElements()
                                    if (s.Name or "").startswith("井大样_")])
+                _det = _old_detail_candidates(doc)
                 _ok = forms.alert(
-                    '将删除模型中全部「井大样_」图纸及其视图，当前共 {} 张，操作不可撤销。\n'
+                    '将删除模型中全部「井大样_」图纸及其视图（当前共 {} 张），以及老旧井大样详图视图 {} 个，操作不可撤销。\n'
                     '注意：若要用新剖面框重做全部井，请先执行本清理，再运行【1】~【15】生成；\n'
-                    '刚生成完的新图也会被本项删掉。\n确定继续？'.format(_cnt_before),
+                    '刚生成完的新图也会被本项删掉。\n确定继续？'.format(_cnt_before, len(_det)),
                     title='清理井大样图纸', ok=False, yes=True, no=True)
                 if _ok:
                     _t = DB.Transaction(doc, "清理井大样图纸")
@@ -680,6 +734,14 @@ def main():
                                     continue
                                 doc.Delete(_v.Id)
                                 _removed_views += 1
+                            except:
+                                pass
+                        # 第三轮：老旧井大样详图视图（Detail，未放图纸，紧贴井）。
+                        for _did, _dnm, _dmk in _det:
+                            try:
+                                if doc.GetElement(_did) is not None:
+                                    doc.Delete(_did)
+                                    _removed_views += 1
                             except:
                                 pass
                         _t.Commit()
@@ -1000,6 +1062,11 @@ def main():
                         pass
             except:
                 pass
+
+            # 老旧井大样详图视图（未放图纸、紧贴某口井）：按最近的井号登记，重新生成这口井之前一并删掉。
+            for _did, _dnm, _dmk in _old_detail_candidates(doc):
+                if _dmk:
+                    old_views.setdefault(_dmk, []).append(_did)
 
             pb = forms.ProgressBar(title='正在批量生成井大样图及尺寸标注... ({value}/{max_value})', cancellable=True)
             for idx, elem in enumerate(valid_elems):
