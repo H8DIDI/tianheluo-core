@@ -11,7 +11,7 @@
 | [`export-nwc`](export-nwc/) | 一键导出NWC | 0.1.0 | Python | didi | MIT |
 | [`issue-manager`](issue-manager/) | 图纸签发管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |
 | [`pile-cleanup`](pile-cleanup/) | 清理重复松木桩垫层 | 0.1.0 | Python | didi | MIT |
-| [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.2.0 | Python | didi | MIT |
+| [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.2.1 | Python | didi | MIT |
 | [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.2.0 | C#（源码在 `plugins/`） | didi | MIT |
 | [`schedule-excel`](schedule-excel/) | 明细表Excel互导 | 0.1.0 | C#（源码在 `plugins/`） | didi | 原创 |
 | [`sheet-manager`](sheet-manager/) | 图纸管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |

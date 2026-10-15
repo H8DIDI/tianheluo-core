@@ -1539,7 +1539,86 @@ def build_report(stats, r, log_path):
     return u"\n".join(lines)
 
 
-def main():
+# ============================================================
+# 一键隐藏 / 显示：用视图过滤器隐藏所有视图里的松木桩和垫层（不改图元本身）
+# 过滤器条件：基础构件类别 + 备注包含「宿主」（本插件生成的垫层、桩都带这个标记）
+# ============================================================
+FILTER_NAME = u"KAIFA_松木桩与垫层(隐藏)"
+HIDE_KEYWORD = u"宿主"
+OP_LAYOUT = u"布置松木桩与垫层"
+OP_HIDE = u"一键隐藏所有视图的松木桩和垫层"
+OP_SHOW = u"一键显示所有视图的松木桩和垫层（取消隐藏）"
+_SKIP_VIEW_TYPES = ('Legend', 'ProjectBrowser', 'SystemBrowser', 'Internal', 'Report', 'DrawingSheet', 'Schedule')
+
+
+def _find_filter():
+    for f in DB.FilteredElementCollector(doc).OfClass(DB.ParameterFilterElement).ToElements():
+        try:
+            if _u(f.Name) == FILTER_NAME:
+                return f
+        except Exception:
+            continue
+    return None
+
+
+def _ensure_filter():
+    f = _find_filter()
+    if f is not None:
+        return f
+    cats = List[DB.ElementId]([DB.ElementId(DB.BuiltInCategory.OST_StructuralFoundation)])
+    rule = DB.ParameterFilterRuleFactory.CreateContainsRule(
+        DB.ElementId(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS), HIDE_KEYWORD)
+    ef = DB.ElementParameterFilter(rule)
+    return DB.ParameterFilterElement.Create(doc, FILTER_NAME, cats, ef)
+
+
+def _views_for_filter():
+    out = []
+    for v in DB.FilteredElementCollector(doc).OfClass(DB.View).ToElements():
+        try:
+            if v.IsTemplate or isinstance(v, DB.ViewSheet) or isinstance(v, DB.ViewSchedule):
+                continue
+            if str(v.ViewType) in _SKIP_VIEW_TYPES:
+                continue
+            out.append(v)
+        except Exception:
+            continue
+    return out
+
+
+def set_pile_filter_hidden(hide):
+    """hide=True：在所有视图上加过滤器并隐藏匹配的松木桩/垫层；hide=False：移除过滤器，恢复显示。
+    返回 (处理的视图数, 失败的视图名列表)。整次操作一个事务，单个视图失败不影响其它视图。"""
+    done = 0
+    fails = []
+    t = _make_tx(u'松木桩与垫层：隐藏/显示')
+    t.Start()
+    try:
+        pf = _ensure_filter() if hide else _find_filter()
+        if pf is None:
+            t.Commit()
+            return 0, []
+        for v in _views_for_filter():
+            try:
+                if hide:
+                    if not v.IsFilterApplied(pf.Id):
+                        v.AddFilter(pf.Id)
+                    v.SetFilterVisibility(pf.Id, False)
+                else:
+                    if v.IsFilterApplied(pf.Id):
+                        v.RemoveFilter(pf.Id)
+                done += 1
+            except Exception:
+                fails.append(_u(v.Name))
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+    return done, fails
+
+
+def _layout_flow():
     try:
         r = load_rules()
         sel_ids = []
@@ -1581,6 +1660,27 @@ def main():
         forms.alert(u"布置过程发生异常（已尽量保留已完成的部分）：\n" + _err(e) + u"\n\n" + _u(traceback.format_exc()),
                     title=TITLE)
 
+
+
+def main():
+    try:
+        op = forms.CommandSwitchWindow.show([OP_LAYOUT, OP_HIDE, OP_SHOW], message=u'请选择操作：')
+        if not op:
+            return
+        if op == OP_LAYOUT:
+            _layout_flow()
+            return
+        hide = (op == OP_HIDE)
+        n, fails = set_pile_filter_hidden(hide)
+        lines = [u'已在 {} 个视图上{}松木桩与垫层（过滤器「{}」）。'.format(n, u'隐藏' if hide else u'恢复显示', FILTER_NAME)]
+        if hide:
+            lines.append(u'注意：之后新建的视图不会自动隐藏，需要再点一次「一键隐藏」。')
+        if fails:
+            lines.append(u'以下 {} 个视图无法加过滤器（可能由视图样板控制），需手动处理：'.format(len(fails)))
+            lines.extend([u'  - ' + f for f in fails[:15]])
+        forms.alert(u'\n'.join(lines), title=TITLE)
+    except Exception as e:
+        forms.alert(u'操作异常：\n' + _err(e) + u'\n\n' + _u(traceback.format_exc()), title=TITLE)
 
 if __name__ == '__main__':
     main()
