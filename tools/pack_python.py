@@ -8,7 +8,7 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"well-sheets": "0.2.9", "well-annotate": "0.3.9", "pile-cushion": "0.3.9"}
+VERSION_OVERRIDE = {"well-sheets": "0.2.9", "well-annotate": "0.3.9", "pile-cushion": "0.3.9", "quantity-export": "0.2.0"}
 OUT.mkdir(exist_ok=True)
 
 # 文件夹名 -> (id, 分类, 图标上的字)
@@ -21,6 +21,8 @@ PLUGINS = {
     "一键清除井标记":     ("well-clear-marks","数据处理", "除"),
     "强电井清洗合并":     ("elv-merge",       "数据处理", "并"),
     "一键框选提量导出Excel": ("quantity-export", "数据处理", "量"),
+    "一键钢筋三维实体显示": ("rebar-3d-view", "数据处理", "筋"),
+    "一键单构件快速配筋": ("rebar-cage", "数据处理", "配"),
     "一键导出井大样DWG":  ("export-dwg",      "导出",     "DWG"),
     "一键导出NWC":        ("export-nwc",      "导出",     "NWC"),
 }
