@@ -20,6 +20,7 @@ PLUGINS = {
     "一键编号":           ("well-number",     "数据处理", "号"),
     "一键清除井标记":     ("well-clear-marks","数据处理", "除"),
     "强电井清洗合并":     ("elv-merge",       "数据处理", "并"),
+    "一键框选提量导出Excel": ("quantity-export", "数据处理", "量"),
     "一键导出井大样DWG":  ("export-dwg",      "导出",     "DWG"),
     "一键导出NWC":        ("export-nwc",      "导出",     "NWC"),
 }
