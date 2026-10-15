@@ -925,6 +925,146 @@ def _on_fitting(grid, x, y, z):
     return False
 
 
+CROSS_MARGIN_FT = 0.05 / 0.3048    # 交叉判断的余量 50 mm
+CROSS_ZDIFF_FT = 0.3 / 0.3048      # 两构件中心高差超过 300 mm 才算上下
+BIG_PARTNER_FT = 20.0 / 0.3048     # 平面尺寸超过 20 m 的点式构件（场地、地形）不作为交叉对象
+
+
+def _lower_partners(el, r):
+    """与布置对象在平面上交叉、且位于它下方的构件（用于：上方的构件在交叉位置不布桩、不布垫层）。
+    用 Revit 的包围盒过滤只查附近的构件，再逐个精确判断。返回 (本构件中心高程, [(类型, 几何, 中心高程)])；
+    类型为 'line'（线式几何）或 'box'（点式几何）。插件生成的桩和垫层不算。"""
+    bb = el.get_BoundingBox(None)
+    bics = _enabled_bics(r)
+    if bb is None or not bics:
+        return None, []
+    m = 1.0 / 0.3048
+    outline = DB.Outline(DB.XYZ(bb.Min.X - m, bb.Min.Y - m, bb.Min.Z - m),
+                         DB.XYZ(bb.Max.X + m, bb.Max.Y + m, bb.Max.Z + m))
+    col = DB.FilteredElementCollector(doc)\
+        .WherePasses(DB.ElementMulticategoryFilter(List[DB.BuiltInCategory](bics)))\
+        .WherePasses(DB.BoundingBoxIntersectsFilter(outline))\
+        .WhereElementIsNotElementType()
+    my_zc = (bb.Min.Z + bb.Max.Z) / 2.0
+    my_id = get_elem_id_val(el)
+    out = []
+    for p in col.ToElements():
+        try:
+            if get_elem_id_val(p) == my_id or is_tool_made(p):
+                continue
+            pb = p.get_BoundingBox(None)
+            if pb is None:
+                continue
+            zc = (pb.Min.Z + pb.Max.Z) / 2.0
+            ci_p = extract_curve_element_info(p)
+            if ci_p is not None:
+                out.append(('line', ci_p, zc))
+                continue
+            bi = extract_element_local_box(p)
+            # 平面尺寸超过 20 m 的是场地、地形之类的大体量，不是要避开的交叉构件
+            if bi is not None and max(bi[0], bi[1]) <= BIG_PARTNER_FT:
+                out.append(('box', bi, zc))
+        except Exception:
+            continue
+    return my_zc, out
+
+
+def _in_partner(kind, geom, x, y):
+    """平面点 (x, y) 是否落在这个下方构件的范围内（含 50 mm 余量）。"""
+    if kind == 'line':
+        p0, dv, pv = geom['p0'], geom['dir_vec'], geom['perp_vec']
+        dx, dy = x - p0.X, y - p0.Y
+        t = dx * dv.X + dy * dv.Y
+        w = dx * pv.X + dy * pv.Y - geom['n_mid']
+        return (geom['t_start'] - CROSS_MARGIN_FT <= t <= geom['t_end'] + CROSS_MARGIN_FT and
+                abs(w) <= geom['elem_wid_ft'] / 2.0 + CROSS_MARGIN_FT)
+    len_ft, wid_ft, c, _z_bot, _rot, u_dir, v_dir = geom
+    dx, dy = x - c.X, y - c.Y
+    u = dx * u_dir.X + dy * u_dir.Y
+    v = dx * v_dir.X + dy * v_dir.Y
+    return abs(u) <= len_ft / 2.0 + CROSS_MARGIN_FT and abs(v) <= wid_ft / 2.0 + CROSS_MARGIN_FT
+
+
+PARALLEL_COS = 0.94   # 两根线式构件方向夹角小于约 20° 视为平行重合，不算交叉
+
+
+def _cross_skip(cross, x, y):
+    """平面点 (x, y) 是否处在「本构件在上、下方有构件交叉」的位置（这里不布桩、不布垫层）。cross 为 None 时返回 False。
+    平行重合的线式构件不算交叉（那是重复建模，由跨主机去重处理）。"""
+    if not cross:
+        return False
+    zc, lowers, hdir = cross
+    for kind, geom, pz in lowers:
+        if zc - pz <= CROSS_ZDIFF_FT:
+            continue
+        if kind == 'line' and hdir is not None:
+            dv = geom['dir_vec']
+            if abs(hdir[0] * dv.X + hdir[1] * dv.Y) > PARALLEL_COS:
+                continue
+        if _in_partner(kind, geom, x, y):
+            return True
+    return False
+
+
+def _cross_info(el, r):
+    """布置对象的交叉信息 (本构件中心高程, 下方构件列表, 本构件平面方向)；没有下方交叉的返回 None（最快的路径）。"""
+    zc, lowers = _lower_partners(el, r)
+    if zc is None or not lowers:
+        return None
+    hci = extract_curve_element_info(el)
+    hdir = (hci['dir_vec'].X, hci['dir_vec'].Y) if hci is not None else None
+    return (zc, lowers, hdir)
+
+
+def _line_pad_segments(ci, cross, spacing_ft):
+    """线式构件的垫层分段：交叉位置的站位不布垫层，返回要布的段 [(t0, t1), ...]（沿中心线的距离，ft）。
+    没有交叉时返回整段。"""
+    t_start, t_end = ci['t_start'], ci['t_end']
+    if not cross:
+        return [(t_start, t_end)]
+    t_span = max(0.0, t_end - t_start)
+    t_mid = t_start + t_span / 2.0
+    stations = _centered_grid(t_span, spacing_ft)
+    span_w = max(0.0, ci['elem_wid_ft'])
+    rows = [0.0] if span_w <= LINE_SINGLE_MAX_MM * MM_TO_FT else _centered_grid(span_w, spacing_ft)
+    p0, dv, pv, nm = ci['p0'], ci['dir_vec'], ci['perp_vec'], ci['n_mid']
+    flags = []
+    for so in stations:
+        t = t_mid + so
+        hit = False
+        for w in rows:
+            x = p0.X + t * dv.X + (nm + w) * pv.X
+            y = p0.Y + t * dv.Y + (nm + w) * pv.Y
+            if _cross_skip(cross, x, y):
+                hit = True
+                break
+        flags.append(hit)
+    if not any(flags):
+        return [(t_start, t_end)]
+    runs = []
+    cur = None
+    for so, hit in zip(stations, flags):
+        if hit:
+            if cur is not None:
+                runs.append(cur)
+                cur = None
+        else:
+            if cur is None:
+                cur = [so, so]
+            else:
+                cur[1] = so
+    if cur is not None:
+        runs.append(cur)
+    half = spacing_ft / 2.0
+    out = []
+    for a, b in runs:
+        t0 = max(t_start, t_mid + a - half)
+        t1 = min(t_end, t_mid + b + half)
+        if t1 - t0 > 0.1:
+            out.append((t0, t1))
+    return out
+
+
 PILE_MIN_GAP_FT = 0.495 / 0.3048   # 任意两根桩中心距的下限（比 500 mm 少 5 mm，容许浮点误差）
 PG_CELL_FT = 0.5 / 0.3048          # 桩位索引的方格大小（不小于 PILE_MIN_GAP）
 
@@ -977,13 +1117,14 @@ def _near_other_pile(grid, x, y, z, host):
 
 def layout_piles_for_curve(target_doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
                            z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
-                           spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None, pgrid=None):
+                           spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None, pgrid=None,
+                           cross=None):
     """沿排管/管道布置松木桩；压在管件上的跳过。返回 (创建的桩, 跳过根数)。"""
     created = []
     skipped = 0
     for x, y, z in _line_pile_points(p0, dir_vec, perp_vec, n_mid, t_start, t_end, z_start_bot, z_end_bot,
                                      elem_wid_ft, pad_thick_ft, spacing_ft):
-        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host_elem_id):
+        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host_elem_id) or _cross_skip(cross, x, y):
             skipped += 1
             continue
         pile_inst = place_single_pile(target_doc, DB.XYZ(x, y, 0), z, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name)
@@ -995,12 +1136,13 @@ def layout_piles_for_curve(target_doc, p0, dir_vec, perp_vec, n_mid, t_start, t_
 
 
 def layout_piles_for_box(target_doc, center_xy, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot_ft,
-                         spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None, pgrid=None):
+                         spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None, pgrid=None,
+                         cross=None):
     """在井/基础范围内布置松木桩网格；压在管件上、或与别的主机的桩重叠的跳过。返回 (创建的桩, 跳过根数)。"""
     created = []
     skipped = 0
     for x, y, z in _box_pile_points(center_xy, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot_ft, spacing_ft):
-        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host_elem_id):
+        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host_elem_id) or _cross_skip(cross, x, y):
             skipped += 1
             continue
         pile_inst = place_single_pile(target_doc, DB.XYZ(x, y, 0), z, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name)
@@ -1461,6 +1603,8 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
     pile_len_ft = ctx['pile_len_ft']
     pile_sym = ctx['pile_sym']
     level = ctx['level']
+    # 上方构件：在与下方构件交叉的位置不布桩、不布垫层
+    cross = _cross_info(elem, r)
 
     if curve_info is not None:
         res['kind'] = u'线式'
@@ -1474,17 +1618,26 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
         z_start_bot = curve_info['z_start_bot']
         z_end_bot = curve_info['z_end_bot']
         name_prefix = u"排管垫层" if (u"排管" in cat_name or u"排管" in _u(get_fam_name(elem))) else (u"管道垫层" if u"管" in cat_name else u"垫层")
-        pad_ds = create_sloped_directshape_pad(
-            doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
-            z_start_bot, z_end_bot, elem_wid_ft, pad_overhang_ft, pad_thick_ft,
-            host, cat_name, name_prefix=name_prefix)
-        if pad_ds:
-            res['pads'] += 1
+        t_span = t_end - t_start
+
+        def _z_at(t):
+            if t_span <= 1e-6:
+                return z_start_bot
+            return z_start_bot + (t - t_start) / t_span * (z_end_bot - z_start_bot)
+
+        # 垫层按段布：交叉位置断开，只布没有交叉的段
+        for ts_seg, te_seg in _line_pad_segments(curve_info, cross, pile_spacing_ft):
+            pad_ds = create_sloped_directshape_pad(
+                doc, p0, dir_vec, perp_vec, n_mid, ts_seg, te_seg,
+                _z_at(ts_seg), _z_at(te_seg), elem_wid_ft, pad_overhang_ft, pad_thick_ft,
+                host, cat_name, name_prefix=name_prefix)
+            if pad_ds:
+                res['pads'] += 1
         piles, sk = layout_piles_for_curve(
             doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
             z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
             pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name, avoid=ctx.get('avoid'),
-            pgrid=ctx.get('pile_grid'))
+            pgrid=ctx.get('pile_grid'), cross=cross)
         res['piles'] += len(piles)
         res['avoided'] = sk
         if piles:
@@ -1499,7 +1652,11 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
     well_pad_sym = ctx['well_pad_sym']
     is_well = (u"井" in cat_name) or (hasattr(elem, 'Symbol') and elem.Symbol and (u"井" in _u(get_fam_name(elem.Symbol))))
     placed_family_pad = False
-    if well_pad_sym is not None and is_well and abs(PAD_THICK_MM - DEFAULT_PAD_THICK_MM) < 1e-6:
+    # 点式构件：中心落在与下方构件的交叉位置时，整块垫层不布（点式垫层是整块，不能像线式那样断开）
+    pad_blocked = _cross_skip(cross, c_world.X, c_world.Y)
+    if pad_blocked:
+        res['pad_skipped'] = 1
+    if well_pad_sym is not None and is_well and abs(PAD_THICK_MM - DEFAULT_PAD_THICK_MM) < 1e-6 and not pad_blocked:
         try:
             pad_inst = doc.Create.NewFamilyInstance(
                 DB.XYZ(c_world.X, c_world.Y, 0), well_pad_sym, level,
@@ -1535,7 +1692,7 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
             placed_family_pad = True
         except Exception:
             placed_family_pad = False
-    if not placed_family_pad:
+    if not placed_family_pad and not pad_blocked:
         pad_ds = create_directshape_box_pad(
             doc, c_world, u_dir, v_dir, pad_len_ft, pad_wid_ft, z_bot, pad_thick_ft,
             host, cat_name, name_prefix=u"井垫层")
@@ -1544,7 +1701,7 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
     piles, sk = layout_piles_for_box(
         doc, c_world, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot,
         pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name, avoid=ctx.get('avoid'),
-        pgrid=ctx.get('pile_grid'))
+        pgrid=ctx.get('pile_grid'), cross=cross)
     res['piles'] += len(piles)
     res['avoided'] = sk
     if piles:
@@ -1603,6 +1760,7 @@ def _account(stats, el, res, existing):
     stats['pads'] += res.get('pads', 0)
     stats['piles'] += res.get('piles', 0)
     stats['avoided'] += res.get('avoided', 0)
+    stats['pad_skipped'] = stats.get('pad_skipped', 0) + res.get('pad_skipped', 0)
     stats['deleted'] += res.get('deleted', 0)
     if res.get('kind') == u'线式':
         stats['line'] += 1
@@ -1648,7 +1806,7 @@ def _heights_ok(batch, out):
     return True
 
 
-def _count_piles(curve_info, box_info, avoid=None, pgrid=None, host=None):
+def _count_piles(curve_info, box_info, avoid=None, pgrid=None, host=None, cross=None):
     """预先算出这个构件会布多少根桩（与实际布置用同一套位置计算，并排除压在管件上的），只做算术，不碰模型。"""
     sp = PILE_SPACING_MM * MM_TO_FT
     pad_ft = PAD_THICK_MM * MM_TO_FT
@@ -1661,7 +1819,7 @@ def _count_piles(curve_info, box_info, avoid=None, pgrid=None, host=None):
         pts = _box_pile_points(c_world, u_dir, v_dir, len_ft, wid_ft, z_bot - pad_ft, sp)
     kept = 0
     for x, y, z in pts:
-        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host):
+        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host) or _cross_skip(cross, x, y):
             continue
         kept += 1
         if pgrid is not None:
@@ -1689,7 +1847,8 @@ def plan_targets(targets, r, pb=None):
             if curve_info is None and box_info is None:
                 skipped.append((host, cat, u'无法读取几何'))
             else:
-                plans.append((el, curve_info, box_info, _count_piles(curve_info, box_info, avoid, pgrid, host),
+                plans.append((el, curve_info, box_info,
+                              _count_piles(curve_info, box_info, avoid, pgrid, host, _cross_info(el, r)),
                               _classify_group(el) or UNCLASSIFIED))
         except Exception as ex:
             skipped.append((host, cat, _err(ex)))
@@ -1811,7 +1970,8 @@ def build_report(stats, r, log_path):
         u"• 生成垫层：{} 块".format(stats['pads']),
         u"• 生成松木桩：{} 根（Φ{} × {} m，总延米 {:.2f} m，木材 {:.2f} m³）".format(
             piles, _fmt_num(d), _fmt_num(pile_len), piles * pile_len, vol),
-        u"• 避开管件/管道附件：跳过 {} 根桩".format(stats.get('avoided', 0)),
+        u"• 跳过的桩：{} 根（压管件、上方交叉、与别的主机的桩重叠）".format(stats.get('avoided', 0)),
+        u"• 上方交叉位置不布的点式垫层：{} 块".format(stats.get('pad_skipped', 0)),
         u"• 清理旧图元：{} 个".format(stats['deleted']),
         u"• 跳过：{} 个（读不到几何等）".format(len(stats['skipped'])),
         u"• 失败：{} 个（已回滚，不影响其它构件）".format(len(stats['failed'])),
