@@ -1284,18 +1284,18 @@ def prepare_ctx(r):
     }
 
 
-def process_one(elem, ctx, existing, r):
-    """处理一个构件：先读几何（读不到就跳过，不动旧图元），再清旧图元、生成垫层和桩。"""
+def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
+    """处理一个构件：几何已在预布置时读好就直接用，否则现读（读不到就跳过，不动旧图元），再清旧图元、生成垫层和桩。"""
     host = get_elem_id_str(elem)
     cat_name = _u(elem.Category.Name) if elem.Category else u'构件'
     res = {'host': host, 'cat': cat_name, 'pads': 0, 'piles': 0, 'deleted': 0,
            'kind': u'', 'skip': None, 'error': None}
 
-    curve_info = extract_curve_element_info(elem)
-    box_info = None
-    if curve_info is None:
-        box_info = extract_element_local_box(elem)
-        if box_info is None:
+    if curve_info is None and box_info is None:
+        curve_info = extract_curve_element_info(elem)
+        if curve_info is None:
+            box_info = extract_element_local_box(elem)
+        if curve_info is None and box_info is None:
             res['skip'] = u'无法读取几何'
             return res
 
@@ -1393,12 +1393,12 @@ def process_one(elem, ctx, existing, r):
     return res
 
 
-def _run_sub(elem, ctx, existing, r):
+def _run_sub(elem, ctx, existing, r, curve_info=None, box_info=None):
     """单个构件放在子事务里：出错只回滚它自己，不影响同批的其他构件。"""
     st = DB.SubTransaction(doc)
     st.Start()
     try:
-        res = process_one(elem, ctx, existing, r)
+        res = process_one(elem, ctx, existing, r, curve_info, box_info)
         s = st.Commit()
         if s is not None and s != DB.TransactionStatus.Committed:
             raise Exception(u'子事务未提交')
@@ -1413,14 +1413,14 @@ def _run_sub(elem, ctx, existing, r):
                 'error': _err(ex), 'pads': 0, 'piles': 0, 'deleted': 0}
 
 
-def run_batch(elems, ctx, existing, r):
-    """一批构件放在一个事务里提交。整批提交失败返回 None，由调用方逐个重试。"""
+def run_batch(plans, ctx, existing, r):
+    """一批构件放在一个事务里提交（plans 为 plan_targets 给出的项）。整批提交失败返回 None，由调用方逐个重试。"""
     t = _make_tx(u'一键布置松木桩与垫层')
     t.Start()
     out = []
     try:
-        for el in elems:
-            out.append((el, _run_sub(el, ctx, existing, r)))
+        for el, curve_info, box_info, _n, _g in plans:
+            out.append((el, _run_sub(el, ctx, existing, r, curve_info, box_info)))
         s = t.Commit()
         if s != DB.TransactionStatus.Committed:
             return None
@@ -1452,31 +1452,100 @@ def _account(stats, el, res, existing):
         existing.pop(host, None)
 
 
-def run_pipeline(r, targets, pb=None):
-    """主流程：准备族 → 建旧图元索引 → 分批提交（失败的批逐个重试）→ 统计。"""
+# 每累计生成这么多根桩就保存一次模型（分段保存：崩溃或卡死时最多丢最后一段）
+SAVE_EVERY_PILES = 3000
+
+
+def _save_segment(stats):
+    """把已提交的这一段保存到磁盘。保存失败只记数，不影响布置。注意：保存不会释放内存。"""
+    try:
+        doc.Save()
+        stats['saves'] += 1
+    except Exception:
+        stats['save_failed'] += 1
+
+
+def _count_piles(curve_info, box_info):
+    """预先算出这个构件会布多少根桩。循环次数与 layout_piles_for_curve / layout_piles_for_box 保持一致，只做算术，不碰模型。"""
+    sp = PILE_SPACING_MM * MM_TO_FT
+    if curve_info is not None:
+        t_span = max(0.0, curve_info['t_end'] - curve_info['t_start'])
+        n_l = max(1, int(round(t_span / sp))) if t_span > 0.2 else 1
+        span_w = max(0.0, curve_info['elem_wid_ft'])
+        if span_w <= LINE_SINGLE_MAX_MM * MM_TO_FT:
+            n_w = 1
+        elif span_w <= LINE_DOUBLE_MAX_MM * MM_TO_FT:
+            n_w = 2
+        else:
+            n_w = max(2, int(round(span_w / sp))) + 1
+        return (n_l + 1) * n_w
+    span_u = max(0.0, box_info[0])
+    span_v = max(0.0, box_info[1])
+    n_u = max(1, int(round(span_u / sp))) if span_u > 0.1 else 0
+    n_v = max(1, int(round(span_v / sp))) if span_v > 0.1 else 0
+    cu = 1 if n_u == 0 else n_u + 1
+    cv = 1 if n_v == 0 else n_v + 1
+    return cu * cv
+
+
+def plan_targets(targets, r, pb=None):
+    """预布置：只读几何、算桩数，不改模型。
+    返回 (plans, skipped)：plans 为 (构件, 线式几何, 点式几何, 桩根数) 列表，skipped 为 (主机, 类别, 原因) 列表。"""
+    apply_rules(r)
+    plans = []
+    skipped = []
+    n = len(targets)
+    for i, el in enumerate(targets):
+        host = get_elem_id_str(el)
+        cat = _u(el.Category.Name) if el.Category else u'构件'
+        try:
+            curve_info = extract_curve_element_info(el)
+            box_info = None
+            if curve_info is None:
+                box_info = extract_element_local_box(el)
+            if curve_info is None and box_info is None:
+                skipped.append((host, cat, u'无法读取几何'))
+            else:
+                plans.append((el, curve_info, box_info, _count_piles(curve_info, box_info),
+                              _classify_group(el) or UNCLASSIFIED))
+        except Exception as ex:
+            skipped.append((host, cat, _err(ex)))
+        if pb is not None and (i % 50 == 0 or i == n - 1):
+            try:
+                pb.update_progress(i + 1, n)
+            except Exception:
+                pass
+    return plans, skipped
+
+
+def run_pipeline(r, plans, skipped=None, pb=None):
+    """主流程（plans 来自 plan_targets）：准备族 → 建旧图元索引 → 分批提交（失败的批逐个重试）→ 统计。"""
     t0 = time.time()
     apply_rules(r)
-    stats = {'total': len(targets), 'done': 0, 'pads': 0, 'piles': 0, 'deleted': 0,
-             'line': 0, 'point': 0, 'skipped': [], 'failed': [], 'cancelled': False,
-             'error': None, 'seconds': 0.0}
+    skipped = list(skipped or [])
+    stats = {'total': len(plans) + len(skipped), 'done': 0, 'pads': 0, 'piles': 0, 'deleted': 0,
+             'line': 0, 'point': 0, 'skipped': skipped, 'failed': [], 'cancelled': False,
+             'error': None, 'seconds': 0.0, 'saves': 0, 'save_failed': 0}
     ctx = prepare_ctx(r)
     if ctx is None:
         stats['error'] = u'未能加载或创建松木桩族/标高（请检查项目基础族）'
         return stats
-    existing = build_existing_foundation_index(doc, targets)
+    existing = build_existing_foundation_index(doc, [p[0] for p in plans])
     bs = max(1, int(r.get('batch_size', 40)))
-    n = len(targets)
+    n = len(plans)
     i = 0
+    seg_piles = 0
     while i < n:
         if pb is not None and pb.cancelled:
             stats['cancelled'] = True
             break
-        batch = targets[i:i + bs]
+        batch = plans[i:i + bs]
         out = run_batch(batch, ctx, existing, r)
         if out is None:
             out = []
-            for el in batch:
-                one = run_batch([el], ctx, existing, r)
+            for item in batch:
+                el = item[0]
+                one = run_batch([item], ctx, existing, r)
                 if one is None:
                     out.append((el, {'host': get_elem_id_str(el),
                                      'cat': _u(el.Category.Name) if el.Category else u'构件',
@@ -1485,12 +1554,23 @@ def run_pipeline(r, targets, pb=None):
                     out.extend(one)
         for el, res in out:
             _account(stats, el, res, existing)
+            seg_piles += res.get('piles', 0)
         i += len(batch)
+        if seg_piles >= SAVE_EVERY_PILES:
+            _save_segment(stats)
+            seg_piles = 0
         if pb is not None:
             try:
                 pb.update_progress(min(i, n), n)
             except Exception:
                 pass
+    if seg_piles > 0:
+        _save_segment(stats)
+    if not stats['cancelled'] and not stats.get('error'):
+        try:
+            stats['coverage'] = _coverage_check(plans)
+        except Exception as ex:
+            stats['coverage_error'] = _err(ex)
     stats['seconds'] = time.time() - t0
     return stats
 
@@ -1531,7 +1611,21 @@ def build_report(stats, r, log_path):
         u"• 跳过：{} 个（读不到几何等）".format(len(stats['skipped'])),
         u"• 失败：{} 个（已回滚，不影响其它构件）".format(len(stats['failed'])),
         u"• 用时：{:.1f} 秒".format(stats['seconds']),
+        u"• 分段保存：{} 次（失败 {} 次）".format(stats.get('saves', 0), stats.get('save_failed', 0)),
     ]
+    cov = stats.get('coverage')
+    if cov:
+        lines.append(u"")
+        lines.append(u"缺漏检测（按组：应布置 / 完整 / 缺漏）：")
+        for k in GROUP_ORDER + [UNCLASSIFIED]:
+            if k not in cov:
+                continue
+            g = cov[k]
+            lines.append(u"  - {}：{} / {} / {}".format(k, g['expected'], g['ok'], len(g['missing'])))
+            if g['missing']:
+                lines.append(u"    缺漏主机 Id：" + u"、".join(g['missing'][:10]) + (u" …" if len(g['missing']) > 10 else u""))
+    elif stats.get('coverage_error'):
+        lines.append(u"• 缺漏检测失败：" + _u(stats['coverage_error']))
     if stats.get('error'):
         lines.append(u"• 错误：" + _u(stats['error']))
     if log_path:
@@ -1618,6 +1712,102 @@ def set_pile_filter_hidden(hide):
     return done, fails
 
 
+# 分组（分系统）：按这个顺序列出；归不进任何组的放在最后「未归类」
+GROUP_ORDER = [
+    u'结构框架的排管', u'雨水井的涵箱', u'污水管道', u'其他系统的管道',
+    u'雨水井', u'污水井', u'强电井', u'弱电井', u'低压电井', u'电信井', u'路灯',
+]
+UNCLASSIFIED = u'未归类'
+
+
+def _system_name(e):
+    """管道等 MEP 图元的系统名称；取不到返回空串。"""
+    try:
+        bip = getattr(DB.BuiltInParameter, 'RBS_SYSTEM_NAME_PARAM', None)
+        p = e.get_Parameter(bip) if bip is not None else None
+        if p and p.HasValue:
+            return _u(p.AsString() or u'')
+    except Exception:
+        pass
+    return u''
+
+
+def _classify_group(e):
+    """按类别、族名、类型名、图元名、系统名判断属于哪一组；归不进去返回 None。
+    关键字是按常见命名猜的，第一次在真实模型里运行时要核对（分组列表里会显示每组的例子名）。"""
+    cat = _u(e.Category.Name) if e.Category else u''
+    text = u' '.join([cat, _u(get_fam_name(e) or u''), _u(get_type_name(e) or u''),
+                      _u(get_elem_name(e) or u''), _system_name(e)])
+    if u'路灯' in text:
+        return u'路灯'
+    if u'井' in text:
+        if u'电信' in text:
+            return u'电信井'
+        if u'低压' in text:
+            return u'低压电井'
+        if u'强电' in text:
+            return u'强电井'
+        if u'弱电' in text:
+            return u'弱电井'
+    if u'涵' in text:
+        return u'雨水井的涵箱'
+    if u'雨水' in text and u'井' in text:
+        return u'雨水井'
+    if u'污水' in text and u'井' in text:
+        return u'污水井'
+    if u'排管' in text:
+        return u'结构框架的排管'
+    if cat == u'管道':
+        return u'污水管道' if u'污水' in text else u'其他系统的管道'
+    return None
+
+
+def _choose_groups(plans):
+    """分组执行（分系统）：列出每组的构件数、桩根数和例子名，让用户选这次布置哪几组。
+    只有一组时直接返回；用户取消或一组都没选，返回空列表。"""
+    groups = {}
+    for p in plans:
+        g = groups.setdefault(p[4], {'n': 0, 'piles': 0, 'names': []})
+        g['n'] += 1
+        g['piles'] += p[3]
+        if len(g['names']) < 2:
+            nm = _u(get_fam_name(p[0]) or u'')
+            if nm and nm not in g['names']:
+                g['names'].append(nm)
+    names = [k for k in GROUP_ORDER + [UNCLASSIFIED] if k in groups]
+    if len(names) <= 1:
+        return plans
+    labels = {}
+    options = []
+    for k in names:
+        g = groups[k]
+        lab = u'{}（{} 个构件，{} 根桩）例：{}'.format(k, g['n'], g['piles'], u'、'.join(g['names']) or u'-')
+        labels[lab] = k
+        options.append(lab)
+    picked = forms.SelectFromList.show(options, multiselect=True, title=TITLE,
+                                       button_name=u'布置所选组')
+    if not picked:
+        return []
+    chosen = set(labels[x] for x in picked if x in labels)
+    return [p for p in plans if p[4] in chosen]
+
+
+def _coverage_check(plans):
+    """缺漏检测（只读）：重新扫描模型，核对每个布置过的构件是否有 1 块垫层加上应有的桩数。
+    返回 {组名: {'expected': 构件数, 'ok': 完整数, 'missing': [缺漏的主机 Id]}}。"""
+    idx = build_existing_foundation_index(doc, [p[0] for p in plans])
+    out = {}
+    for p in plans:
+        g = out.setdefault(p[4], {'expected': 0, 'ok': 0, 'missing': []})
+        g['expected'] += 1
+        host = get_elem_id_str(p[0])
+        if len(idx.get(host, [])) == p[3] + 1:
+            g['ok'] += 1
+        else:
+            g['missing'].append(host)
+    return out
+
+
 def _layout_flow():
     try:
         r = load_rules()
@@ -1643,17 +1833,35 @@ def _layout_flow():
             forms.alert(u"没有找到可布置的构件。\n请检查「规则」里的类别、范围和底标高过滤。", title=TITLE)
             return
 
-        q = (u"将处理 {} 个构件（{}）。\n"
+        # 第一步：预布置（只读几何、算桩数，不改模型）
+        with forms.ProgressBar(title=u"正在预布置（读取几何、计算桩数）...", cancellable=False) as pb:
+            plans, skipped = plan_targets(targets, new_r, pb)
+        if not plans:
+            forms.alert(u"{} 个构件都无法读取几何，没有可布置的内容。".format(len(skipped)), title=TITLE)
+            return
+        plans = _choose_groups(plans)
+        if not plans:
+            return
+        n_line = sum(1 for p in plans if p[1] is not None)
+        n_pile = sum(p[3] for p in plans)
+
+        # 第二步：确认后才写入模型
+        q = (u"预布置完成（还没有改模型）：\n"
+             u"构件 {} 个（{}）：线式 {} 个，点式 {} 个；无法读取几何跳过 {} 个。\n"
+             u"将生成垫层 {} 个，松木桩 {} 根。\n"
              u"垫层 {} mm 厚，各边外挑 {} mm；松木桩 Φ{} × {} m，间距 {} mm。\n"
-             u"开始布置？").format(len(targets), src_txt,
-                                   _fmt_num(new_r['pad_thick_mm']), _fmt_num(new_r['pad_overhang_mm']),
-                                   _fmt_num(new_r['pile_diam_mm']), _fmt_num(new_r['pile_len_m']),
-                                   _fmt_num(new_r['pile_spacing_mm']))
+             u"确认后开始生成？").format(len(plans), src_txt, n_line, len(plans) - n_line, len(skipped),
+                                       len(plans), n_pile,
+                                       _fmt_num(new_r['pad_thick_mm']), _fmt_num(new_r['pad_overhang_mm']),
+                                       _fmt_num(new_r['pile_diam_mm']), _fmt_num(new_r['pile_len_m']),
+                                       _fmt_num(new_r['pile_spacing_mm']))
+        if n_pile > 30000:
+            q += u"\n注意：松木桩超过 3 万根，建议分组、分次执行（每组结束后会保存）。"
         if not forms.alert(q, title=TITLE, yes=True, no=True):
             return
 
-        with forms.ProgressBar(title=u"正在布置松木桩与垫层...", cancellable=True) as pb:
-            stats = run_pipeline(new_r, targets, pb)
+        with forms.ProgressBar(title=u"正在生成松木桩与垫层...", cancellable=True) as pb:
+            stats = run_pipeline(new_r, plans, skipped, pb)
         log_path = write_log(stats)
         forms.alert(build_report(stats, new_r, log_path), title=TITLE)
     except Exception as e:
