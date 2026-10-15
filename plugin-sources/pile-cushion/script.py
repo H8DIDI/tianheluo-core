@@ -1,61 +1,61 @@
 # -*- coding: utf-8 -*-
-"""
-一键布置松木桩与垫层 (防重复布置与精准居中版)
-================================================================
-功能亮点:
-  1. 【防重复布置 / 智能覆盖】
-     - 自动检测并索引所选构件曾布置过的旧垫层与旧松木桩；
-     - 重复框选或重新布置时，自动先行清理旧图元后再重新生成，彻底杜绝重复重叠与工程量虚增！
-  2. 【真实实体三维几何居中】
-     - 自动遍历提取构件真实的 3D 实体几何轮廓（Solid Geometry）；
-     - 解决排管因族制作定位线对齐在侧边或顶部导致的垫层偏心错位问题。
-  3. 【设计规范参数】
-     - 垫层厚度：100 mm (紧贴构件底面下翻 100mm)
-     - 垫层外挑：各边（前后左右）外挑 100 mm
-     - 松木桩：Φ75 mm 直径，桩长 6.0 m，桩中心间距 500 mm，桩顶平齐垫层底面。
-  4. 【100% 兼容性】
-     - 支持 Revit 2024 / 2025 / 2026 (64位 ElementId.Value) 与 IronPython 2.7。
-"""
-
+from __future__ import unicode_literals
 __title__ = "一键布置\n松木桩垫层"
-__author__ = "Antigravity Assistant"
-__doc__ = "框选排管或井等构件，自动在其下方依据真实几何轮廓居中布置 100mm 厚垫层（外挑100mm）与 Φ75@500 L=6m 松木桩。已内置防重复布置智能覆盖机制。"
+__author__ = "KAIFA"
+__doc__ = ("一键布置松木桩与垫层（天河落插件版）。\n"
+           "框选了构件：只处理选中的；没有选中：按「规则」里的范围（默认整个项目）处理全部可布置构件。\n"
+           "排管/管道等线式构件：沿实体走向布置 100mm 厚垫层（各边外挑）与松木桩；井/基础等点式构件：按实体外包布置。\n"
+           "规则（垫层厚度、外挑、桩径、桩长、桩距、单排/双排阈值、构件类别、范围、底标高过滤）运行前可以修改并保存。\n"
+           "已布置过的构件先清理旧垫层与旧桩再重新生成；每批在一个事务里提交，单个构件出错只回滚它自己。")
 
 import math
-import sys
+import os
+import json
+import time
 import traceback
 import clr
 import System
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
+clr.AddReference('System.Windows.Forms')
+clr.AddReference('System.Drawing')
 from Autodesk.Revit import DB
-from Autodesk.Revit.UI.Selection import ISelectionFilter
 from System.Collections.Generic import List
 from pyrevit import revit, DB, UI, forms
 
-# 获取当前文档与活动UIDocument
 doc = revit.doc
 uidoc = revit.uidoc
 
-# ============================================================
-# 全局设计规范常量（公制 mm 转 英尺 ft）
-# ============================================================
+TITLE = "一键布置松木桩垫层"
 MM_TO_FT = 1.0 / 304.8
 FT_TO_MM = 304.8
-
-DEFAULT_PAD_THICK_MM = 100.0     # 垫层厚度：100 mm
-DEFAULT_PAD_OVERHANG_MM = 100.0  # 垫层各边外挑：100 mm
-DEFAULT_PILE_DIAM_MM = 75.0      # 松木桩直径：Φ75 mm
-DEFAULT_PILE_SPACING_MM = 500.0  # 松木桩中心间距：500 mm
-DEFAULT_PILE_LEN_M = 6.0         # 松木桩长度：6.0 m
-
+APP_ID = "PinePileCushionPlugin"
 WELL_PAD_FAMILY_NAME = "市政_井垫层"
+RULES_DIR = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), "KaifaTools")
+RULES_PATH = os.path.join(RULES_DIR, "松木桩规则.json")
+LOG_PATH = os.path.join(RULES_DIR, "松木桩日志.txt")
+
+# 默认规则（与原版设计规范一致）
+DEFAULT_PAD_THICK_MM = 100.0
+DEFAULT_PAD_OVERHANG_MM = 100.0
+DEFAULT_PILE_DIAM_MM = 75.0
+DEFAULT_PILE_SPACING_MM = 500.0
+DEFAULT_PILE_LEN_M = 6.0
+DEFAULT_LINE_SINGLE_MAX_MM = 600.0
+DEFAULT_LINE_DOUBLE_MAX_MM = 1200.0
+
+# 运行时规则（apply_rules 设置；下面的函数直接读这些全局量）
+PAD_THICK_MM = DEFAULT_PAD_THICK_MM
+PAD_OVERHANG_MM = DEFAULT_PAD_OVERHANG_MM
+PILE_DIAM_MM = DEFAULT_PILE_DIAM_MM
+PILE_SPACING_MM = DEFAULT_PILE_SPACING_MM
+PILE_LEN_M = DEFAULT_PILE_LEN_M
+LINE_SINGLE_MAX_MM = DEFAULT_LINE_SINGLE_MAX_MM
+LINE_DOUBLE_MAX_MM = DEFAULT_LINE_DOUBLE_MAX_MM
 PILE_SYMBOL_NAME = "松木桩 - Φ75"
+_TOP_DELTA = [None]
 
 
-# ============================================================
-# 兼容性工具函数
-# ============================================================
 def get_elem_id_val(elem_or_id):
     """安全获取 64位/32位 ElementId 整数值"""
     if elem_or_id is None:
@@ -247,38 +247,8 @@ def build_existing_foundation_index(target_doc, target_elements=None):
 # ============================================================
 # 构件框选过滤器 (完全兼容 Revit 2024-2026 ElementId.Value)
 # ============================================================
-class FoundationTargetFilter(ISelectionFilter):
-    """过滤可布置垫层和松木桩的构件"""
-    def __init__(self):
-        self.allowed_categories = [
-            int(DB.BuiltInCategory.OST_GenericModel),        # 井 / 阀门井 / 拉线井 / 检查井
-            int(DB.BuiltInCategory.OST_StructuralFraming),   # 排管 / 电缆沟 / 管沟 / 基础梁
-            int(DB.BuiltInCategory.OST_StructuralFoundation),# 承台 / 独立基础
-            int(DB.BuiltInCategory.OST_Floors),              # 基础底板 / 楼板
-            int(DB.BuiltInCategory.OST_PipeCurves),          # 室外大管道
-            int(DB.BuiltInCategory.OST_Conduit),             # 电力导管
-            int(DB.BuiltInCategory.OST_Walls),               # 挡土墙 / 沟壁
-            int(DB.BuiltInCategory.OST_StructuralColumns)    # 柱墩
-        ]
-
-    def AllowElement(self, elem):
-        if elem is None or elem.Category is None:
-            return False
-        try:
-            cid_val = get_elem_id_val(elem.Category)
-            if cid_val is not None:
-                return cid_val in self.allowed_categories
-        except Exception:
-            pass
-        return False
-
-    def AllowReference(self, ref, point):
-        return False
 
 
-# ============================================================
-# 族与类型准备
-# ============================================================
 def ensure_pile_symbol(target_doc, pile_diam_mm=DEFAULT_PILE_DIAM_MM, pile_len_m=DEFAULT_PILE_LEN_M):
     """获取或自动创建松木桩族类型（Φ75mm, 6m长）"""
     col = DB.FilteredElementCollector(target_doc)\
@@ -733,11 +703,11 @@ def create_sloped_directshape_pad(target_doc, p0, dir_vec, perp_vec, n_mid, t_st
         ds.ApplicationId = "PinePileCushionPlugin"
         ds.ApplicationDataId = "Cushion_Host_" + host_elem_id_str + "_" + str(System.Guid.NewGuid())
         ds.SetShape(List[DB.GeometryObject]([solid]))
-        ds.Name = name_prefix + " (100mm厚, 外挑100mm)"
+        ds.Name = name_prefix + u" ({}mm厚, 外挑{}mm)".format(int(PAD_THICK_MM), int(PAD_OVERHANG_MM))
 
         p_comm = ds.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
         if p_comm and not p_comm.IsReadOnly:
-            p_comm.Set("垫层 (100mm厚, 外挑100mm) | 宿主: {} (Id:{})".format(host_cat_name, host_elem_id_str))
+            p_comm.Set(u"垫层 ({}mm厚, 外挑{}mm) | 宿主: {} (Id:{})".format(int(PAD_THICK_MM), int(PAD_OVERHANG_MM), host_cat_name, host_elem_id_str))
 
         return ds
     return None
@@ -769,11 +739,11 @@ def create_directshape_box_pad(target_doc, p_center, u_dir, v_dir, len_ft, wid_f
         ds.ApplicationId = "PinePileCushionPlugin"
         ds.ApplicationDataId = "Cushion_Host_" + host_elem_id_str + "_" + str(System.Guid.NewGuid())
         ds.SetShape(List[DB.GeometryObject]([solid]))
-        ds.Name = name_prefix + " (100mm厚, 外挑100mm)"
+        ds.Name = name_prefix + u" ({}mm厚, 外挑{}mm)".format(int(PAD_THICK_MM), int(PAD_OVERHANG_MM))
 
         p_comm = ds.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
         if p_comm and not p_comm.IsReadOnly:
-            p_comm.Set("垫层 (100mm厚, 外挑100mm) | 宿主: {} (Id:{})".format(host_cat_name, host_elem_id_str))
+            p_comm.Set(u"垫层 ({}mm厚, 外挑{}mm) | 宿主: {} (Id:{})".format(int(PAD_THICK_MM), int(PAD_OVERHANG_MM), host_cat_name, host_elem_id_str))
 
         return ds
     return None
@@ -812,19 +782,22 @@ def place_single_pile(target_doc, pos_xy, z_target_top_ft, pile_symbol, level, p
 
     # 核心校准：消除族内部定义或基准面偏移，确保桩顶绝对贴齐垫层底
     try:
-        top_param = inst.LookupParameter("顶部高程")
-        if top_param and top_param.HasValue and p_offset and not p_offset.IsReadOnly:
-            actual_top = top_param.AsDouble()
-            delta = actual_top - z_target_top_ft
-            if abs(delta) > 1e-4:
-                p_offset.Set(p_offset.AsDouble() - delta)
+        if _TOP_DELTA[0] is None:
+            top_param = inst.LookupParameter("顶部高程")
+            if top_param and top_param.HasValue:
+                _TOP_DELTA[0] = top_param.AsDouble() - z_target_top_ft
+            else:
+                _TOP_DELTA[0] = 0.0
+        delta = _TOP_DELTA[0]
+        if abs(delta) > 1e-4 and p_offset and not p_offset.IsReadOnly:
+            p_offset.Set(p_offset.AsDouble() - delta)
     except Exception:
         pass
 
     # 关联宿主信息记录（用于防重覆盖索引）
     p_comments = inst.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
     if p_comments and not p_comments.IsReadOnly:
-        p_comments.Set("松木桩 Φ75@500 L=6m | 宿主: {} (Id:{})".format(host_category_name, host_elem_id))
+        p_comments.Set(u"松木桩 Φ{}@{} L={}m | 宿主: {} (Id:{})".format(int(PILE_DIAM_MM), int(PILE_SPACING_MM), _fmt_num(PILE_LEN_M), host_category_name, host_elem_id))
 
     return inst
 
@@ -840,8 +813,8 @@ def layout_piles_for_curve(target_doc, p0, dir_vec, perp_vec, n_mid, t_start, t_
     n_l = max(1, int(round(t_span / spacing_ft))) if t_span > 0.2 else 1
 
     span_w = max(0.0, elem_wid_ft)
-    w_threshold_1 = 600.0 * MM_TO_FT
-    w_threshold_2 = 1200.0 * MM_TO_FT
+    w_threshold_1 = LINE_SINGLE_MAX_MM * MM_TO_FT
+    w_threshold_2 = LINE_DOUBLE_MAX_MM * MM_TO_FT
 
     if span_w <= w_threshold_1:
         w_coords = [0.0]
@@ -891,284 +864,722 @@ def layout_piles_for_box(target_doc, center_xy, u_dir, v_dir, len_ft, wid_ft, z_
 
 
 # ============================================================
-# 主执行入口
+
+
 # ============================================================
-def main():
+# 规则：默认值 / 读写 / 应用
+# ============================================================
+DEFAULT_RULES = {
+    'pad_thick_mm': DEFAULT_PAD_THICK_MM,
+    'pad_overhang_mm': DEFAULT_PAD_OVERHANG_MM,
+    'pile_diam_mm': DEFAULT_PILE_DIAM_MM,
+    'pile_len_m': DEFAULT_PILE_LEN_M,
+    'pile_spacing_mm': DEFAULT_PILE_SPACING_MM,
+    'line_single_max_mm': DEFAULT_LINE_SINGLE_MAX_MM,
+    'line_double_max_mm': DEFAULT_LINE_DOUBLE_MAX_MM,
+    'max_bottom_m': '',
+    'batch_size': 40,
+    'scope': 'project',
+    'overwrite_old': True,
+    'categories': ['framing', 'generic', 'pipe', 'conduit', 'foundation', 'floor', 'wall', 'column'],
+}
+
+NUMBER_FIELDS = [
+    ('pad_thick_mm', '垫层厚度 (mm)', 0, 2000),
+    ('pad_overhang_mm', '垫层各边外挑 (mm)', 0, 2000),
+    ('pile_diam_mm', '松木桩直径 (mm)', 10, 500),
+    ('pile_len_m', '松木桩长度 (m)', 0.5, 30),
+    ('pile_spacing_mm', '桩中心间距 (mm)', 50, 5000),
+    ('line_single_max_mm', '线式构件宽 ≤ 此值 → 单排桩 (mm)', 0, 10000),
+    ('line_double_max_mm', '线式构件宽 ≤ 此值 → 双排桩，更宽为多排 (mm)', 0, 20000),
+    ('max_bottom_m', '只处理底标高 < 此值的构件 (m，留空=不限)', -100, 1000),
+    ('batch_size', '每批处理构件数（越大越快，出错时回退越多）', 1, 500),
+]
+
+CAT_OPTIONS = [
+    ('framing', '结构框架（排管/基础梁）', [DB.BuiltInCategory.OST_StructuralFraming]),
+    ('generic', '常规模型（井/阀门井等）', [DB.BuiltInCategory.OST_GenericModel]),
+    ('pipe', '管道（室外大管）', [DB.BuiltInCategory.OST_PipeCurves]),
+    ('conduit', '电力导管', [DB.BuiltInCategory.OST_Conduit]),
+    ('foundation', '结构基础（承台/独立基础）', [DB.BuiltInCategory.OST_StructuralFoundation]),
+    ('floor', '楼板（基础底板）', [DB.BuiltInCategory.OST_Floors]),
+    ('wall', '墙（挡土墙/沟壁）', [DB.BuiltInCategory.OST_Walls]),
+    ('column', '结构柱（柱墩）', [DB.BuiltInCategory.OST_StructuralColumns]),
+]
+
+
+def _u(x):
+    """把 .NET 字符串/任意对象转成 unicode，避免中文在 format 时报错。"""
+    t = type(u'')
+    if isinstance(x, t):
+        return x
     try:
-        # 1. 获取目标构件（优先读当前选择，无选择时启动框选）
-        flt = FoundationTargetFilter()
-        sel_ids = list(uidoc.Selection.GetElementIds())
-        target_elements = []
-        for eid in sel_ids:
+        return t(x)
+    except Exception:
+        try:
+            return str(x).decode('utf-8', 'replace')
+        except Exception:
+            return t(repr(x))
+
+
+def _err(ex):
+    try:
+        return _u(ex)
+    except Exception:
+        return u'未知错误'
+
+
+def _fmt_num(v):
+    try:
+        f = float(v)
+    except Exception:
+        return u''
+    if abs(f - round(f)) < 1e-9:
+        return u'{}'.format(int(round(f)))
+    return u'{:g}'.format(f)
+
+
+def load_rules():
+    r = dict(DEFAULT_RULES)
+    r['categories'] = list(DEFAULT_RULES['categories'])
+    try:
+        if os.path.exists(RULES_PATH):
+            with open(RULES_PATH, 'rb') as f:
+                data = json.loads(f.read().decode('utf-8'))
+            for k in DEFAULT_RULES:
+                if k in data:
+                    r[k] = data[k]
+    except Exception:
+        pass
+    return r
+
+
+def save_rules(r):
+    try:
+        if not os.path.exists(RULES_DIR):
+            os.makedirs(RULES_DIR)
+        s = json.dumps(r, ensure_ascii=True, indent=2, sort_keys=True)
+        if not isinstance(s, bytes):
+            s = s.encode('utf-8')
+        with open(RULES_PATH, 'wb') as f:
+            f.write(s)
+        return True
+    except Exception:
+        return False
+
+
+def apply_rules(r):
+    global PAD_THICK_MM, PAD_OVERHANG_MM, PILE_DIAM_MM, PILE_SPACING_MM, PILE_LEN_M
+    global LINE_SINGLE_MAX_MM, LINE_DOUBLE_MAX_MM, PILE_SYMBOL_NAME
+    PAD_THICK_MM = float(r['pad_thick_mm'])
+    PAD_OVERHANG_MM = float(r['pad_overhang_mm'])
+    PILE_DIAM_MM = float(r['pile_diam_mm'])
+    PILE_SPACING_MM = float(r['pile_spacing_mm'])
+    PILE_LEN_M = float(r['pile_len_m'])
+    LINE_SINGLE_MAX_MM = float(r['line_single_max_mm'])
+    LINE_DOUBLE_MAX_MM = float(r['line_double_max_mm'])
+    PILE_SYMBOL_NAME = u"松木桩 - Φ{}".format(int(PILE_DIAM_MM))
+    _TOP_DELTA[0] = None
+
+
+def _enabled_bics(r):
+    out = []
+    for key, text, bics in CAT_OPTIONS:
+        if key in r.get('categories', []):
+            out.extend(bics)
+    return out
+
+
+def _enabled_cat_ids(r):
+    return set(int(b) for b in _enabled_bics(r))
+
+
+def _max_bottom_ft(r):
+    v = r.get('max_bottom_m', '')
+    if v in ('', None):
+        return None
+    return float(v) / 0.3048
+
+
+# ============================================================
+# 规则窗口（运行前修改，保存后下次自动沿用）
+# ============================================================
+def _parse_num(text, name, lo, hi, allow_blank=False):
+    t = _u(text or u'').strip()
+    if t == u'':
+        if allow_blank:
+            return None
+        raise ValueError(u'{} 不能为空'.format(name))
+    try:
+        v = float(t)
+    except Exception:
+        raise ValueError(u'{} 请输入数字'.format(name))
+    if v < lo or v > hi:
+        raise ValueError(u'{} 应在 {} 到 {} 之间'.format(name, lo, hi))
+    return v
+
+
+def show_rules_dialog(r, sel_count):
+    """弹出规则窗口，返回修改后的规则 dict；取消返回 None。"""
+    import System.Windows.Forms as WF
+    import System.Drawing as SD
+    form = WF.Form()
+    form.Text = u"一键布置松木桩垫层 — 规则设置"
+    form.ClientSize = SD.Size(640, 690)
+    form.FormBorderStyle = WF.FormBorderStyle.FixedDialog
+    form.MaximizeBox = False
+    form.MinimizeBox = False
+    form.StartPosition = WF.FormStartPosition.CenterScreen
+    form.TopMost = True
+    form.Font = SD.Font(u"Microsoft YaHei UI", 9.0)
+
+    def label(text, x, y, w=330, h=22):
+        l = WF.Label()
+        l.Text = text
+        l.Left = x
+        l.Top = y
+        l.Width = w
+        l.Height = h
+        form.Controls.Add(l)
+        return l
+
+    def button(text, x, y, w=120):
+        b = WF.Button()
+        b.Text = text
+        b.Left = x
+        b.Top = y
+        b.Width = w
+        b.Height = 32
+        form.Controls.Add(b)
+        return b
+
+    if sel_count > 0:
+        hint = u"已选中 {} 个构件：只处理选中的（清空选择后按下方范围处理全部）".format(sel_count)
+    else:
+        hint = u"未选中构件：按下方范围处理全部可布置构件"
+    label(hint, 12, 10, 616, 24)
+
+    boxes = {}
+    y = 42
+    for key, text, lo, hi in NUMBER_FIELDS:
+        label(text, 12, y + 4, 370)
+        tb = WF.TextBox()
+        tb.Left = 390
+        tb.Top = y
+        tb.Width = 230
+        tb.Text = _fmt_num(r.get(key, DEFAULT_RULES[key]))
+        form.Controls.Add(tb)
+        boxes[key] = tb
+        y += 30
+
+    label(u"处理范围", 12, y + 4, 370)
+    scope_cb = WF.ComboBox()
+    scope_cb.Left = 390
+    scope_cb.Top = y
+    scope_cb.Width = 230
+    scope_cb.DropDownStyle = WF.ComboBoxStyle.DropDownList
+    scope_cb.Items.Add(u"整个项目（全部构件）")
+    scope_cb.Items.Add(u"当前视图")
+    scope_cb.SelectedIndex = 1 if r.get('scope') == 'view' else 0
+    form.Controls.Add(scope_cb)
+    y += 34
+
+    over_cb = WF.CheckBox()
+    over_cb.Text = u"重复布置时先清理旧垫层与旧桩（推荐）"
+    over_cb.Left = 12
+    over_cb.Top = y
+    over_cb.Width = 600
+    over_cb.Checked = bool(r.get('overwrite_old', True))
+    form.Controls.Add(over_cb)
+    y += 30
+
+    label(u"布置的构件类别（勾选）", 12, y + 4, 400)
+    y += 28
+    cat_boxes = {}
+    enabled = set(r.get('categories', []))
+    for i, (key, text, bics) in enumerate(CAT_OPTIONS):
+        c = WF.CheckBox()
+        c.Text = text
+        c.Left = 24 + (i % 2) * 300
+        c.Top = y + (i // 2) * 26
+        c.Width = 290
+        c.Checked = key in enabled
+        form.Controls.Add(c)
+        cat_boxes[key] = c
+    y += ((len(CAT_OPTIONS) + 1) // 2) * 26 + 10
+
+    label(u"提示：井、排管、管道等地上构件很多，建议在「底标高」里填一个值（如 0.5 m），只处理埋地的。",
+          12, y, 616, 36)
+    y += 44
+
+    result = {}
+
+    def _on_ok(sender, args):
+        try:
+            nr = {}
+            for key, text, lo, hi in NUMBER_FIELDS:
+                if key == 'batch_size':
+                    nr[key] = int(_parse_num(boxes[key].Text, text, lo, hi))
+                elif key == 'max_bottom_m':
+                    v = _parse_num(boxes[key].Text, text, lo, hi, allow_blank=True)
+                    nr[key] = '' if v is None else v
+                else:
+                    nr[key] = _parse_num(boxes[key].Text, text, lo, hi)
+            if nr['line_double_max_mm'] < nr['line_single_max_mm']:
+                raise ValueError(u'双排阈值应不小于单排阈值')
+            nr['categories'] = [k for k, t, b in CAT_OPTIONS if cat_boxes[k].Checked]
+            if not nr['categories']:
+                raise ValueError(u'至少勾选一类构件')
+            nr['scope'] = 'view' if scope_cb.SelectedIndex == 1 else 'project'
+            nr['overwrite_old'] = bool(over_cb.Checked)
+        except ValueError as ex:
+            WF.MessageBox.Show(_err(ex.args[0]) if ex.args else u'输入有误', TITLE)
+            return
+        result['rules'] = nr
+        form.DialogResult = WF.DialogResult.OK
+
+    def _on_default(sender, args):
+        for key, text, lo, hi in NUMBER_FIELDS:
+            boxes[key].Text = _fmt_num(DEFAULT_RULES[key])
+        scope_cb.SelectedIndex = 0
+        over_cb.Checked = True
+        for k, c in cat_boxes.items():
+            c.Checked = k in DEFAULT_RULES['categories']
+
+    btn_ok = button(u"开始布置", 300, y, 130)
+    btn_def = button(u"恢复默认", 440, y, 110)
+    btn_cancel = button(u"取消", 300, y + 40, 130)
+    btn_ok.Click += System.EventHandler(_on_ok)
+    btn_def.Click += System.EventHandler(_on_default)
+    btn_cancel.DialogResult = WF.DialogResult.Cancel
+    form.AcceptButton = btn_ok
+    form.CancelButton = btn_cancel
+    form.ClientSize = SD.Size(640, y + 90)
+
+    if form.ShowDialog() == WF.DialogResult.OK and 'rules' in result:
+        return result['rules']
+    return None
+
+
+# ============================================================
+# 目标构件收集
+# ============================================================
+def is_tool_made(e):
+    """本插件自己生成的垫层/桩（DirectShape 或带「宿主」标记的族实例）不再作为目标，避免重复布置。"""
+    try:
+        if isinstance(e, DB.DirectShape):
+            return e.ApplicationId == APP_ID
+        cm = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+        comm = _u(cm.AsString()) if (cm and cm.HasValue) else u''
+        if comm and (u'宿主' in comm) and (u'松木桩' in comm or u'垫层' in comm):
+            return True
+        sym = getattr(e, 'Symbol', None)
+        if sym is not None and _u(get_type_name(sym)).startswith(u'松木桩'):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def selected_targets(ids, r):
+    keep = _enabled_cat_ids(r)
+    out = []
+    for eid in ids:
+        try:
+            e = doc.GetElement(eid)
+            if e is None or e.Category is None:
+                continue
+            if get_elem_id_val(e.Category) not in keep:
+                continue
+            if is_tool_made(e):
+                continue
+            out.append(e)
+        except Exception:
+            continue
+    return out
+
+
+def collect_targets(r):
+    bics = _enabled_bics(r)
+    if not bics:
+        return []
+    flt = DB.ElementMulticategoryFilter(List[DB.BuiltInCategory](bics))
+    if r.get('scope') == 'view':
+        col = DB.FilteredElementCollector(doc, uidoc.ActiveView.Id)
+    else:
+        col = DB.FilteredElementCollector(doc)
+    max_bot = _max_bottom_ft(r)
+    out = []
+    for e in col.WherePasses(flt).WhereElementIsNotElementType().ToElements():
+        try:
+            if is_tool_made(e):
+                continue
+            if max_bot is not None:
+                bb = e.get_BoundingBox(None)
+                if bb is None or bb.Min.Z > max_bot:
+                    continue
+            out.append(e)
+        except Exception:
+            continue
+    return out
+
+
+# ============================================================
+# 事务与分批
+# ============================================================
+class _SilentFailures(DB.IFailuresPreprocessor):
+    """警告直接删除；无法忽略的错误不弹窗，让当前事务/子事务回滚（由上层隔离）。"""
+
+    def PreprocessFailures(self, acc):
+        has_err = False
+        for f in acc.GetFailureMessages():
             try:
-                el = doc.GetElement(eid)
-                if flt.AllowElement(el):
-                    target_elements.append(el)
+                sev = f.GetSeverity()
+            except Exception:
+                continue
+            if sev == DB.FailureSeverity.Warning:
+                try:
+                    acc.DeleteWarning(f)
+                except Exception:
+                    pass
+            else:
+                has_err = True
+        if has_err:
+            return DB.FailureProcessingResult.ProceedWithRollBack
+        return DB.FailureProcessingResult.Continue
+
+
+def _make_tx(name):
+    t = DB.Transaction(doc, name)
+    fho = t.GetFailureHandlingOptions()
+    fho.SetFailuresPreprocessor(_SilentFailures())
+    fho.SetClearAfterRollback(True)
+    t.SetFailureHandlingOptions(fho)
+    return t
+
+
+def prepare_ctx(r):
+    """准备松木桩族、井垫层族和标高（一个小事务）。失败返回 None。"""
+    t = _make_tx(u'准备松木桩族与标高')
+    t.Start()
+    try:
+        pile_sym = ensure_pile_symbol(doc, PILE_DIAM_MM, PILE_LEN_M)
+        well_pad_sym = get_well_pad_symbol(doc, PAD_THICK_MM)
+        level = get_default_level(doc)
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        return None
+    if pile_sym is None or level is None:
+        return None
+    return {
+        'pile_sym': pile_sym,
+        'well_pad_sym': well_pad_sym,
+        'level': level,
+        'pad_thick_ft': PAD_THICK_MM * MM_TO_FT,
+        'pad_overhang_ft': PAD_OVERHANG_MM * MM_TO_FT,
+        'pile_spacing_ft': PILE_SPACING_MM * MM_TO_FT,
+        'pile_len_ft': PILE_LEN_M / 0.3048,
+    }
+
+
+def process_one(elem, ctx, existing, r):
+    """处理一个构件：先读几何（读不到就跳过，不动旧图元），再清旧图元、生成垫层和桩。"""
+    host = get_elem_id_str(elem)
+    cat_name = _u(elem.Category.Name) if elem.Category else u'构件'
+    res = {'host': host, 'cat': cat_name, 'pads': 0, 'piles': 0, 'deleted': 0,
+           'kind': u'', 'skip': None, 'error': None}
+
+    curve_info = extract_curve_element_info(elem)
+    box_info = None
+    if curve_info is None:
+        box_info = extract_element_local_box(elem)
+        if box_info is None:
+            res['skip'] = u'无法读取几何'
+            return res
+
+    old_ids = list(existing.get(host, [])) if r.get('overwrite_old', True) else []
+    if old_ids:
+        doc.Delete(List[DB.ElementId](old_ids))
+        res['deleted'] = len(old_ids)
+
+    pad_thick_ft = ctx['pad_thick_ft']
+    pad_overhang_ft = ctx['pad_overhang_ft']
+    pile_spacing_ft = ctx['pile_spacing_ft']
+    pile_len_ft = ctx['pile_len_ft']
+    pile_sym = ctx['pile_sym']
+    level = ctx['level']
+
+    if curve_info is not None:
+        res['kind'] = u'线式'
+        p0 = curve_info['p0']
+        dir_vec = curve_info['dir_vec']
+        perp_vec = curve_info['perp_vec']
+        elem_wid_ft = curve_info['elem_wid_ft']
+        n_mid = curve_info['n_mid']
+        t_start = curve_info['t_start']
+        t_end = curve_info['t_end']
+        z_start_bot = curve_info['z_start_bot']
+        z_end_bot = curve_info['z_end_bot']
+        name_prefix = u"排管垫层" if (u"排管" in cat_name or u"排管" in _u(get_fam_name(elem))) else (u"管道垫层" if u"管" in cat_name else u"垫层")
+        pad_ds = create_sloped_directshape_pad(
+            doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
+            z_start_bot, z_end_bot, elem_wid_ft, pad_overhang_ft, pad_thick_ft,
+            host, cat_name, name_prefix=name_prefix)
+        if pad_ds:
+            res['pads'] += 1
+        piles = layout_piles_for_curve(
+            doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
+            z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
+            pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name)
+        res['piles'] += len(piles)
+        return res
+
+    res['kind'] = u'点式'
+    len_ft, wid_ft, c_world, z_bot, rot, u_dir, v_dir = box_info
+    pad_len_ft = len_ft + 2.0 * pad_overhang_ft
+    pad_wid_ft = wid_ft + 2.0 * pad_overhang_ft
+    z_cushion_bot = z_bot - pad_thick_ft
+    well_pad_sym = ctx['well_pad_sym']
+    is_well = (u"井" in cat_name) or (hasattr(elem, 'Symbol') and elem.Symbol and (u"井" in _u(get_fam_name(elem.Symbol))))
+    placed_family_pad = False
+    if well_pad_sym is not None and is_well and abs(PAD_THICK_MM - DEFAULT_PAD_THICK_MM) < 1e-6:
+        try:
+            pad_inst = doc.Create.NewFamilyInstance(
+                DB.XYZ(c_world.X, c_world.Y, 0), well_pad_sym, level,
+                DB.Structure.StructuralType.Footing)
+            p_off = pad_inst.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
+            if p_off and not p_off.IsReadOnly:
+                p_off.Set(z_bot - level.Elevation)
+            p_l = pad_inst.LookupParameter("井外包长")
+            if p_l and not p_l.IsReadOnly:
+                p_l.Set(len_ft)
+            p_w = pad_inst.LookupParameter("井外包宽")
+            if p_w and not p_w.IsReadOnly:
+                p_w.Set(wid_ft)
+            p_spec = pad_inst.LookupParameter("松木桩规格")
+            if p_spec and not p_spec.IsReadOnly:
+                p_spec.Set(u"{}mm Ø".format(int(PILE_DIAM_MM)))
+            p_spc = pad_inst.LookupParameter("松木桩间距")
+            if p_spc and not p_spc.IsReadOnly:
+                p_spc.Set(ctx['pile_spacing_ft'])
+            p_plen = pad_inst.LookupParameter("松木桩长")
+            if p_plen and not p_plen.IsReadOnly:
+                p_plen.Set(pile_len_ft)
+            p_mk = pad_inst.LookupParameter("关联构件标记")
+            if p_mk and not p_mk.IsReadOnly:
+                p_mk.Set(host)
+            p_comm = pad_inst.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+            if p_comm and not p_comm.IsReadOnly:
+                p_comm.Set(u"井垫层 (100mm厚) | 宿主: {} (Id:{})".format(cat_name, host))
+            if abs(rot) > 1e-4:
+                axis = DB.Line.CreateBound(DB.XYZ(c_world.X, c_world.Y, 0), DB.XYZ(c_world.X, c_world.Y, 1))
+                DB.ElementTransformUtils.RotateElement(doc, pad_inst.Id, axis, rot)
+            res['pads'] += 1
+            placed_family_pad = True
+        except Exception:
+            placed_family_pad = False
+    if not placed_family_pad:
+        pad_ds = create_directshape_box_pad(
+            doc, c_world, u_dir, v_dir, pad_len_ft, pad_wid_ft, z_bot, pad_thick_ft,
+            host, cat_name, name_prefix=u"井垫层")
+        if pad_ds:
+            res['pads'] += 1
+    piles = layout_piles_for_box(
+        doc, c_world, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot,
+        pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name)
+    res['piles'] += len(piles)
+    return res
+
+
+def _run_sub(elem, ctx, existing, r):
+    """单个构件放在子事务里：出错只回滚它自己，不影响同批的其他构件。"""
+    st = DB.SubTransaction(doc)
+    st.Start()
+    try:
+        res = process_one(elem, ctx, existing, r)
+        s = st.Commit()
+        if s is not None and s != DB.TransactionStatus.Committed:
+            raise Exception(u'子事务未提交')
+        return res
+    except Exception as ex:
+        try:
+            if st.HasStarted() and not st.HasEnded():
+                st.RollBack()
+        except Exception:
+            pass
+        return {'host': get_elem_id_str(elem), 'cat': _u(elem.Category.Name) if elem.Category else u'构件',
+                'error': _err(ex), 'pads': 0, 'piles': 0, 'deleted': 0}
+
+
+def run_batch(elems, ctx, existing, r):
+    """一批构件放在一个事务里提交。整批提交失败返回 None，由调用方逐个重试。"""
+    t = _make_tx(u'一键布置松木桩与垫层')
+    t.Start()
+    out = []
+    try:
+        for el in elems:
+            out.append((el, _run_sub(el, ctx, existing, r)))
+        s = t.Commit()
+        if s != DB.TransactionStatus.Committed:
+            return None
+        return out
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        return None
+
+
+def _account(stats, el, res, existing):
+    host = res.get('host') or get_elem_id_str(el)
+    cat = res.get('cat') or u'构件'
+    if res.get('error'):
+        stats['failed'].append((host, cat, res['error']))
+        return
+    if res.get('skip'):
+        stats['skipped'].append((host, cat, res['skip']))
+        return
+    stats['done'] += 1
+    stats['pads'] += res.get('pads', 0)
+    stats['piles'] += res.get('piles', 0)
+    stats['deleted'] += res.get('deleted', 0)
+    if res.get('kind') == u'线式':
+        stats['line'] += 1
+    else:
+        stats['point'] += 1
+    if res.get('deleted', 0):
+        existing.pop(host, None)
+
+
+def run_pipeline(r, targets, pb=None):
+    """主流程：准备族 → 建旧图元索引 → 分批提交（失败的批逐个重试）→ 统计。"""
+    t0 = time.time()
+    apply_rules(r)
+    stats = {'total': len(targets), 'done': 0, 'pads': 0, 'piles': 0, 'deleted': 0,
+             'line': 0, 'point': 0, 'skipped': [], 'failed': [], 'cancelled': False,
+             'error': None, 'seconds': 0.0}
+    ctx = prepare_ctx(r)
+    if ctx is None:
+        stats['error'] = u'未能加载或创建松木桩族/标高（请检查项目基础族）'
+        return stats
+    existing = build_existing_foundation_index(doc, targets)
+    bs = max(1, int(r.get('batch_size', 40)))
+    n = len(targets)
+    i = 0
+    while i < n:
+        if pb is not None and pb.cancelled:
+            stats['cancelled'] = True
+            break
+        batch = targets[i:i + bs]
+        out = run_batch(batch, ctx, existing, r)
+        if out is None:
+            out = []
+            for el in batch:
+                one = run_batch([el], ctx, existing, r)
+                if one is None:
+                    out.append((el, {'host': get_elem_id_str(el),
+                                     'cat': _u(el.Category.Name) if el.Category else u'构件',
+                                     'error': u'Revit 提交失败（已回滚，该构件跳过）'}))
+                else:
+                    out.extend(one)
+        for el, res in out:
+            _account(stats, el, res, existing)
+        i += len(batch)
+        if pb is not None:
+            try:
+                pb.update_progress(min(i, n), n)
             except Exception:
                 pass
+    stats['seconds'] = time.time() - t0
+    return stats
 
-        if not target_elements:
-            try:
-                picked = uidoc.Selection.PickElementsByRectangle(
-                    flt,
-                    "【框选布置】请在视图中拉框框选需要布置垫层和松木桩的构件（排管/井/基础/底板）"
-                )
-                target_elements = list(picked)
-            except Exception:
-                # 用户按 ESC 取消
-                return
 
-        if not target_elements:
-            forms.alert("未选中任何有效构件！\n支持的构件包括：排管（结构框架）、井（常规模型）、结构基础、楼板等。", title="一键布置松木桩垫层")
+def write_log(stats):
+    if not (stats['failed'] or stats['skipped'] or stats.get('error')):
+        return None
+    rows = [u'==== {} 运行（构件 {} 个）===='.format(time.strftime('%Y-%m-%d %H:%M:%S'), stats['total'])]
+    if stats.get('error'):
+        rows.append(u'错误: ' + _u(stats['error']))
+    for host, cat, msg in stats['skipped']:
+        rows.append(u'跳过 {} [{}] {}'.format(host, cat, msg))
+    for host, cat, msg in stats['failed']:
+        rows.append(u'失败 {} [{}] {}'.format(host, cat, msg))
+    try:
+        if not os.path.exists(RULES_DIR):
+            os.makedirs(RULES_DIR)
+        with open(LOG_PATH, 'ab') as f:
+            f.write((u'\n'.join(rows) + u'\n').encode('utf-8'))
+        return LOG_PATH
+    except Exception:
+        return None
+
+
+def build_report(stats, r, log_path):
+    d = float(r['pile_diam_mm'])
+    piles = stats['piles']
+    pile_len = float(r['pile_len_m'])
+    vol = piles * math.pi * (d / 2000.0) ** 2 * pile_len
+    lines = [
+        u"松木桩与垫层布置完成！" if not stats['cancelled'] else u"已取消（已完成的部分保留）。",
+        u"",
+        u"• 处理构件：{} / {} 个（线式 {}，点式 {}）".format(stats['done'], stats['total'], stats['line'], stats['point']),
+        u"• 生成垫层：{} 块".format(stats['pads']),
+        u"• 生成松木桩：{} 根（Φ{} × {} m，总延米 {:.2f} m，木材 {:.2f} m³）".format(
+            piles, _fmt_num(d), _fmt_num(pile_len), piles * pile_len, vol),
+        u"• 清理旧图元：{} 个".format(stats['deleted']),
+        u"• 跳过：{} 个（读不到几何等）".format(len(stats['skipped'])),
+        u"• 失败：{} 个（已回滚，不影响其它构件）".format(len(stats['failed'])),
+        u"• 用时：{:.1f} 秒".format(stats['seconds']),
+    ]
+    if stats.get('error'):
+        lines.append(u"• 错误：" + _u(stats['error']))
+    if log_path:
+        lines.append(u"• 跳过/失败明细已写入：" + _u(log_path))
+    return u"\n".join(lines)
+
+
+def main():
+    try:
+        r = load_rules()
+        sel_ids = []
+        try:
+            sel_ids = list(uidoc.Selection.GetElementIds())
+        except Exception:
+            sel_ids = []
+        sel_now = selected_targets(sel_ids, r)
+
+        new_r = show_rules_dialog(r, len(sel_now))
+        if new_r is None:
+            return
+        save_rules(new_r)
+
+        if sel_now:
+            targets = selected_targets(sel_ids, new_r)
+            src_txt = u"选中的"
+        else:
+            targets = collect_targets(new_r)
+            src_txt = u"整个项目" if new_r['scope'] == 'project' else u"当前视图"
+        if not targets:
+            forms.alert(u"没有找到可布置的构件。\n请检查「规则」里的类别、范围和底标高过滤。", title=TITLE)
             return
 
-        # 2. 预先构建已有垫层和桩索引，检测是否包含曾经布置过的构件 (空间过滤秒级索引)
-        existing_index = build_existing_foundation_index(doc, target_elements)
-        already_placed_hosts = 0
-        already_placed_elems_count = 0
-        for el in target_elements:
-            el_id_str = get_elem_id_str(el)
-            if el_id_str in existing_index:
-                already_placed_hosts += 1
-                already_placed_elems_count += len(existing_index[el_id_str])
-
-        # 3. 参数确认与提醒
-        overwrite_tip = ""
-        if already_placed_hosts > 0:
-            overwrite_tip = (
-                "⚠️ 【检测到重复布置构件】：\n"
-                "所选构件中有 {} 个构件此前已布置过垫层/松木桩（共 {} 个旧图元）。\n"
-                "💡 本插件已开启【智能防重覆盖机制】：将自动清理旧图元并重新生成，杜绝重叠冗余！\n\n"
-            ).format(already_placed_hosts, already_placed_elems_count)
-
-        summary_prompt = (
-            "已选中 {} 个构件准备布置松木桩与垫层：\n\n"
-            "{}"
-            "• 垫层厚度：100 mm\n"
-            "• 垫层外挑：各边外挑 100 mm\n"
-            "• 对齐方式：构件实体三维外轮廓精准居中对齐\n"
-            "• 松木桩规格：Φ75 mm 直径\n"
-            "• 桩中心间距：500 mm\n"
-            "• 桩身长度：6.0 m\n\n"
-            "是否立即自动计算并生成？"
-        ).format(len(target_elements), overwrite_tip)
-
-        choice = forms.CommandSwitchWindow.show(
-            ["立即自动布置 (智能覆盖更新)", "取消"],
-            message=summary_prompt
-        )
-        if choice != "立即自动布置 (智能覆盖更新)":
+        q = (u"将处理 {} 个构件（{}）。\n"
+             u"垫层 {} mm 厚，各边外挑 {} mm；松木桩 Φ{} × {} m，间距 {} mm。\n"
+             u"开始布置？").format(len(targets), src_txt,
+                                   _fmt_num(new_r['pad_thick_mm']), _fmt_num(new_r['pad_overhang_mm']),
+                                   _fmt_num(new_r['pile_diam_mm']), _fmt_num(new_r['pile_len_m']),
+                                   _fmt_num(new_r['pile_spacing_mm']))
+        if not forms.alert(q, title=TITLE, yes=True, no=True):
             return
 
-        # 4. 准备族与标高
-        t_prep = DB.Transaction(doc, "准备松木桩族与标高")
-        t_prep.Start()
-        pile_sym = ensure_pile_symbol(doc, DEFAULT_PILE_DIAM_MM, DEFAULT_PILE_LEN_M)
-        well_pad_sym = get_well_pad_symbol(doc, DEFAULT_PAD_THICK_MM)
-        level = get_default_level(doc)
-        t_prep.Commit()
-
-        if pile_sym is None:
-            forms.alert("未能加载或创建【{}】族类型，请检查项目基础族！".format(PILE_SYMBOL_NAME), title="错误")
-            return
-        if level is None:
-            forms.alert("项目中未找到可用标高！", title="错误")
-            return
-
-        # 5. 执行批量布置（事务内执行旧图元清理与新图元生成）
-        t_main = DB.Transaction(doc, "一键布置松木桩与垫层")
-        t_main.Start()
-
-        count_pad = 0
-        count_piles = 0
-        count_cleaned_old = 0
-        skipped = 0
-        processed_elements = 0
-
-        pad_thick_ft = DEFAULT_PAD_THICK_MM * MM_TO_FT
-        pad_overhang_ft = DEFAULT_PAD_OVERHANG_MM * MM_TO_FT
-        pile_spacing_ft = DEFAULT_PILE_SPACING_MM * MM_TO_FT
-        pile_len_ft = DEFAULT_PILE_LEN_M / 0.3048
-
-        with forms.ProgressBar(title="正在自动布置垫层与松木桩...", cancellable=True) as pb:
-            total = len(target_elements)
-            for idx, elem in enumerate(target_elements):
-                if pb.cancelled:
-                    break
-                pb.update_progress(idx + 1, total)
-
-                try:
-                    cat_name = elem.Category.Name if elem.Category else "构件"
-                    elem_id_str = get_elem_id_str(elem)
-
-                    # --- 【关键防重】：如果该构件之前布置过，立即清除旧垫层与旧桩 ---
-                    if elem_id_str in existing_index:
-                        old_ids = existing_index[elem_id_str]
-                        if old_ids:
-                            try:
-                                doc.Delete(List[DB.ElementId](old_ids))
-                                count_cleaned_old += len(old_ids)
-                            except Exception:
-                                pass
-                        del existing_index[elem_id_str]
-
-                    # 判断线式（排管/管道）还是点式（井/基础）
-                    curve_info = extract_curve_element_info(elem)
-
-                    if curve_info is not None:
-                        # -------------------------
-                        # 线式构件：排管 / 管沟 / 管道
-                        # -------------------------
-                        p0 = curve_info['p0']
-                        p1 = curve_info['p1']
-                        dir_vec = curve_info['dir_vec']
-                        perp_vec = curve_info['perp_vec']
-                        elem_wid_ft = curve_info['elem_wid_ft']
-                        n_mid = curve_info['n_mid']
-                        t_start = curve_info['t_start']
-                        t_end = curve_info['t_end']
-                        z_start_bot = curve_info['z_start_bot']
-                        z_end_bot = curve_info['z_end_bot']
-
-                        # 生成 3D 实体垫层 (100mm厚，各边外挑100mm，严密贴紧构件真实底面坡度，写入宿主ID)
-                        name_prefix = "排管垫层" if ("排管" in cat_name or "排管" in get_fam_name(elem)) else ("管道垫层" if "管" in cat_name else "垫层")
-                        pad_ds = create_sloped_directshape_pad(
-                            doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
-                            z_start_bot, z_end_bot, elem_wid_ft, pad_overhang_ft, pad_thick_ft,
-                            elem_id_str, cat_name,
-                            name_prefix=name_prefix
-                        )
-                        if pad_ds:
-                            count_pad += 1
-
-                        # 布置松木桩（沿管道坡度连续计算，桩顶100%严密贴合垫层底面）
-                        piles = layout_piles_for_curve(
-                            doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
-                            z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
-                            pile_spacing_ft, pile_sym, level, pile_len_ft,
-                            elem_id_str, cat_name
-                        )
-                        count_piles += len(piles)
-                        processed_elements += 1
-
-                    else:
-                        # -------------------------
-                        # 点式构件：井 / 承台 / 基础 / 楼板
-                        # -------------------------
-                        box_info = extract_element_local_box(elem)
-                        if box_info is None:
-                            skipped += 1
-                            continue
-
-                        len_ft, wid_ft, c_world, z_bot, rot, u_dir, v_dir = box_info
-                        pad_len_ft = len_ft + 2.0 * pad_overhang_ft
-                        pad_wid_ft = wid_ft + 2.0 * pad_overhang_ft
-                        z_cushion_bot = z_bot - pad_thick_ft
-
-                        # 生成垫层 (100mm厚)
-                        # 优先使用 市政_井垫层 族
-                        placed_family_pad = False
-                        is_well = "井" in cat_name or (hasattr(elem, 'Symbol') and elem.Symbol and "井" in get_fam_name(elem.Symbol))
-                        if well_pad_sym is not None and is_well:
-                            try:
-                                pad_inst = doc.Create.NewFamilyInstance(
-                                    DB.XYZ(c_world.X, c_world.Y, 0),
-                                    well_pad_sym,
-                                    level,
-                                    DB.Structure.StructuralType.Footing
-                                )
-                                p_off = pad_inst.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
-                                if p_off and not p_off.IsReadOnly:
-                                    p_off.Set(z_bot - level.Elevation)
-                                p_l = pad_inst.LookupParameter("井外包长")
-                                if p_l and not p_l.IsReadOnly:
-                                    p_l.Set(len_ft)
-                                p_w = pad_inst.LookupParameter("井外包宽")
-                                if p_w and not p_w.IsReadOnly:
-                                    p_w.Set(wid_ft)
-                                p_spec = pad_inst.LookupParameter("松木桩规格")
-                                if p_spec and not p_spec.IsReadOnly:
-                                    p_spec.Set("75mm Ø")
-                                p_spc = pad_inst.LookupParameter("松木桩间距")
-                                if p_spc and not p_spc.IsReadOnly:
-                                    p_spc.Set(pile_spacing_ft)
-                                p_plen = pad_inst.LookupParameter("松木桩长")
-                                if p_plen and not p_plen.IsReadOnly:
-                                    p_plen.Set(pile_len_ft)
-                                p_mk = pad_inst.LookupParameter("关联构件标记")
-                                if p_mk and not p_mk.IsReadOnly:
-                                    p_mk.Set(elem_id_str)
-                                p_comm = pad_inst.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
-                                if p_comm and not p_comm.IsReadOnly:
-                                    p_comm.Set("井垫层 (100mm厚) | 宿主: {} (Id:{})".format(cat_name, elem_id_str))
-
-                                if abs(rot) > 1e-4:
-                                    axis = DB.Line.CreateBound(
-                                        DB.XYZ(c_world.X, c_world.Y, 0),
-                                        DB.XYZ(c_world.X, c_world.Y, 1)
-                                    )
-                                    DB.ElementTransformUtils.RotateElement(doc, pad_inst.Id, axis, rot)
-
-                                count_pad += 1
-                                placed_family_pad = True
-                            except Exception:
-                                placed_family_pad = False
-
-                        if not placed_family_pad:
-                            # 降级：使用 3D 实体 DirectShape 垫层 (100mm厚)
-                            pad_ds = create_directshape_box_pad(
-                                doc, c_world, u_dir, v_dir,
-                                pad_len_ft, pad_wid_ft, z_bot, pad_thick_ft,
-                                elem_id_str, cat_name,
-                                name_prefix="井垫层"
-                            )
-                            if pad_ds:
-                                count_pad += 1
-
-                        # 布置松木桩网格
-                        piles = layout_piles_for_box(
-                            doc, c_world, u_dir, v_dir,
-                            len_ft, wid_ft, z_cushion_bot,
-                            pile_spacing_ft, pile_sym, level, pile_len_ft,
-                            elem_id_str, cat_name
-                        )
-                        count_piles += len(piles)
-                        processed_elements += 1
-
-                except Exception as ex_elem:
-                    skipped += 1
-                    continue
-
-        t_main.Commit()
-
-        # 6. 汇总统计与完成报告
-        total_pile_length_m = count_piles * DEFAULT_PILE_LEN_M
-        radius_m = (DEFAULT_PILE_DIAM_MM / 2.0) / 1000.0
-        total_pile_volume_m3 = count_piles * (math.pi * radius_m * radius_m * DEFAULT_PILE_LEN_M)
-
-        cleanup_msg = ""
-        if count_cleaned_old > 0:
-            cleanup_msg = "♻️ 防重清理：成功自动覆盖清理了 {} 个旧垫层与旧桩图元！\n\n".format(count_cleaned_old)
-
-        result_msg = (
-            "🎉 松木桩与垫层布置完成！\n\n"
-            "{}"
-            "📊 工程量统计：\n"
-            "• 成功处理构件：{} 个 (跳过: {})\n"
-            "• 生成垫层：{} 块 (厚度100mm, 各边外挑100mm, 精准居中对齐)\n"
-            "• 生成松木桩：{} 根 (Φ75mm, 桩长6.0m, @500mm)\n"
-            "• 松木桩总延米：{:.2f} m\n"
-            "• 松木桩木材方量：{:.2f} m³\n\n"
-            "所有生成的垫层与松木桩均归属【结构基础】类别，重复框选时将自动识别并更新替换，杜绝重复！"
-        ).format(
-            cleanup_msg, processed_elements, skipped, count_pad, count_piles,
-            total_pile_length_m, total_pile_volume_m3
-        )
-
-        forms.alert(result_msg, title="布置完成")
-
+        with forms.ProgressBar(title=u"正在布置松木桩与垫层...", cancellable=True) as pb:
+            stats = run_pipeline(new_r, targets, pb)
+        log_path = write_log(stats)
+        forms.alert(build_report(stats, new_r, log_path), title=TITLE)
     except Exception as e:
-        forms.alert("布置过程发生异常:\n" + str(e) + "\n\n" + traceback.format_exc(), title="报错追踪")
+        forms.alert(u"布置过程发生异常（已尽量保留已完成的部分）：\n" + _err(e) + u"\n\n" + _u(traceback.format_exc()),
+                    title=TITLE)
 
 
 if __name__ == '__main__':
