@@ -958,12 +958,12 @@ def _lower_partners(el, r):
             zc = (pb.Min.Z + pb.Max.Z) / 2.0
             ci_p = extract_curve_element_info(p)
             if ci_p is not None:
-                out.append(('line', ci_p, zc))
+                out.append(('line', ci_p, zc, get_elem_id_val(p)))
                 continue
             bi = extract_element_local_box(p)
             # 平面尺寸超过 20 m 的是场地、地形之类的大体量，不是要避开的交叉构件
             if bi is not None and max(bi[0], bi[1]) <= BIG_PARTNER_FT:
-                out.append(('box', bi, zc))
+                out.append(('box', bi, zc, get_elem_id_val(p)))
         except Exception:
             continue
     return my_zc, out
@@ -994,7 +994,7 @@ def _cross_skip(cross, x, y):
     if not cross:
         return False
     zc, lowers, hdir = cross
-    for kind, geom, pz in lowers:
+    for kind, geom, pz, _pid in lowers:
         if zc - pz <= CROSS_ZDIFF_FT:
             continue
         if kind == 'line' and hdir is not None:
@@ -1084,8 +1084,9 @@ def _pg_add(grid, x, y, z, host):
     grid.setdefault(k, []).append((x, y, z, host))
 
 
-def _build_pile_grid():
-    """模型里已有的插件松木桩位置，按方格分桶（跨主机去重用）。整次预布置/运行只建一次。"""
+def _build_pile_grid(exclude=None):
+    """模型里已有的插件松木桩位置，按方格分桶（跨主机去重用）。整次预布置/运行只建一次。
+    exclude 为待替换的主机编号集合：它们的旧桩不参与去重（布置时会被替换掉）。"""
     grid = {}
     for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_StructuralFoundation).OfClass(DB.FamilyInstance).WhereElementIsNotElementType().ToElements():
         try:
@@ -1094,6 +1095,8 @@ def _build_pile_grid():
             pt = e.Location.Point
             hid = _host_id_of(e)
         except Exception:
+            continue
+        if exclude and hid in exclude:
             continue
         _pg_add(grid, pt.X, pt.Y, pt.Z, hid)
     return grid
@@ -1170,7 +1173,7 @@ DEFAULT_RULES = {
     'max_bottom_m': '',
     'batch_size': 40,
     'scope': 'project',
-    'overwrite_old': False,
+    'overwrite_old': True,
     'categories': ['framing', 'generic', 'pipe', 'foundation', 'lighting'],
 }
 
@@ -1375,11 +1378,11 @@ def show_rules_dialog(r, sel_count):
     y += 34
 
     over_cb = WF.CheckBox()
-    over_cb.Text = u"重复布置时先清理旧垫层与旧桩（要重做时勾选；不勾选则跳过已布置过的）"
+    over_cb.Text = u"重新布置时用新的替换旧的垫层与桩（默认；不勾选则跳过已布置过的）"
     over_cb.Left = 12
     over_cb.Top = y
     over_cb.Width = 600
-    over_cb.Checked = bool(r.get('overwrite_old', False))
+    over_cb.Checked = bool(r.get('overwrite_old', True))
     form.Controls.Add(over_cb)
     y += 30
 
@@ -1592,7 +1595,7 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
 
     # 只删旧的垫层和桩，本次要布置的构件本身（protect）永远不删
     protect = ctx.get('protect', set())
-    old_ids = [i for i in existing.get(host, []) if get_elem_id_val(i) not in protect] if r.get('overwrite_old', False) else []
+    old_ids = [i for i in existing.get(host, []) if get_elem_id_val(i) not in protect] if r.get('overwrite_old', True) else []
     if old_ids:
         doc.Delete(List[DB.ElementId](old_ids))
         res['deleted'] = len(old_ids)
@@ -1827,12 +1830,27 @@ def _count_piles(curve_info, box_info, avoid=None, pgrid=None, host=None, cross=
     return kept
 
 
+def _low_first_key(el):
+    """布置顺序的依据：包围盒中心高程（从低到高）。取不到的排在最后。"""
+    try:
+        bb = el.get_BoundingBox(None)
+        if bb is None:
+            return 1e12
+        return (bb.Min.Z + bb.Max.Z) / 2.0
+    except Exception:
+        return 1e12
+
+
 def plan_targets(targets, r, pb=None):
     """预布置：只读几何、算桩数，不改模型。
     返回 (plans, skipped)：plans 为 (构件, 线式几何, 点式几何, 桩根数) 列表，skipped 为 (主机, 类别, 原因) 列表。"""
     apply_rules(r)
+    # 从低到高布：下方的构件先布，上方构件的桩在交叉处去避让它（交叉处保留最低一层的桩和垫层）
+    targets = sorted(targets, key=_low_first_key)
     avoid = _build_avoid_grid()
-    pgrid = _build_pile_grid()
+    # 替换模式下，待替换构件的旧桩不参与去重
+    ex = set(get_elem_id_str(el) for el in targets) if r.get('overwrite_old', True) else None
+    pgrid = _build_pile_grid(ex)
     plans = []
     skipped = []
     n = len(targets)
@@ -1875,7 +1893,8 @@ def run_pipeline(r, plans, skipped=None, pb=None):
     # 本次要布置的构件本身不能被当成旧图元删掉
     ctx['protect'] = set(get_elem_id_val(p[0]) for p in plans if _alive(p[0]))
     # 跨主机去重：模型里已有的桩 + 本次新布的桩，中心距都不得小于 500 mm
-    ctx['pile_grid'] = _build_pile_grid()
+    ex = set(get_elem_id_str(p[0]) for p in plans if _alive(p[0])) if r.get('overwrite_old', True) else None
+    ctx['pile_grid'] = _build_pile_grid(ex)
     existing = build_existing_foundation_index(doc, [p[0] for p in plans if _alive(p[0])])
     bs = max(1, int(r.get('batch_size', 40)))
     n = len(plans)
@@ -2233,7 +2252,7 @@ def _layout_flow():
 
         # 第二步：跳过已经布置过的（已有垫层或桩）。规则里勾选「重复布置时先清理」才会重做
         already = 0
-        if not new_r.get('overwrite_old', False):
+        if not new_r.get('overwrite_old', True):
             targets, already = _split_done(targets)
         if not targets:
             forms.alert(u"选中的 {} 个构件都已经布置过了，没有需要生成的。\n"
