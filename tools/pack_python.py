@@ -21,6 +21,7 @@ PLUGINS = {
     "一键清除井标记":     ("well-clear-marks","数据处理", "除"),
     "强电井清洗合并":     ("elv-merge",       "数据处理", "并"),
     "一键框选提量导出Excel": ("quantity-export", "数据处理", "量"),
+    "一键图纸归类与图框编号": ("sheet-organize", "出图打印", "归"),
     "一键钢筋三维实体显示": ("rebar-3d-view", "数据处理", "筋"),
     "一键单构件快速配筋": ("rebar-cage", "数据处理", "配"),
     "一键导出井大样DWG":  ("export-dwg",      "导出",     "DWG"),
