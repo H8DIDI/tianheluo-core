@@ -867,7 +867,7 @@ DEFAULT_RULES = {
     'max_bottom_m': '',
     'batch_size': 40,
     'scope': 'project',
-    'overwrite_old': True,
+    'overwrite_old': False,
     'categories': ['framing', 'generic', 'pipe', 'foundation', 'lighting'],
 }
 
@@ -1072,11 +1072,11 @@ def show_rules_dialog(r, sel_count):
     y += 34
 
     over_cb = WF.CheckBox()
-    over_cb.Text = u"重复布置时先清理旧垫层与旧桩（推荐）"
+    over_cb.Text = u"重复布置时先清理旧垫层与旧桩（要重做时勾选；不勾选则跳过已布置过的）"
     over_cb.Left = 12
     over_cb.Top = y
     over_cb.Width = 600
-    over_cb.Checked = bool(r.get('overwrite_old', True))
+    over_cb.Checked = bool(r.get('overwrite_old', False))
     form.Controls.Add(over_cb)
     y += 30
 
@@ -1129,7 +1129,7 @@ def show_rules_dialog(r, sel_count):
         for key, text, lo, hi in NUMBER_FIELDS:
             boxes[key].Text = _fmt_num(DEFAULT_RULES[key])
         scope_cb.SelectedIndex = 0
-        over_cb.Checked = True
+        over_cb.Checked = bool(DEFAULT_RULES['overwrite_old'])
         for k, c in cat_boxes.items():
             c.Checked = k in DEFAULT_RULES['categories']
 
@@ -1286,7 +1286,7 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
             res['skip'] = u'无法读取几何'
             return res
 
-    old_ids = list(existing.get(host, [])) if r.get('overwrite_old', True) else []
+    old_ids = list(existing.get(host, [])) if r.get('overwrite_old', False) else []
     if old_ids:
         doc.Delete(List[DB.ElementId](old_ids))
         res['deleted'] = len(old_ids)
@@ -1800,26 +1800,26 @@ def _classify_group(e):
     return None
 
 
-def _choose_groups(plans):
-    """分组执行（分系统）：列出每组的构件数、桩根数和例子名，让用户选这次布置哪几组。
-    只有一组时直接返回；用户取消或一组都没选，返回空列表。"""
+def _choose_groups(targets):
+    """分组执行（分系统）：先按名字把构件分组（不读几何，很快），列出每组的构件数和例子名，
+    让用户选这次布置哪几组。只有一组时直接返回；用户取消或一组都没选，返回空列表。"""
+    tagged = [(el, _classify_group(el) or UNCLASSIFIED) for el in targets]
     groups = {}
-    for p in plans:
-        g = groups.setdefault(p[4], {'n': 0, 'piles': 0, 'names': []})
+    for el, k in tagged:
+        g = groups.setdefault(k, {'n': 0, 'names': []})
         g['n'] += 1
-        g['piles'] += p[3]
         if len(g['names']) < 2:
-            nm = _family_label(p[0]) or _u(get_type_name(p[0]) or u'')
+            nm = _family_label(el) or _u(get_type_name(el) or u'')
             if nm and nm not in g['names']:
                 g['names'].append(nm)
     names = [k for k in GROUP_ORDER + [UNCLASSIFIED] if k in groups]
     if len(names) <= 1:
-        return plans
+        return targets
     labels = {}
     options = []
     for k in names:
         g = groups[k]
-        lab = u'{}（{} 个构件，{} 根桩）例：{}'.format(k, g['n'], g['piles'], u'、'.join(g['names']) or u'-')
+        lab = u'{}（{} 个构件）例：{}'.format(k, g['n'], u'、'.join(g['names']) or u'-')
         labels[lab] = k
         options.append(lab)
     picked = forms.SelectFromList.show(options, multiselect=True, title=TITLE,
@@ -1827,7 +1827,15 @@ def _choose_groups(plans):
     if not picked:
         return []
     chosen = set(labels[x] for x in picked if x in labels)
-    return [p for p in plans if p[4] in chosen]
+    return [el for el, k in tagged if k in chosen]
+
+
+def _split_done(targets):
+    """跳过已经布置过的构件：主机上已经有插件生成的垫层或桩就不再布置（只读，不改模型）。
+    返回 (还需要布置的构件, 跳过的个数)。"""
+    idx = build_existing_foundation_index(doc, targets)
+    todo = [el for el in targets if not idx.get(get_elem_id_str(el))]
+    return todo, len(targets) - len(todo)
 
 
 def _coverage_check(plans):
@@ -1871,14 +1879,25 @@ def _layout_flow():
             forms.alert(u"没有找到可布置的构件。\n请检查「规则」里的类别、范围和底标高过滤。", title=TITLE)
             return
 
-        # 第一步：预布置（只读几何、算桩数，不改模型）
+        # 第一步：先选组（只做名字分类，不读几何，很快）
+        targets = _choose_groups(targets)
+        if not targets:
+            return
+
+        # 第二步：跳过已经布置过的（已有垫层或桩）。规则里勾选「重复布置时先清理」才会重做
+        already = 0
+        if not new_r.get('overwrite_old', False):
+            targets, already = _split_done(targets)
+        if not targets:
+            forms.alert(u"选中的 {} 个构件都已经布置过了，没有需要生成的。\n"
+                        u"要重做，请在规则里勾选「重复布置时先清理旧垫层与旧桩」。".format(already), title=TITLE)
+            return
+
+        # 第三步：预布置（只读几何、算桩数，只针对选中且未布置过的构件，不改模型）
         with forms.ProgressBar(title=u"正在预布置（读取几何、计算桩数）...", cancellable=False) as pb:
             plans, skipped = plan_targets(targets, new_r, pb)
         if not plans:
             forms.alert(u"{} 个构件都无法读取几何，没有可布置的内容。".format(len(skipped)), title=TITLE)
-            return
-        plans = _choose_groups(plans)
-        if not plans:
             return
         n_line = sum(1 for p in plans if p[1] is not None)
         n_pile = sum(p[3] for p in plans)
@@ -1893,6 +1912,8 @@ def _layout_flow():
                                        _fmt_num(new_r['pad_thick_mm']), _fmt_num(new_r['pad_overhang_mm']),
                                        _fmt_num(new_r['pile_diam_mm']), _fmt_num(new_r['pile_len_m']),
                                        _fmt_num(new_r['pile_spacing_mm']))
+        if already:
+            q += u"\n已布置过、这次跳过 {} 个。".format(already)
         if n_pile > 30000:
             q += u"\n注意：松木桩超过 3 万根，建议分组、分次执行（每组结束后会保存）。"
         if not forms.alert(q, title=TITLE, yes=True, no=True):
