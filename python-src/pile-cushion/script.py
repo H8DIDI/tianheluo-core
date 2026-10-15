@@ -10,6 +10,7 @@ __doc__ = ("一键布置松木桩与垫层（天河落插件版）。\n"
 
 import math
 import os
+import re
 import json
 import time
 import traceback
@@ -881,7 +882,7 @@ DEFAULT_RULES = {
     'batch_size': 40,
     'scope': 'project',
     'overwrite_old': True,
-    'categories': ['framing', 'generic', 'pipe', 'conduit', 'foundation', 'floor', 'wall', 'column'],
+    'categories': ['framing', 'generic', 'pipe', 'foundation', 'lighting'],
 }
 
 NUMBER_FIELDS = [
@@ -905,6 +906,7 @@ CAT_OPTIONS = [
     ('floor', '楼板（基础底板）', [DB.BuiltInCategory.OST_Floors]),
     ('wall', '墙（挡土墙/沟壁）', [DB.BuiltInCategory.OST_Walls]),
     ('column', '结构柱（柱墩）', [DB.BuiltInCategory.OST_StructuralColumns]),
+    ('lighting', '照明设备（路灯）', [DB.BuiltInCategory.OST_LightingFixtures]),
 ]
 
 
@@ -1732,33 +1734,53 @@ def _system_name(e):
     return u''
 
 
+def _family_label(e):
+    """族名：实例取它的族类型（Symbol）上的族名；管道、系统族等没有 Symbol 的取图元自身的族名，取不到是空串。"""
+    sym = getattr(e, 'Symbol', None)
+    if sym:
+        return _u(get_fam_name(sym) or u'')
+    return _u(get_fam_name(e) or u'')
+
+
+# 井只在常规模型、结构基础里找（线管等同类别的其它构件不当井）
+_WELL_CATS = (u'常规模型', u'结构基础')
+# 强电井的族名是 ELE-EM1-I、ELE-EM2-L 这类：EM 后面紧跟数字
+_EM_RE = re.compile(r'(?<![A-Za-z])EM\d')
+
+
 def _classify_group(e):
-    """按类别、族名、类型名、图元名、系统名判断属于哪一组；归不进去返回 None。
-    关键字是按常见命名猜的，第一次在真实模型里运行时要核对（分组列表里会显示每组的例子名）。"""
+    """按这个模型的实际命名判断属于哪一组；归不进去返回 None（进「未归类」）。
+    强电=EM1/EM2，弱电=ELV，电信=TELCO，低压=ELE-LV/低压拉线井，雨水井=雨水井族，
+    排水井(MH)=污水井（待确认），BX 或雨水沟=雨水井的涵箱（待确认），
+    结构框架里带 WAY/排管/孔的=排管，照明设备 LAMP POLE=路灯。"""
     cat = _u(e.Category.Name) if e.Category else u''
-    text = u' '.join([cat, _u(get_fam_name(e) or u''), _u(get_type_name(e) or u''),
-                      _u(get_elem_name(e) or u''), _system_name(e)])
-    if u'路灯' in text:
-        return u'路灯'
-    if u'井' in text:
-        if u'电信' in text:
-            return u'电信井'
-        if u'低压' in text:
-            return u'低压电井'
-        if u'强电' in text:
-            return u'强电井'
-        if u'弱电' in text:
-            return u'弱电井'
-    if u'涵' in text:
-        return u'雨水井的涵箱'
-    if u'雨水' in text and u'井' in text:
-        return u'雨水井'
-    if u'污水' in text and u'井' in text:
-        return u'污水井'
-    if u'排管' in text:
-        return u'结构框架的排管'
+    fam = _family_label(e)
+    typ = _u(get_type_name(e) or u'')
+    text = u' '.join([cat, fam, typ, _u(get_elem_name(e) or u''), _system_name(e)])
+    up = text.upper()
+    if cat == u'照明设备':
+        return u'路灯' if (u'LAMP' in up or u'POLE' in up or u'路灯' in text) else None
     if cat == u'管道':
         return u'污水管道' if u'污水' in text else u'其他系统的管道'
+    if cat in _WELL_CATS:
+        if u'电信' in text or u'TELCO' in up:
+            return u'电信井'
+        if u'低压' in text or u'ELE-LV' in up:
+            return u'低压电井'
+        if _EM_RE.search(text) or u'强电' in text:
+            return u'强电井'
+        if u'ELV' in up or u'弱电' in text:
+            return u'弱电井'
+        if u'雨水井' in text:
+            return u'雨水井'
+        if u'污水井' in text or u'排水井' in text:
+            return u'污水井'
+        return None
+    if cat == u'结构框架':
+        if u'雨水沟' in fam or re.match(r'BX\d', typ.strip().upper()) or u'涵' in text:
+            return u'雨水井的涵箱'
+        if u'排管' in text or u'WAY' in typ.upper() or u'孔' in fam:
+            return u'结构框架的排管'
     return None
 
 
@@ -1771,7 +1793,7 @@ def _choose_groups(plans):
         g['n'] += 1
         g['piles'] += p[3]
         if len(g['names']) < 2:
-            nm = _u(get_fam_name(p[0]) or u'')
+            nm = _family_label(p[0]) or _u(get_type_name(p[0]) or u'')
             if nm and nm not in g['names']:
                 g['names'].append(nm)
     names = [k for k in GROUP_ORDER + [UNCLASSIFIED] if k in groups]
