@@ -930,42 +930,92 @@ CROSS_ZDIFF_FT = 0.3 / 0.3048      # 两构件中心高差超过 300 mm 才算�
 BIG_PARTNER_FT = 20.0 / 0.3048     # 平面尺寸超过 20 m 的点式构件（场地、地形）不作为交叉对象
 
 
-def _lower_partners(el, r):
-    """与布置对象在平面上交叉、且位于它下方的构件（用于：上方的构件在交叉位置不布桩、不布垫层）。
-    用 Revit 的包围盒过滤只查附近的构件，再逐个精确判断。返回 (本构件中心高程, [(类型, 几何, 中心高程)])；
-    类型为 'line'（线式几何）或 'box'（点式几何）。插件生成的桩和垫层不算。"""
-    bb = el.get_BoundingBox(None)
+# 同一次点击内共享的缓存（每次点击脚本重新执行，所以不会跨次残留）
+_CACHE = {}
+_UNSET_GEOM = object()
+PARTNER_MAX_SPAN_FT = 150.0 / 0.3048   # 平面尺寸超过 150 m 的（整个场地之类）不进交叉索引
+
+
+def _build_partner_grid(r):
+    """本次点击中所有可能交叉的构件（启用类别、非插件生成）的包围盒，按 5 m 方格分桶，只建一次。
+    几何（线式或点式）在真正需要时才读取，并缓存。"""
+    grid = {}
     bics = _enabled_bics(r)
-    if bb is None or not bics:
-        return None, []
-    m = 1.0 / 0.3048
-    outline = DB.Outline(DB.XYZ(bb.Min.X - m, bb.Min.Y - m, bb.Min.Z - m),
-                         DB.XYZ(bb.Max.X + m, bb.Max.Y + m, bb.Max.Z + m))
+    if not bics:
+        return grid
     col = DB.FilteredElementCollector(doc)\
         .WherePasses(DB.ElementMulticategoryFilter(List[DB.BuiltInCategory](bics)))\
-        .WherePasses(DB.BoundingBoxIntersectsFilter(outline))\
         .WhereElementIsNotElementType()
-    my_zc = (bb.Min.Z + bb.Max.Z) / 2.0
-    my_id = get_elem_id_val(el)
-    out = []
+    cell = AVOID_CELL_M / 0.3048
     for p in col.ToElements():
         try:
-            if get_elem_id_val(p) == my_id or is_tool_made(p):
+            if is_tool_made(p):
                 continue
             pb = p.get_BoundingBox(None)
-            if pb is None:
+            if pb is None or max(pb.Max.X - pb.Min.X, pb.Max.Y - pb.Min.Y) > PARTNER_MAX_SPAN_FT:
                 continue
-            zc = (pb.Min.Z + pb.Max.Z) / 2.0
-            ci_p = extract_curve_element_info(p)
-            if ci_p is not None:
-                out.append(('line', ci_p, zc, get_elem_id_val(p)))
-                continue
-            bi = extract_element_local_box(p)
-            # 平面尺寸超过 20 m 的是场地、地形之类的大体量，不是要避开的交叉构件
-            if bi is not None and max(bi[0], bi[1]) <= BIG_PARTNER_FT:
-                out.append(('box', bi, zc, get_elem_id_val(p)))
+            ent = {'bb': (pb.Min.X, pb.Min.Y, pb.Min.Z, pb.Max.X, pb.Max.Y, pb.Max.Z),
+                   'id': get_elem_id_val(p), 'el': p, 'geom': _UNSET_GEOM}
+            for gx in range(int(math.floor(pb.Min.X / cell)), int(math.floor(pb.Max.X / cell)) + 1):
+                for gy in range(int(math.floor(pb.Min.Y / cell)), int(math.floor(pb.Max.Y / cell)) + 1):
+                    grid.setdefault((gx, gy), []).append(ent)
         except Exception:
             continue
+    return grid
+
+
+def _partner_geom(ent):
+    """下方候选构件的几何：('line', 线式几何) 或 ('box', 点式几何)；太大或读不到返回 None。结果缓存在条目里。"""
+    g = ent['geom']
+    if g is _UNSET_GEOM:
+        g = None
+        try:
+            p = ent['el']
+            ci_p = extract_curve_element_info(p)
+            if ci_p is not None:
+                g = ('line', ci_p)
+            else:
+                bi = extract_element_local_box(p)
+                # 平面尺寸超过 20 m 的是场地、地形之类的大体量，不是要避开的交叉构件
+                if bi is not None and max(bi[0], bi[1]) <= BIG_PARTNER_FT:
+                    g = ('box', bi)
+        except Exception:
+            g = None
+        ent['geom'] = g
+    return g
+
+
+def _lower_partners(el, r):
+    """与布置对象在平面上交叉、且位于它下方的构件（用于：上方的构件在交叉位置不布桩、不布垫层）。
+    在本次点击建好的包围盒索引里查，再精确判断。返回 (本构件中心高程, [(类型, 几何, 中心高程, 编号)])。
+    插件生成的桩和垫层不算。"""
+    if 'partner' not in _CACHE:
+        _CACHE['partner'] = _build_partner_grid(r)
+    pg = _CACHE['partner']
+    bb = el.get_BoundingBox(None)
+    if bb is None:
+        return None, []
+    my_zc = (bb.Min.Z + bb.Max.Z) / 2.0
+    my_id = get_elem_id_val(el)
+    m = 1.0 / 0.3048
+    x0, y0, x1, y1 = bb.Min.X - m, bb.Min.Y - m, bb.Max.X + m, bb.Max.Y + m
+    cell = AVOID_CELL_M / 0.3048
+    seen = set()
+    out = []
+    for gx in range(int(math.floor(x0 / cell)), int(math.floor(x1 / cell)) + 1):
+        for gy in range(int(math.floor(y0 / cell)), int(math.floor(y1 / cell)) + 1):
+            for ent in pg.get((gx, gy), []):
+                pid = ent['id']
+                if pid == my_id or pid in seen:
+                    continue
+                seen.add(pid)
+                px0, py0, pz0, px1, py1, pz1 = ent['bb']
+                if px1 < x0 or px0 > x1 or py1 < y0 or py0 > y1:
+                    continue
+                geom = _partner_geom(ent)
+                if geom is None:
+                    continue
+                out.append((geom[0], geom[1], (pz0 + pz1) / 2.0, pid))
     return my_zc, out
 
 
@@ -1082,6 +1132,11 @@ def _pg_add(grid, x, y, z, host):
     """登记一根桩的位置（跨主机去重用）。"""
     k = (int(math.floor(x / PG_CELL_FT)), int(math.floor(y / PG_CELL_FT)))
     grid.setdefault(k, []).append((x, y, z, host))
+
+
+def _copy_grid(grid):
+    """桩位索引的副本（每个方格的列表各复制一份，里面的元组不可变，可以共用）。"""
+    return dict((k, list(v)) for k, v in grid.items())
 
 
 def _build_pile_grid(exclude=None):
@@ -1574,11 +1629,11 @@ def prepare_ctx(r):
         'pad_overhang_ft': PAD_OVERHANG_MM * MM_TO_FT,
         'pile_spacing_ft': PILE_SPACING_MM * MM_TO_FT,
         'pile_len_ft': PILE_LEN_M / 0.3048,
-        'avoid': _build_avoid_grid(),
+        'avoid': _CACHE['avoid'] if 'avoid' in _CACHE else _build_avoid_grid(),
     }
 
 
-def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
+def process_one(elem, ctx, existing, r, curve_info=None, box_info=None, cross=_UNSET_GEOM):
     """处理一个构件：几何已在预布置时读好就直接用，否则现读（读不到就跳过，不动旧图元），再清旧图元、生成垫层和桩。"""
     host = get_elem_id_str(elem)
     cat_name = _u(elem.Category.Name) if elem.Category else u'构件'
@@ -1606,8 +1661,9 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
     pile_len_ft = ctx['pile_len_ft']
     pile_sym = ctx['pile_sym']
     level = ctx['level']
-    # 上方构件：在与下方构件交叉的位置不布桩、不布垫层
-    cross = _cross_info(elem, r)
+    # 上方构件：在与下方构件交叉的位置不布桩、不布垫层（预布置时已算好的直接用）
+    if cross is _UNSET_GEOM:
+        cross = _cross_info(elem, r)
 
     if curve_info is not None:
         res['kind'] = u'线式'
@@ -1712,12 +1768,12 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
     return res
 
 
-def _run_sub(elem, ctx, existing, r, curve_info=None, box_info=None):
+def _run_sub(elem, ctx, existing, r, curve_info=None, box_info=None, cross=_UNSET_GEOM):
     """单个构件放在子事务里：出错只回滚它自己，不影响同批的其他构件。"""
     st = DB.SubTransaction(doc)
     st.Start()
     try:
-        res = process_one(elem, ctx, existing, r, curve_info, box_info)
+        res = process_one(elem, ctx, existing, r, curve_info, box_info, cross)
         s = st.Commit()
         if s is not None and s != DB.TransactionStatus.Committed:
             raise Exception(u'子事务未提交')
@@ -1738,8 +1794,8 @@ def run_batch(plans, ctx, existing, r):
     t.Start()
     out = []
     try:
-        for el, curve_info, box_info, _n, _g in plans:
-            out.append((el, _run_sub(el, ctx, existing, r, curve_info, box_info)))
+        for el, curve_info, box_info, _n, _g, cr in plans:
+            out.append((el, _run_sub(el, ctx, existing, r, curve_info, box_info, cr)))
         s = t.Commit()
         if s != DB.TransactionStatus.Committed:
             return None
@@ -1788,7 +1844,7 @@ def _save_segment(stats):
 
 def _plan_z_ft(item):
     """预布置项里主机的底标高（ft）：线式取起点底标高，点式取底标高。"""
-    _el, curve_info, box_info, _n, _g = item
+    _el, curve_info, box_info, _n, _g, _cr = item
     if curve_info is not None:
         return curve_info['z_start_bot']
     return box_info[3]
@@ -1850,7 +1906,11 @@ def plan_targets(targets, r, pb=None):
     avoid = _build_avoid_grid()
     # 替换模式下，待替换构件的旧桩不参与去重
     ex = set(get_elem_id_str(el) for el in targets) if r.get('overwrite_old', True) else None
-    pgrid = _build_pile_grid(ex)
+    base = _build_pile_grid(ex)
+    # 预布置和正式布置共用这些索引（不再各建一遍）；计数时用副本，避免把计数过程中的桩留在基础索引里
+    _CACHE['avoid'] = avoid
+    _CACHE['pile_base'] = base
+    pgrid = _copy_grid(base)
     plans = []
     skipped = []
     n = len(targets)
@@ -1865,9 +1925,10 @@ def plan_targets(targets, r, pb=None):
             if curve_info is None and box_info is None:
                 skipped.append((host, cat, u'无法读取几何'))
             else:
+                cr = _cross_info(el, r)
                 plans.append((el, curve_info, box_info,
-                              _count_piles(curve_info, box_info, avoid, pgrid, host, _cross_info(el, r)),
-                              _classify_group(el) or UNCLASSIFIED))
+                              _count_piles(curve_info, box_info, avoid, pgrid, host, cr),
+                              _classify_group(el) or UNCLASSIFIED, cr))
         except Exception as ex:
             skipped.append((host, cat, _err(ex)))
         if pb is not None and (i % 50 == 0 or i == n - 1):
@@ -1894,7 +1955,7 @@ def run_pipeline(r, plans, skipped=None, pb=None):
     ctx['protect'] = set(get_elem_id_val(p[0]) for p in plans if _alive(p[0]))
     # 跨主机去重：模型里已有的桩 + 本次新布的桩，中心距都不得小于 500 mm
     ex = set(get_elem_id_str(p[0]) for p in plans if _alive(p[0])) if r.get('overwrite_old', True) else None
-    ctx['pile_grid'] = _build_pile_grid(ex)
+    ctx['pile_grid'] = _copy_grid(_CACHE['pile_base']) if 'pile_base' in _CACHE else _build_pile_grid(ex)
     existing = build_existing_foundation_index(doc, [p[0] for p in plans if _alive(p[0])])
     bs = max(1, int(r.get('batch_size', 40)))
     n = len(plans)
