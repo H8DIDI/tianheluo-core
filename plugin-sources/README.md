@@ -15,7 +15,7 @@
 | [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.2.0 | C#（源码在 `plugins/`） | didi | MIT |
 | [`quantity-export`](quantity-export/) | 一键框选提量导出Excel | 0.2.1 | Python | didi | MIT |
 | [`rebar-3d-view`](rebar-3d-view/) | 一键钢筋三维实体显示 | 0.1.0 | Python | didi | MIT |
-| [`rebar-cage`](rebar-cage/) | 一键单构件快速配筋 | 0.2.0 | Python | didi | MIT |
+| [`rebar-cage`](rebar-cage/) | 一键单构件快速配筋 | 0.2.1 | Python | didi | MIT |
 | [`schedule-excel`](schedule-excel/) | 明细表Excel互导 | 0.1.0 | C#（源码在 `plugins/`） | didi | 原创 |
 | [`sheet-manager`](sheet-manager/) | 图纸管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |
 | [`tag-check`](tag-check/) | 标注检查 | 0.2.0 | C#（源码在 `plugins/`） | didi | MIT |
