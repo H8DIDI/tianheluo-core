@@ -77,6 +77,31 @@ def get_elem_id_str(elem):
     return str(v) if v is not None else ""
 
 
+def _alive(el):
+    """图元是否还在模型里（布置过程中可能被删除或撤销，此时访问它会报错）。"""
+    try:
+        el.Id
+        return True
+    except Exception:
+        return False
+
+
+def _safe_host(el):
+    """主机编号；图元已失效时返回 '-'，不抛异常。"""
+    try:
+        return get_elem_id_str(el)
+    except Exception:
+        return u'-'
+
+
+def _safe_cat(el):
+    """类别名；图元已失效时返回「构件」，不抛异常。"""
+    try:
+        return _u(el.Category.Name) if el.Category else u'构件'
+    except Exception:
+        return u'构件'
+
+
 def get_type_name(elem):
     """安全获取族类型名称"""
     if elem is None:
@@ -182,6 +207,8 @@ def build_existing_foundation_index(target_doc, target_elements=None):
 
     for inst in col_inst:
         try:
+            if not is_tool_made(inst):
+                continue
             comm = ""
             p = inst.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
             if p and p.HasValue:
@@ -216,6 +243,8 @@ def build_existing_foundation_index(target_doc, target_elements=None):
 
     for ds in col_ds:
         try:
+            if not is_tool_made(ds):
+                continue
             host_id = None
             app_data = ds.ApplicationDataId or ""
             if "Host_" in app_data:
@@ -1367,7 +1396,9 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
             res['skip'] = u'无法读取几何'
             return res
 
-    old_ids = list(existing.get(host, [])) if r.get('overwrite_old', False) else []
+    # 只删旧的垫层和桩，本次要布置的构件本身（protect）永远不删
+    protect = ctx.get('protect', set())
+    old_ids = [i for i in existing.get(host, []) if get_elem_id_val(i) not in protect] if r.get('overwrite_old', False) else []
     if old_ids:
         doc.Delete(List[DB.ElementId](old_ids))
         res['deleted'] = len(old_ids)
@@ -1483,7 +1514,7 @@ def _run_sub(elem, ctx, existing, r, curve_info=None, box_info=None):
                 st.RollBack()
         except Exception:
             pass
-        return {'host': get_elem_id_str(elem), 'cat': _u(elem.Category.Name) if elem.Category else u'构件',
+        return {'host': _safe_host(elem), 'cat': _safe_cat(elem),
                 'error': _err(ex), 'pads': 0, 'piles': 0, 'deleted': 0}
 
 
@@ -1506,7 +1537,7 @@ def run_batch(plans, ctx, existing, r):
 
 
 def _account(stats, el, res, existing):
-    host = res.get('host') or get_elem_id_str(el)
+    host = res.get('host') or _safe_host(el)
     cat = res.get('cat') or u'构件'
     if res.get('error'):
         stats['failed'].append((host, cat, res['error']))
@@ -1620,7 +1651,9 @@ def run_pipeline(r, plans, skipped=None, pb=None):
     if ctx is None:
         stats['error'] = u'未能加载或创建松木桩族/标高（请检查项目基础族）'
         return stats
-    existing = build_existing_foundation_index(doc, [p[0] for p in plans])
+    # 本次要布置的构件本身不能被当成旧图元删掉
+    ctx['protect'] = set(get_elem_id_val(p[0]) for p in plans if _alive(p[0]))
+    existing = build_existing_foundation_index(doc, [p[0] for p in plans if _alive(p[0])])
     bs = max(1, int(r.get('batch_size', 40)))
     n = len(plans)
     i = 0
@@ -1629,27 +1662,40 @@ def run_pipeline(r, plans, skipped=None, pb=None):
         if pb is not None and pb.cancelled:
             stats['cancelled'] = True
             break
-        batch = plans[i:i + bs]
-        out = run_batch(batch, ctx, existing, r)
-        if out is None:
-            out = []
-            for item in batch:
-                el = item[0]
-                one = run_batch([item], ctx, existing, r)
-                if one is None:
-                    out.append((el, {'host': get_elem_id_str(el),
-                                     'cat': _u(el.Category.Name) if el.Category else u'构件',
-                                     'error': u'Revit 提交失败（已回滚，该构件跳过）'}))
-                else:
-                    out.extend(one)
+        first_batch = (i == 0)
+        chunk = plans[i:i + bs]
+        i += len(chunk)
+        # 布置前先确认构件还在模型里（可能已被删除或撤销），不在的记入失败明细，不影响其它构件
+        batch = []
+        for item in chunk:
+            if _alive(item[0]):
+                batch.append(item)
+            else:
+                stats['failed'].append((u'-', u'构件', u'布置前已不存在（被删除或撤销），已跳过'))
+        out = []
+        if batch:
+            try:
+                out = run_batch(batch, ctx, existing, r)
+                if out is None:
+                    out = []
+                    for item in batch:
+                        el = item[0]
+                        one = run_batch([item], ctx, existing, r)
+                        if one is None:
+                            out.append((el, {'host': _safe_host(el), 'cat': _safe_cat(el),
+                                             'error': u'Revit 提交失败（已回滚，该构件跳过）'}))
+                        else:
+                            out.extend(one)
+            except Exception as ex:
+                out = [(item[0], {'host': _safe_host(item[0]), 'cat': _safe_cat(item[0]), 'error': _err(ex)})
+                       for item in batch]
         for el, res in out:
             _account(stats, el, res, existing)
             seg_piles += res.get('piles', 0)
-        if i == 0 and not _heights_ok(batch, out):
+        if first_batch and batch and not _heights_ok(batch, out):
             stats['error'] = (u'松木桩高程与主机底标高相差超过 10 m，已停止。'
                               u'首批已生成的桩位置不对，需要先删除（备注含「宿主」的松木桩）再检查设置。')
             break
-        i += len(batch)
         if seg_piles >= SAVE_EVERY_PILES:
             _save_segment(stats)
             seg_piles = 0
@@ -1662,7 +1708,7 @@ def run_pipeline(r, plans, skipped=None, pb=None):
         _save_segment(stats)
     if not stats['cancelled'] and not stats.get('error'):
         try:
-            stats['coverage'] = _coverage_check(plans)
+            stats['coverage'] = _coverage_check([p for p in plans if _alive(p[0])])
         except Exception as ex:
             stats['coverage_error'] = _err(ex)
     stats['seconds'] = time.time() - t0
