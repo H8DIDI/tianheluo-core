@@ -617,6 +617,134 @@ def _old_detail_candidates(doc):
     return out
 
 
+def _mark_of(elem):
+    """井的 Mark（井号，如 AA-01）。取不到返回空串。"""
+    p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+    return p.AsString().strip() if (p and p.AsString()) else ""
+
+
+def _scan_existing_sheets(doc):
+    """扫描模型里已有的「井大样_」图纸，返回 {井号: [(图纸 ElementId, 图纸上的视图 ElementId 列表), ...]}。
+    历史图纸可能已被改过图纸名/图号（例如 图纸名=井大样_LV-L-026、图号=LV-L-026，
+    而井的 Mark 其实是 L-026），单靠图纸名匹配不到。因此两个键都登记：
+      1) 优先用图纸上视图名里的 "AG-<井编号>-<4位随机>" 反推井编号；
+      2) 图纸名 "井大样_" 之后的后缀。
+    「重新生成即替换」和「出图进度」共用这一份索引。"""
+    stale_sheets = {}
+    try:
+        _vp_by_sheet = {}
+        for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
+            try:
+                _vp_by_sheet.setdefault(_vp.OwnerViewId.Value, []).append(_vp.ViewId)
+            except:
+                pass
+        for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
+            try:
+                _nm = _s.Name or ""
+                if not _nm.startswith("井大样_"):
+                    continue
+                _suffix = _nm[len("井大样_"):]
+                _kids = _vp_by_sheet.get(_s.Id.Value, [])
+                _tag = None
+                for _vid in _kids:
+                    _vv = doc.GetElement(_vid)
+                    if not (_vv and _vv.Name):
+                        continue
+                    _parts = _vv.Name.split("_", 1)
+                    if len(_parts) != 2 or not _parts[1].startswith("AG-"):
+                        continue
+                    _seg = _parts[1].split("-")
+                    if len(_seg) >= 3:
+                        _tag = "-".join(_seg[1:-1])
+                    break
+                _keys = []
+                if _tag and _tag not in _keys:
+                    _keys.append(_tag)
+                if _suffix not in _keys:
+                    _keys.append(_suffix)
+                for _k in _keys:
+                    stale_sheets.setdefault(_k, []).append((_s.Id, _kids))
+            except:
+                pass
+    except:
+        pass
+    return stale_sheets
+
+
+_SYSTEM_PREFIXES = ["AA-", "BB-", "A-", "B-", "T-", "L-", "E-", "Y-", "室内-A-", "室内-T-", "室内-E-", "室内-L-"]
+
+
+def _well_sort_key(mk):
+    """井的排序：先按系统（AA、BB、A、B、T、L、E、Y、室内各组），同系统内按号。"""
+    for _i, _p in enumerate(_SYSTEM_PREFIXES):
+        if mk.startswith(_p):
+            return (_i, len(mk), mk)
+    return (len(_SYSTEM_PREFIXES), len(mk), mk)
+
+
+# 向导每个范围的井号判断（与下面的选择条件一致），只用来统计「已出 / 共」
+_WELL_GROUP_PRED = {
+    "【1】": lambda m: m in ("AA-01", "AA-02", "AA-03"),
+    "【2】": lambda m: m.startswith("AA-"),
+    "【3】": lambda m: m.startswith("BB-"),
+    "【4】": lambda m: m.startswith("A-") and not m.startswith("AA-"),
+    "【5】": lambda m: m.startswith("B-") and not m.startswith("BB-"),
+    "【6】": lambda m: m.startswith("T-"),
+    "【7】": lambda m: m.startswith("L-"),
+    "【8】": lambda m: m.startswith("E-"),
+    "【9】": lambda m: not m.startswith("室内-"),
+    "【10】": lambda m: m.startswith("室内-A-"),
+    "【11】": lambda m: m.startswith("室内-T-"),
+    "【12】": lambda m: m.startswith("室内-E-"),
+    "【13】": lambda m: m.startswith("室内-L-"),
+    "【14】": lambda m: m.startswith("室内-"),
+    "【15】": lambda m: True,
+}
+
+
+def _status_label(opt, wells, built):
+    """在向导的范围选项后面加上「[已出 X / 共 Y]」。"""
+    tag = opt.split("】")[0] + "】"
+    pred = _WELL_GROUP_PRED.get(tag)
+    if pred is None:
+        return opt
+    sel = [_mark_of(w) for w in wells if pred(_mark_of(w))]
+    done = len([m for m in sel if m in built])
+    return opt + "  [已出 %d / 共 %d]" % (done, len(sel))
+
+
+class _WellRow(object):
+    def __init__(self, well, label):
+        self.well = well
+        self.label = label
+
+
+class _WellStatusOption(forms.TemplateListItem):
+    @property
+    def name(self):
+        return self.item.label
+
+
+def _pick_well_status(wells, built):
+    """出图进度：列出全部井，标明已出图（及图纸张数）或未出图，只生成勾选的井。返回所选井的列表。"""
+    rows = []
+    for w in sorted(wells, key=lambda e: _well_sort_key(_mark_of(e))):
+        mk = _mark_of(w)
+        n = len(set(sid.Value for sid, _kids in built.get(mk, [])))
+        label = ("[已出 %d张] %s" % (n, mk)) if n else ("[未出]     %s" % mk)
+        rows.append(_WellRow(w, label))
+    n_done = len([r for r in rows if r.label.startswith("[已出")])
+    picked = forms.SelectFromList.show(
+        [_WellStatusOption(r) for r in rows],
+        title="出图进度：已出 {} 座，未出 {} 座（勾选要生成的井）".format(n_done, len(rows) - n_done),
+        button_name="生成所选井", multiselect=True)
+    if not picked:
+        return []
+    if not isinstance(picked, (list, tuple)):
+        picked = [picked]
+    return [getattr(r, "well", r) for r in picked]
+
+
 def main():
     try:
         global doc, uidoc
@@ -638,8 +766,18 @@ def main():
                 if e and e.Category and e.Category.Id.Value == int(DB.BuiltInCategory.OST_GenericModel):
                     valid_elems.append(e)
 
+        picked_from_status = False
         if not valid_elems:
             # 未在视图中手动选井时，弹出向导选择生成范围
+            def get_mark(elem):
+                p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+                return p.AsString().strip() if (p and p.AsString()) else ""
+
+            wells_with_mark = [e for e in all_model_wells if get_mark(e) and get_mark(e) != "室内"]
+            try:
+                built_map = _scan_existing_sheets(doc)
+            except:
+                built_map = {}
             menu_opts = [
                 '【1】先行测试：生成前 3 座样板井 (AA-01 ~ AA-03)',
                 '【2】AA- 强电井全系列 (AA-01 ~ AA-22, 共22座)',
@@ -658,6 +796,8 @@ def main():
                 '【15】全模型 947 座井 (824室外 + 123室内) 全量排队连续生成',
                 '【16】清理全部井大样图纸与视图（只清理，不出图）'
             ]
+            menu_opts = [_status_label(o, wells_with_mark, built_map) for o in menu_opts]
+            menu_opts.insert(0, '【0】出图进度：看哪些井已出图、哪些没有（勾选未出的井直接生成）')
             choice = forms.SelectFromList.show(
                 menu_opts,
                 title='一键井展开图 - 批量出图向导',
@@ -755,13 +895,12 @@ def main():
                                 title='清理结果')
                 return
 
-            def get_mark(elem):
-                p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
-                return p.AsString().strip() if (p and p.AsString()) else ""
-
-            wells_with_mark = [e for e in all_model_wells if get_mark(e) and get_mark(e) != "室内"]
-
-            if '【1】' in choice:
+            if '【0】' in choice:
+                picked_from_status = True
+                valid_elems = _pick_well_status(wells_with_mark, built_map)
+                if not valid_elems:
+                    return
+            elif '【1】' in choice:
                 targets = ["AA-01", "AA-02", "AA-03"]
                 valid_elems = [e for e in wells_with_mark if get_mark(e) in targets]
                 valid_elems.sort(key=lambda e: get_mark(e))
@@ -809,6 +948,25 @@ def main():
         if not valid_elems:
             forms.alert('未找到符合条件的预制井！', title='错误')
             return
+
+        # 出过图的井默认跳过，避免重复出图；从「出图进度」里勾选的井不再追问
+        if not picked_from_status:
+            try:
+                built_now = _scan_existing_sheets(doc)
+            except:
+                built_now = {}
+            done_ids = set(e.Id.Value for e in valid_elems if _mark_of(e) in built_now)
+            if done_ids:
+                skip_choice = forms.CommandSwitchWindow.show(
+                    ['跳过已出图的，只生成未出的（推荐）', '全部重做（替换已有图纸）'],
+                    message='所选 {} 座里有 {} 座已经出过图。'.format(len(valid_elems), len(done_ids)))
+                if not skip_choice:
+                    return
+                if '跳过' in skip_choice:
+                    valid_elems = [e for e in valid_elems if e.Id.Value not in done_ids]
+                    if not valid_elems:
+                        forms.alert('所选的井都已出过图，没有需要生成的。', title='一键井展开图')
+                        return
 
         # 规则与预览：按选中井的真实尺寸实时看排版效果，保存后用新规则生成
         try:
@@ -991,52 +1149,8 @@ def main():
             except:
                 master_view = None
 
-            # ---- 预扫描（只做一次）：建立「井编号 -> 该井既有井大样图纸」索引 ----
-            # 历史图纸可能已被改过图纸名/图号（例如 图纸名=井大样_LV-L-026、图号=LV-L-026，
-            # 而井的 Mark 其实是 L-026），单靠图纸名匹配不到。因此：
-            #   1) 优先用图纸上视图名里的 "AG-<井编号>-<4位随机>" 反推井编号；
-            #   2) 取不到时退回用图纸名 "井大样_" 之后的后缀。
-            stale_sheets = {}
-            try:
-                _vp_by_sheet = {}
-                for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
-                    try:
-                        _vp_by_sheet.setdefault(_vp.OwnerViewId.Value, []).append(_vp.ViewId)
-                    except:
-                        pass
-                for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
-                    try:
-                        _nm = _s.Name or ""
-                        if not _nm.startswith("井大样_"):
-                            continue
-                        _suffix = _nm[len("井大样_"):]
-                        _kids = _vp_by_sheet.get(_s.Id.Value, [])
-                        _tag = None
-                        for _vid in _kids:
-                            _vv = doc.GetElement(_vid)
-                            if not (_vv and _vv.Name):
-                                continue
-                            _parts = _vv.Name.split("_", 1)
-                            if len(_parts) != 2 or not _parts[1].startswith("AG-"):
-                                continue
-                            _seg = _parts[1].split("-")
-                            if len(_seg) >= 3:
-                                _tag = "-".join(_seg[1:-1])
-                            break
-                        # 双键索引：视图名反推的 tag 与图纸名后缀都登记。
-                        # 井 Mark 可能写作 "L-151"，也可能写作 "LV-L-151"（图纸被改过名），
-                        # 两个键都挂上才能都命中；重复时第二次删除会被 try 吞掉，不影响计数。
-                        _keys = []
-                        if _tag and _tag not in _keys:
-                            _keys.append(_tag)
-                        if _suffix not in _keys:
-                            _keys.append(_suffix)
-                        for _k in _keys:
-                            stale_sheets.setdefault(_k, []).append((_s.Id, _kids))
-                    except:
-                        pass
-            except:
-                pass
+            # ---- 预扫描（只做一次）：建立「井编号 -> 该井既有井大样图纸」索引，见 _scan_existing_sheets ----
+            stale_sheets = _scan_existing_sheets(doc)
 
             # 游离视图索引：视图名形如 北_AG-<井号>-<4位随机码>。图纸被删、视图却留着时，这些视图不在上面的图纸索引里，
             # 会一直堆积。这里按井号把所有这类视图登记下来，重新生成这口井之前先全部删掉。
