@@ -54,7 +54,6 @@ PILE_LEN_M = DEFAULT_PILE_LEN_M
 LINE_SINGLE_MAX_MM = DEFAULT_LINE_SINGLE_MAX_MM
 LINE_DOUBLE_MAX_MM = DEFAULT_LINE_DOUBLE_MAX_MM
 PILE_SYMBOL_NAME = "松木桩 - Φ75"
-_TOP_DELTA = [None]
 
 
 def get_elem_id_val(elem_or_id):
@@ -762,10 +761,11 @@ def place_single_pile(target_doc, pos_xy, z_target_top_ft, pile_symbol, level, p
         DB.Structure.StructuralType.Footing
     )
     
-    # 标高偏移设定
+    # 标高偏移设定：这个族的定位点 Z 就等于偏移值（不加标高）。
+    # 标高为 4390 m 的模型里若按「目标 - 标高」设置，桩会整体偏移 4390 m，所以这里直接设目标高程。
     p_offset = inst.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
     if p_offset and not p_offset.IsReadOnly:
-        p_offset.Set(z_target_top_ft - level.Elevation)
+        p_offset.Set(z_target_top_ft)
 
     # 桩长度（6.0m）
     p_len = inst.LookupParameter("桩长度")
@@ -780,20 +780,6 @@ def place_single_pile(target_doc, pos_xy, z_target_top_ft, pile_symbol, level, p
     p_embed = inst.LookupParameter("最小预埋件")
     if p_embed and not p_embed.IsReadOnly:
         p_embed.Set(0.0)
-
-    # 核心校准：消除族内部定义或基准面偏移，确保桩顶绝对贴齐垫层底
-    try:
-        if _TOP_DELTA[0] is None:
-            top_param = inst.LookupParameter("顶部高程")
-            if top_param and top_param.HasValue:
-                _TOP_DELTA[0] = top_param.AsDouble() - z_target_top_ft
-            else:
-                _TOP_DELTA[0] = 0.0
-        delta = _TOP_DELTA[0]
-        if abs(delta) > 1e-4 and p_offset and not p_offset.IsReadOnly:
-            p_offset.Set(p_offset.AsDouble() - delta)
-    except Exception:
-        pass
 
     # 关联宿主信息记录（用于防重覆盖索引）
     p_comments = inst.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
@@ -981,7 +967,6 @@ def apply_rules(r):
     LINE_SINGLE_MAX_MM = float(r['line_single_max_mm'])
     LINE_DOUBLE_MAX_MM = float(r['line_double_max_mm'])
     PILE_SYMBOL_NAME = u"松木桩 - Φ{}".format(int(PILE_DIAM_MM))
-    _TOP_DELTA[0] = None
 
 
 def _enabled_bics(r):
@@ -1336,6 +1321,8 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
             z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
             pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name)
         res['piles'] += len(piles)
+        if piles:
+            res['sample'] = piles[0]
         return res
 
     res['kind'] = u'点式'
@@ -1392,6 +1379,8 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
         doc, c_world, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot,
         pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name)
     res['piles'] += len(piles)
+    if piles:
+        res['sample'] = piles[0]
     return res
 
 
@@ -1465,6 +1454,29 @@ def _save_segment(stats):
         stats['saves'] += 1
     except Exception:
         stats['save_failed'] += 1
+
+
+def _plan_z_ft(item):
+    """预布置项里主机的底标高（ft）：线式取起点底标高，点式取底标高。"""
+    _el, curve_info, box_info, _n, _g = item
+    if curve_info is not None:
+        return curve_info['z_start_bot']
+    return box_info[3]
+
+
+def _heights_ok(batch, out):
+    """抽查这一批里第一根桩：它的定位高程要和主机底标高接近（相差超过 10 m 说明高程算错了）。
+    读不到定位就放行（不误停）。"""
+    for item, (_el, res) in zip(batch, out):
+        sample = res.get('sample')
+        if sample is None:
+            continue
+        try:
+            z_pile = sample.Location.Point.Z
+        except Exception:
+            return True
+        return abs(z_pile - _plan_z_ft(item)) <= 10.0 / 0.3048
+    return True
 
 
 def _count_piles(curve_info, box_info):
@@ -1557,6 +1569,10 @@ def run_pipeline(r, plans, skipped=None, pb=None):
         for el, res in out:
             _account(stats, el, res, existing)
             seg_piles += res.get('piles', 0)
+        if i == 0 and not _heights_ok(batch, out):
+            stats['error'] = (u'松木桩高程与主机底标高相差超过 10 m，已停止。'
+                              u'首批已生成的桩位置不对，需要先删除（备注含「宿主」的松木桩）再检查设置。')
+            break
         i += len(batch)
         if seg_piles >= SAVE_EVERY_PILES:
             _save_segment(stats)
