@@ -836,15 +836,13 @@ def _centered_grid(span_ft, spacing_ft):
 
 def _line_pile_points(p0, dir_vec, perp_vec, n_mid, t_start, t_end, z_start_bot, z_end_bot,
                       elem_wid_ft, pad_thick_ft, spacing_ft):
-    """线式构件（排管、管道）：每根桩的 (x, y, 桩顶高程)。纵向按中心到中心 spacing，沿实际坡度；
-    横向单排居中，双排在两侧，更宽为多排（同样中心到中心 spacing）。"""
+    """线式构件（排管、管道）：每根桩的 (x, y, 桩顶高程)。纵向、横向都按中心到中心 spacing 居中排布，纵向沿实际坡度。
+    横向：宽度不超过单排阈值只放中心一排，超过的按同样的 spacing 排多排（如 600–1000 mm 为两排，中心距 500）。"""
     t_span = max(0.0, t_end - t_start)
     t_mid = t_start + t_span / 2.0
     span_w = max(0.0, elem_wid_ft)
     if span_w <= LINE_SINGLE_MAX_MM * MM_TO_FT:
         rows = [0.0]
-    elif span_w <= LINE_DOUBLE_MAX_MM * MM_TO_FT:
-        rows = [-span_w / 2.0, span_w / 2.0]
     else:
         rows = _centered_grid(span_w, spacing_ft)
     pts = []
@@ -927,35 +925,89 @@ def _on_fitting(grid, x, y, z):
     return False
 
 
+PILE_MIN_GAP_FT = 0.495 / 0.3048   # 任意两根桩中心距的下限（比 500 mm 少 5 mm，容许浮点误差）
+PG_CELL_FT = 0.5 / 0.3048          # 桩位索引的方格大小（不小于 PILE_MIN_GAP）
+
+
+def _host_id_of(e):
+    """插件桩备注里记的主机编号；取不到返回 None。"""
+    cm = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+    s = cm.AsString() if cm is not None and cm.HasValue else u''
+    if s and 'Id:' in s:
+        return s.split('Id:')[1].split(')')[0].strip()
+    return None
+
+
+def _pg_add(grid, x, y, z, host):
+    """登记一根桩的位置（跨主机去重用）。"""
+    k = (int(math.floor(x / PG_CELL_FT)), int(math.floor(y / PG_CELL_FT)))
+    grid.setdefault(k, []).append((x, y, z, host))
+
+
+def _build_pile_grid():
+    """模型里已有的插件松木桩位置，按方格分桶（跨主机去重用）。整次预布置/运行只建一次。"""
+    grid = {}
+    for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_StructuralFoundation).OfClass(DB.FamilyInstance).WhereElementIsNotElementType().ToElements():
+        try:
+            if not is_tool_made(e) or not e.Symbol or 'Φ' not in (e.Symbol.Family.Name + e.Symbol.Name):
+                continue
+            pt = e.Location.Point
+            hid = _host_id_of(e)
+        except Exception:
+            continue
+        _pg_add(grid, pt.X, pt.Y, pt.Z, hid)
+    return grid
+
+
+def _near_other_pile(grid, x, y, z, host):
+    """附近（中心距不足 PILE_MIN_GAP、竖向在 3 m 内）是否已有别的主机的桩。同一主机内的桩不算冲突。"""
+    if not grid:
+        return False
+    gx = int(math.floor(x / PG_CELL_FT))
+    gy = int(math.floor(y / PG_CELL_FT))
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for x2, y2, z2, h2 in grid.get((gx + dx, gy + dy), []):
+                if h2 == host:
+                    continue
+                if abs(z2 - z) < 10.0 and math.hypot(x2 - x, y2 - y) < PILE_MIN_GAP_FT:
+                    return True
+    return False
+
+
 def layout_piles_for_curve(target_doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
                            z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
-                           spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None):
+                           spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None, pgrid=None):
     """沿排管/管道布置松木桩；压在管件上的跳过。返回 (创建的桩, 跳过根数)。"""
     created = []
     skipped = 0
     for x, y, z in _line_pile_points(p0, dir_vec, perp_vec, n_mid, t_start, t_end, z_start_bot, z_end_bot,
                                      elem_wid_ft, pad_thick_ft, spacing_ft):
-        if _on_fitting(avoid, x, y, z):
+        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host_elem_id):
             skipped += 1
             continue
         pile_inst = place_single_pile(target_doc, DB.XYZ(x, y, 0), z, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name)
         if pile_inst:
             created.append(pile_inst)
+            if pgrid is not None:
+                _pg_add(pgrid, x, y, z, host_elem_id)
     return created, skipped
 
 
 def layout_piles_for_box(target_doc, center_xy, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot_ft,
-                         spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None):
-    """在井/基础范围内布置松木桩网格；压在管件上的跳过。返回 (创建的桩, 跳过根数)。"""
+                         spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None, pgrid=None):
+    """在井/基础范围内布置松木桩网格；压在管件上、或与别的主机的桩重叠的跳过。返回 (创建的桩, 跳过根数)。"""
     created = []
     skipped = 0
     for x, y, z in _box_pile_points(center_xy, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot_ft, spacing_ft):
-        if _on_fitting(avoid, x, y, z):
+        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host_elem_id):
             skipped += 1
             continue
         pile_inst = place_single_pile(target_doc, DB.XYZ(x, y, 0), z, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name)
         if pile_inst:
             created.append(pile_inst)
+            if pgrid is not None:
+                _pg_add(pgrid, x, y, z, host_elem_id)
     return created, skipped
 
 
@@ -1431,7 +1483,8 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
         piles, sk = layout_piles_for_curve(
             doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
             z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
-            pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name, avoid=ctx.get('avoid'))
+            pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name, avoid=ctx.get('avoid'),
+            pgrid=ctx.get('pile_grid'))
         res['piles'] += len(piles)
         res['avoided'] = sk
         if piles:
@@ -1490,7 +1543,8 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
             res['pads'] += 1
     piles, sk = layout_piles_for_box(
         doc, c_world, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot,
-        pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name, avoid=ctx.get('avoid'))
+        pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name, avoid=ctx.get('avoid'),
+        pgrid=ctx.get('pile_grid'))
     res['piles'] += len(piles)
     res['avoided'] = sk
     if piles:
@@ -1594,7 +1648,7 @@ def _heights_ok(batch, out):
     return True
 
 
-def _count_piles(curve_info, box_info, avoid=None):
+def _count_piles(curve_info, box_info, avoid=None, pgrid=None, host=None):
     """预先算出这个构件会布多少根桩（与实际布置用同一套位置计算，并排除压在管件上的），只做算术，不碰模型。"""
     sp = PILE_SPACING_MM * MM_TO_FT
     pad_ft = PAD_THICK_MM * MM_TO_FT
@@ -1605,7 +1659,14 @@ def _count_piles(curve_info, box_info, avoid=None):
     else:
         len_ft, wid_ft, c_world, z_bot, _rot, u_dir, v_dir = box_info
         pts = _box_pile_points(c_world, u_dir, v_dir, len_ft, wid_ft, z_bot - pad_ft, sp)
-    return sum(1 for x, y, z in pts if not _on_fitting(avoid, x, y, z))
+    kept = 0
+    for x, y, z in pts:
+        if _on_fitting(avoid, x, y, z) or _near_other_pile(pgrid, x, y, z, host):
+            continue
+        kept += 1
+        if pgrid is not None:
+            _pg_add(pgrid, x, y, z, host)
+    return kept
 
 
 def plan_targets(targets, r, pb=None):
@@ -1613,6 +1674,7 @@ def plan_targets(targets, r, pb=None):
     返回 (plans, skipped)：plans 为 (构件, 线式几何, 点式几何, 桩根数) 列表，skipped 为 (主机, 类别, 原因) 列表。"""
     apply_rules(r)
     avoid = _build_avoid_grid()
+    pgrid = _build_pile_grid()
     plans = []
     skipped = []
     n = len(targets)
@@ -1627,7 +1689,7 @@ def plan_targets(targets, r, pb=None):
             if curve_info is None and box_info is None:
                 skipped.append((host, cat, u'无法读取几何'))
             else:
-                plans.append((el, curve_info, box_info, _count_piles(curve_info, box_info, avoid),
+                plans.append((el, curve_info, box_info, _count_piles(curve_info, box_info, avoid, pgrid, host),
                               _classify_group(el) or UNCLASSIFIED))
         except Exception as ex:
             skipped.append((host, cat, _err(ex)))
@@ -1653,6 +1715,8 @@ def run_pipeline(r, plans, skipped=None, pb=None):
         return stats
     # 本次要布置的构件本身不能被当成旧图元删掉
     ctx['protect'] = set(get_elem_id_val(p[0]) for p in plans if _alive(p[0]))
+    # 跨主机去重：模型里已有的桩 + 本次新布的桩，中心距都不得小于 500 mm
+    ctx['pile_grid'] = _build_pile_grid()
     existing = build_existing_foundation_index(doc, [p[0] for p in plans if _alive(p[0])])
     bs = max(1, int(r.get('batch_size', 40)))
     n = len(plans)
