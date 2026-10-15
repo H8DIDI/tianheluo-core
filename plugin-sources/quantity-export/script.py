@@ -300,14 +300,25 @@ def _build_xml(tables):
     return head + u'\n'.join(body) + u'\n</Workbook>\n'
 
 
-def _export_xlsx(tables, out_dir=None):
-    d = out_dir or OUT_DIR
-    if not os.path.exists(d):
-        os.makedirs(d)
-    path = os.path.join(d, u'提量_%s.xml' % time.strftime('%Y%m%d_%H%M'))
+def _write_xlsx(tables, path):
+    """把三张表写到用户选定的路径（不自动保存到别处）。"""
     with io.open(path, 'w', encoding='utf-8-sig') as f:
         f.write(_build_xml(tables))
     return path
+
+
+def _ask_save_path():
+    """弹出「另存为」对话框让用户选路径。取消返回 None。"""
+    dlg = WF.SaveFileDialog()
+    dlg.Title = u'导出提量表格（Excel 可直接打开）'
+    dlg.Filter = u'Excel 表格 (*.xml)|*.xml'
+    dlg.DefaultExt = u'xml'
+    dlg.AddExtension = True
+    dlg.FileName = u'提量_%s.xml' % time.strftime('%Y%m%d_%H%M')
+    dlg.InitialDirectory = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments)
+    if dlg.ShowDialog() == WF.DialogResult.OK:
+        return dlg.FileName
+    return None
 
 
 # ============================================================
@@ -431,7 +442,10 @@ def _show_window(tables, summary, src_txt, res):
 
     def _on_export(sender, args):
         try:
-            path = _export_xlsx(tables)
+            path = _ask_save_path()
+            if not path:
+                return
+            _write_xlsx(tables, path)
             forms.alert(u'已导出：\n' + path, title=TITLE)
         except Exception as ex:
             forms.alert(u'导出失败：\n%s' % ex, title=TITLE)
