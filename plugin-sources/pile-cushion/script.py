@@ -789,65 +789,145 @@ def place_single_pile(target_doc, pos_xy, z_target_top_ft, pile_symbol, level, p
     return inst
 
 
+# ============================================================
+# 布桩位置：预布置计数与实际布置共用同一套计算，保证桩数一致
+# ============================================================
+AVOID_CELL_M = 5.0            # 管件包围盒分桶的方格大小
+AVOID_MARGIN_FT = 0.1 / 0.3048  # 管件包围盒外扩 100 mm 才算压上
+
+
+def _centered_grid(span_ft, spacing_ft):
+    """以中心为基准、中心到中心 spacing 的排布，全部落在 span 之内。span 不足一个间距时只放中心一根。"""
+    if span_ft < 1e-6 or spacing_ft <= 0:
+        return [0.0]
+    n = int(math.floor(span_ft / spacing_ft + 1e-9)) + 1
+    start = -(n - 1) * spacing_ft / 2.0
+    return [start + i * spacing_ft for i in range(n)]
+
+
+def _line_pile_points(p0, dir_vec, perp_vec, n_mid, t_start, t_end, z_start_bot, z_end_bot,
+                      elem_wid_ft, pad_thick_ft, spacing_ft):
+    """线式构件（排管、管道）：每根桩的 (x, y, 桩顶高程)。纵向按中心到中心 spacing，沿实际坡度；
+    横向单排居中，双排在两侧，更宽为多排（同样中心到中心 spacing）。"""
+    t_span = max(0.0, t_end - t_start)
+    t_mid = t_start + t_span / 2.0
+    span_w = max(0.0, elem_wid_ft)
+    if span_w <= LINE_SINGLE_MAX_MM * MM_TO_FT:
+        rows = [0.0]
+    elif span_w <= LINE_DOUBLE_MAX_MM * MM_TO_FT:
+        rows = [-span_w / 2.0, span_w / 2.0]
+    else:
+        rows = _centered_grid(span_w, spacing_ft)
+    pts = []
+    for so in _centered_grid(t_span, spacing_ft):
+        t = t_mid + so
+        ratio = (t - t_start) / t_span if t_span > 1e-6 else 0.0
+        z_cush = z_start_bot + ratio * (z_end_bot - z_start_bot) - pad_thick_ft
+        for w in rows:
+            x = p0.X + t * dir_vec.X + (n_mid + w) * perp_vec.X
+            y = p0.Y + t * dir_vec.Y + (n_mid + w) * perp_vec.Y
+            pts.append((x, y, z_cush))
+    return pts
+
+
+def _box_pile_points(center_xy, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot_ft, spacing_ft):
+    """点式构件（井、基础）：在矩形范围内按中心到中心 spacing 居中布置网格。"""
+    pts = []
+    for u in _centered_grid(max(0.0, len_ft), spacing_ft):
+        for v in _centered_grid(max(0.0, wid_ft), spacing_ft):
+            x = center_xy.X + u * u_dir.X + v * v_dir.X
+            y = center_xy.Y + u * u_dir.Y + v * v_dir.Y
+            pts.append((x, y, z_cushion_bot_ft))
+    return pts
+
+
+AVOID_HALF_FT = 1.0 / 0.3048    # 管件按定位点为中心，半宽最多 1 m（管件包围盒有时会异常地大，不能直接用）
+
+
+def _fitting_box(e):
+    """管件/附件的避让范围 (x0, y0, z0, x1, y1, z1)，以定位点为中心，半宽不超过 AVOID_HALF_FT。取不到返回 None。"""
+    try:
+        bb = e.get_BoundingBox(None)
+    except Exception:
+        return None
+    if bb is None:
+        return None
+    pt = getattr(e.Location, 'Point', None)
+    if pt is not None:
+        cx, cy, cz = pt.X, pt.Y, pt.Z
+    else:
+        cx = (bb.Min.X + bb.Max.X) / 2.0
+        cy = (bb.Min.Y + bb.Max.Y) / 2.0
+        cz = (bb.Min.Z + bb.Max.Z) / 2.0
+    hx = min((bb.Max.X - bb.Min.X) / 2.0, AVOID_HALF_FT)
+    hy = min((bb.Max.Y - bb.Min.Y) / 2.0, AVOID_HALF_FT)
+    z0 = max(bb.Min.Z, cz - AVOID_HALF_FT)
+    z1 = min(bb.Max.Z, cz + AVOID_HALF_FT)
+    return (cx - hx, cy - hy, z0, cx + hx, cy + hy, z1)
+
+
+def _build_avoid_grid():
+    """管件、管道附件的避让范围，按方格分桶。整次预布置/运行只建一次。"""
+    grid = {}
+    cell = AVOID_CELL_M / 0.3048
+    for cat in (DB.BuiltInCategory.OST_PipeFitting, DB.BuiltInCategory.OST_PipeAccessory):
+        for e in DB.FilteredElementCollector(doc).OfCategory(cat).WhereElementIsNotElementType().ToElements():
+            box = _fitting_box(e)
+            if box is None:
+                continue
+            x0 = int(math.floor((box[0] - AVOID_MARGIN_FT) / cell))
+            x1 = int(math.floor((box[3] + AVOID_MARGIN_FT) / cell))
+            y0 = int(math.floor((box[1] - AVOID_MARGIN_FT) / cell))
+            y1 = int(math.floor((box[4] + AVOID_MARGIN_FT) / cell))
+            for gx in range(x0, x1 + 1):
+                for gy in range(y0, y1 + 1):
+                    grid.setdefault((gx, gy), []).append(box)
+    return grid
+
+
+def _on_fitting(grid, x, y, z):
+    """这根桩是否压在管件或管道附件上：平面落在避让范围内，且竖向与桩顶接近。"""
+    if not grid:
+        return False
+    cell = AVOID_CELL_M / 0.3048
+    for x0, y0, z0, x1, y1, z1 in grid.get((int(math.floor(x / cell)), int(math.floor(y / cell))), []):
+        if (x0 - AVOID_MARGIN_FT <= x <= x1 + AVOID_MARGIN_FT and
+                y0 - AVOID_MARGIN_FT <= y <= y1 + AVOID_MARGIN_FT and
+                z0 - 1.0 <= z <= z1 + 1.0):
+            return True
+    return False
+
+
 def layout_piles_for_curve(target_doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
                            z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
-                           spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name):
-    """
-    沿排管/管沟/管道中心线依其实际坡度连续布置松木桩。
-    纵向间距500mm，横向居中自适应单排、双排、多排，每根桩顶严格贴合垫层底面。
-    """
-    t_span = max(0.0, t_end - t_start)
-    n_l = max(1, int(round(t_span / spacing_ft))) if t_span > 0.2 else 1
-
-    span_w = max(0.0, elem_wid_ft)
-    w_threshold_1 = LINE_SINGLE_MAX_MM * MM_TO_FT
-    w_threshold_2 = LINE_DOUBLE_MAX_MM * MM_TO_FT
-
-    if span_w <= w_threshold_1:
-        w_coords = [0.0]
-    elif span_w <= w_threshold_2:
-        w_coords = [-span_w / 2.0, span_w / 2.0]
-    else:
-        n_w = max(2, int(round(span_w / spacing_ft)))
-        w_coords = [-span_w / 2.0 + j * (span_w / n_w) for j in range(n_w + 1)]
-
-    created_piles = []
-    for i in range(n_l + 1):
-        ratio = float(i) / float(n_l) if n_l > 0 else 0.0
-        t = t_start + ratio * t_span
-        z_host_bot = z_start_bot + ratio * (z_end_bot - z_start_bot)
-        z_cushion_bot = z_host_bot - pad_thick_ft
-
-        for w_offset in w_coords:
-            pt = DB.XYZ(p0.X, p0.Y, 0) + t * dir_vec + (n_mid + w_offset) * perp_vec
-            pile_inst = place_single_pile(target_doc, pt, z_cushion_bot, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name)
-            if pile_inst:
-                created_piles.append(pile_inst)
-
-    return created_piles
+                           spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None):
+    """沿排管/管道布置松木桩；压在管件上的跳过。返回 (创建的桩, 跳过根数)。"""
+    created = []
+    skipped = 0
+    for x, y, z in _line_pile_points(p0, dir_vec, perp_vec, n_mid, t_start, t_end, z_start_bot, z_end_bot,
+                                     elem_wid_ft, pad_thick_ft, spacing_ft):
+        if _on_fitting(avoid, x, y, z):
+            skipped += 1
+            continue
+        pile_inst = place_single_pile(target_doc, DB.XYZ(x, y, 0), z, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name)
+        if pile_inst:
+            created.append(pile_inst)
+    return created, skipped
 
 
 def layout_piles_for_box(target_doc, center_xy, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot_ft,
-                         spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name):
-    """在矩形井/基础实体范围内，按中心间距 500mm 居中布置松木桩网格，桩顶精确贴合垫层底面"""
-    span_u = max(0.0, len_ft)
-    span_v = max(0.0, wid_ft)
-
-    n_u = max(1, int(round(span_u / spacing_ft))) if span_u > 0.1 else 0
-    n_v = max(1, int(round(span_v / spacing_ft))) if span_v > 0.1 else 0
-
-    u_coords = [0.0] if n_u == 0 else [-span_u / 2.0 + i * (span_u / n_u) for i in range(n_u + 1)]
-    v_coords = [0.0] if n_v == 0 else [-span_v / 2.0 + j * (span_v / n_v) for j in range(n_v + 1)]
-
-    created_piles = []
-    for u in u_coords:
-        for v in v_coords:
-            pt = DB.XYZ(center_xy.X, center_xy.Y, 0) + u * u_dir + v * v_dir
-            pile_inst = place_single_pile(target_doc, pt, z_cushion_bot_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name)
-            if pile_inst:
-                created_piles.append(pile_inst)
-
-    return created_piles
+                         spacing_ft, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name, avoid=None):
+    """在井/基础范围内布置松木桩网格；压在管件上的跳过。返回 (创建的桩, 跳过根数)。"""
+    created = []
+    skipped = 0
+    for x, y, z in _box_pile_points(center_xy, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot_ft, spacing_ft):
+        if _on_fitting(avoid, x, y, z):
+            skipped += 1
+            continue
+        pile_inst = place_single_pile(target_doc, DB.XYZ(x, y, 0), z, pile_symbol, level, pile_len_ft, host_elem_id, host_cat_name)
+        if pile_inst:
+            created.append(pile_inst)
+    return created, skipped
 
 
 # ============================================================
@@ -1268,6 +1348,7 @@ def prepare_ctx(r):
         'pad_overhang_ft': PAD_OVERHANG_MM * MM_TO_FT,
         'pile_spacing_ft': PILE_SPACING_MM * MM_TO_FT,
         'pile_len_ft': PILE_LEN_M / 0.3048,
+        'avoid': _build_avoid_grid(),
     }
 
 
@@ -1316,11 +1397,12 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
             host, cat_name, name_prefix=name_prefix)
         if pad_ds:
             res['pads'] += 1
-        piles = layout_piles_for_curve(
+        piles, sk = layout_piles_for_curve(
             doc, p0, dir_vec, perp_vec, n_mid, t_start, t_end,
             z_start_bot, z_end_bot, elem_wid_ft, pad_thick_ft,
-            pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name)
+            pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name, avoid=ctx.get('avoid'))
         res['piles'] += len(piles)
+        res['avoided'] = sk
         if piles:
             res['sample'] = piles[0]
         return res
@@ -1375,10 +1457,11 @@ def process_one(elem, ctx, existing, r, curve_info=None, box_info=None):
             host, cat_name, name_prefix=u"井垫层")
         if pad_ds:
             res['pads'] += 1
-    piles = layout_piles_for_box(
+    piles, sk = layout_piles_for_box(
         doc, c_world, u_dir, v_dir, len_ft, wid_ft, z_cushion_bot,
-        pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name)
+        pile_spacing_ft, pile_sym, level, pile_len_ft, host, cat_name, avoid=ctx.get('avoid'))
     res['piles'] += len(piles)
+    res['avoided'] = sk
     if piles:
         res['sample'] = piles[0]
     return res
@@ -1434,6 +1517,7 @@ def _account(stats, el, res, existing):
     stats['done'] += 1
     stats['pads'] += res.get('pads', 0)
     stats['piles'] += res.get('piles', 0)
+    stats['avoided'] += res.get('avoided', 0)
     stats['deleted'] += res.get('deleted', 0)
     if res.get('kind') == u'线式':
         stats['line'] += 1
@@ -1479,33 +1563,25 @@ def _heights_ok(batch, out):
     return True
 
 
-def _count_piles(curve_info, box_info):
-    """预先算出这个构件会布多少根桩。循环次数与 layout_piles_for_curve / layout_piles_for_box 保持一致，只做算术，不碰模型。"""
+def _count_piles(curve_info, box_info, avoid=None):
+    """预先算出这个构件会布多少根桩（与实际布置用同一套位置计算，并排除压在管件上的），只做算术，不碰模型。"""
     sp = PILE_SPACING_MM * MM_TO_FT
+    pad_ft = PAD_THICK_MM * MM_TO_FT
     if curve_info is not None:
-        t_span = max(0.0, curve_info['t_end'] - curve_info['t_start'])
-        n_l = max(1, int(round(t_span / sp))) if t_span > 0.2 else 1
-        span_w = max(0.0, curve_info['elem_wid_ft'])
-        if span_w <= LINE_SINGLE_MAX_MM * MM_TO_FT:
-            n_w = 1
-        elif span_w <= LINE_DOUBLE_MAX_MM * MM_TO_FT:
-            n_w = 2
-        else:
-            n_w = max(2, int(round(span_w / sp))) + 1
-        return (n_l + 1) * n_w
-    span_u = max(0.0, box_info[0])
-    span_v = max(0.0, box_info[1])
-    n_u = max(1, int(round(span_u / sp))) if span_u > 0.1 else 0
-    n_v = max(1, int(round(span_v / sp))) if span_v > 0.1 else 0
-    cu = 1 if n_u == 0 else n_u + 1
-    cv = 1 if n_v == 0 else n_v + 1
-    return cu * cv
+        pts = _line_pile_points(curve_info['p0'], curve_info['dir_vec'], curve_info['perp_vec'], curve_info['n_mid'],
+                                curve_info['t_start'], curve_info['t_end'], curve_info['z_start_bot'],
+                                curve_info['z_end_bot'], curve_info['elem_wid_ft'], pad_ft, sp)
+    else:
+        len_ft, wid_ft, c_world, z_bot, _rot, u_dir, v_dir = box_info
+        pts = _box_pile_points(c_world, u_dir, v_dir, len_ft, wid_ft, z_bot - pad_ft, sp)
+    return sum(1 for x, y, z in pts if not _on_fitting(avoid, x, y, z))
 
 
 def plan_targets(targets, r, pb=None):
     """预布置：只读几何、算桩数，不改模型。
     返回 (plans, skipped)：plans 为 (构件, 线式几何, 点式几何, 桩根数) 列表，skipped 为 (主机, 类别, 原因) 列表。"""
     apply_rules(r)
+    avoid = _build_avoid_grid()
     plans = []
     skipped = []
     n = len(targets)
@@ -1520,7 +1596,7 @@ def plan_targets(targets, r, pb=None):
             if curve_info is None and box_info is None:
                 skipped.append((host, cat, u'无法读取几何'))
             else:
-                plans.append((el, curve_info, box_info, _count_piles(curve_info, box_info),
+                plans.append((el, curve_info, box_info, _count_piles(curve_info, box_info, avoid),
                               _classify_group(el) or UNCLASSIFIED))
         except Exception as ex:
             skipped.append((host, cat, _err(ex)))
@@ -1539,7 +1615,7 @@ def run_pipeline(r, plans, skipped=None, pb=None):
     skipped = list(skipped or [])
     stats = {'total': len(plans) + len(skipped), 'done': 0, 'pads': 0, 'piles': 0, 'deleted': 0,
              'line': 0, 'point': 0, 'skipped': skipped, 'failed': [], 'cancelled': False,
-             'error': None, 'seconds': 0.0, 'saves': 0, 'save_failed': 0}
+             'error': None, 'seconds': 0.0, 'saves': 0, 'save_failed': 0, 'avoided': 0}
     ctx = prepare_ctx(r)
     if ctx is None:
         stats['error'] = u'未能加载或创建松木桩族/标高（请检查项目基础族）'
@@ -1625,6 +1701,7 @@ def build_report(stats, r, log_path):
         u"• 生成垫层：{} 块".format(stats['pads']),
         u"• 生成松木桩：{} 根（Φ{} × {} m，总延米 {:.2f} m，木材 {:.2f} m³）".format(
             piles, _fmt_num(d), _fmt_num(pile_len), piles * pile_len, vol),
+        u"• 避开管件/管道附件：跳过 {} 根桩".format(stats.get('avoided', 0)),
         u"• 清理旧图元：{} 个".format(stats['deleted']),
         u"• 跳过：{} 个（读不到几何等）".format(len(stats['skipped'])),
         u"• 失败：{} 个（已回滚，不影响其它构件）".format(len(stats['failed'])),
