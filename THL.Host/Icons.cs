@@ -22,8 +22,34 @@ public static class Icons
     static Color Lighten(Color c, double k) => Color.FromRgb((byte)(c.R + (255 - c.R) * k), (byte)(c.G + (255 - c.G) * k), (byte)(c.B + (255 - c.B) * k));
     static Color Darken(Color c, double k) => Color.FromRgb((byte)(c.R * (1 - k)), (byte)(c.G * (1 - k)), (byte)(c.B * (1 - k)));
 
-    /// <summary>品牌 Logo：蓝色渐变圆角方块 + "THL"。</summary>
-    public static BitmapSource Logo(int px) => Badge(px, "THL", C("#3AA4FF"), fontScale: 0.36, bold: true);
+    /// <summary>
+    /// 品牌 Logo：天河一滴水 × 0.618 黄金螺线（与网站 tianheluo-web/tools/make_logo.py 同一方程）。
+    /// 16–32 px 用小尺寸版（纯色水珠 + 加粗螺线），64 px 用主图版（渐变水珠 + 细螺线）。
+    /// </summary>
+    public static BitmapSource Logo(int px) => DrawLogo(px, small: px < 48);
+
+    static BitmapSource DrawLogo(int px, bool small)
+    {
+        var dv = new DrawingVisual();
+        using (var dc = dv.RenderOpen())
+        {
+            dc.PushTransform(new ScaleTransform(px / 512.0, px / 512.0));   // 在 512×512 坐标里画
+            Brush fill = small
+                ? new SolidColorBrush(C("#1668DC"))
+                : new LinearGradientBrush(C("#3FA9FF"), C("#0B4FC4"), new Point(0.5, 0), new Point(0.5, 1));
+            dc.DrawGeometry(fill, null, LogoGeometry.Polyline(LogoGeometry.Drop, closed: true));
+            var pen = new Pen(Brushes.White, small ? 30 : 13)
+            {
+                StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round,
+            };
+            dc.DrawGeometry(null, pen, LogoGeometry.Polyline(small ? LogoGeometry.SpiralSmall : LogoGeometry.SpiralMain, closed: false));
+            dc.Pop();
+        }
+        var rtb = new RenderTargetBitmap(px, px, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(dv);
+        rtb.Freeze();
+        return rtb;
+    }
 
     /// <summary>插件图标。优先用插件包里的 icon.png，其次按清单的 glyph/color，最后按名字和分类推断。</summary>
     public static BitmapSource ForPlugin(Installed p, int px)
