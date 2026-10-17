@@ -1,7 +1,7 @@
 {
   "id": "export-dwg",
   "name": "一键导出井大样DWG",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "一键批量导出所有井大样图纸为 DWG 文件，自动合并外部参照，直接保存在指定文件夹中。",
   "category": "导出",
   "revit": "2026",

@@ -3,6 +3,7 @@ __title__ = '一键导出井大样DWG'
 __doc__ = '一键批量导出所有井大样图纸为 DWG 文件，自动合并外部参照，直接保存在指定文件夹中。'
 
 import os
+import re
 import sys
 import clr
 import System
@@ -13,41 +14,54 @@ doc = revit.doc
 uidoc = revit.uidoc
 
 
+# 井的编号：AA-01、室内-A-01 这种。改过名的图纸里也能找到
+_MARK_RE = re.compile(u"(室内-)?[A-Za-z]{1,3}-\\d+(?:-\\d+)?")
+
+
+def _well_mark(sheet):
+    """图纸对应的井编号；不是井大样图纸返回空串。
+    「井大样_」开头的，取前缀后面的部分；改过名的（例如 BTP-IF1 11KV-…-AA-01），
+    只要写过「图纸系统」参数（归类插件写入的），就取图名里最后的井编号。"""
+    nm = sheet.Name or u""
+    if nm.startswith(u"井大样_"):
+        return nm[len(u"井大样_"):]
+    p = sheet.LookupParameter(u"图纸系统")
+    if p is None or not p.HasValue or not p.AsString():
+        return u""
+    found = [m.group(0) for m in _MARK_RE.finditer(nm)]
+    return found[-1] if found else u""
+
+
 def main():
     try:
         # 1. 收集全模型所有井大样图纸
-        sheets = [
-            s for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements()
-            if s.Name and s.Name.startswith("井大样_")
-        ]
+        well = []
+        for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
+            mk = _well_mark(s)
+            if mk:
+                well.append((mk, s))
+        sheets = [s for mk, s in well]
+        marks = dict((int(s.Id.Value), mk) for mk, s in well)
+
+        def mk_of(s):
+            return marks.get(int(s.Id.Value), u"")
 
         if not sheets or len(sheets) == 0:
-            forms.alert('模型中未找到以【井大样_】开头的图纸！', title='提示')
+            forms.alert('模型中未找到井大样图纸（名称以「井大样_」开头，或已改名并写有「图纸系统」参数）！', title='提示')
             return
 
         # 2. 导出范围选择菜单
         # 菜单数量按当前模型实时统计 —— 原来写死的 947/127 等数字不会随后续
         # 增删图纸变化，容易让人以为"列表没刷新、导的还是老数据"。
-        def _pick(prefix, exclude=None):
-            out = []
-            for s in sheets:
-                nm = s.Name or ""
-                if not nm.startswith("井大样_" + prefix):
-                    continue
-                if exclude and nm.startswith("井大样_" + exclude):
-                    continue
-                out.append(s)
-            return out
-
         _grp = {
-            'in': [s for s in sheets if (s.Name or "").startswith("井大样_室内-")],
-            'AA': _pick("AA-"),
-            'BB': _pick("BB-"),
-            'A': _pick("A-", "AA-"),
-            'B': _pick("B-", "BB-"),
-            'T': _pick("T-"),
-            'L': _pick("L-"),
-            'E': _pick("E-"),
+            'in': [s for s in sheets if mk_of(s).startswith(u"室内-")],
+            'AA': [s for s in sheets if mk_of(s).startswith(u"AA-")],
+            'BB': [s for s in sheets if mk_of(s).startswith(u"BB-")],
+            'A': [s for s in sheets if mk_of(s).startswith(u"A-")],
+            'B': [s for s in sheets if mk_of(s).startswith(u"B-")],
+            'T': [s for s in sheets if mk_of(s).startswith(u"T-")],
+            'L': [s for s in sheets if mk_of(s).startswith(u"L-")],
+            'E': [s for s in sheets if mk_of(s).startswith(u"E-")],
         }
 
         menu_opts = [
@@ -77,21 +91,21 @@ def main():
             # 改成取当前全部井大样图纸的前 5 张，任何模型都能试跑。
             target_sheets = list(sheets)[:5]
         elif '【2】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_室内-")]
+            target_sheets = _grp['in']
         elif '【3】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_AA-")]
+            target_sheets = _grp['AA']
         elif '【4】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_BB-")]
+            target_sheets = _grp['BB']
         elif '【5】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_A-") and not s.Name.startswith("井大样_AA-")]
+            target_sheets = _grp['A']
         elif '【6】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_B-") and not s.Name.startswith("井大样_BB-")]
+            target_sheets = _grp['B']
         elif '【7】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_T-")]
+            target_sheets = _grp['T']
         elif '【8】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_L-")]
+            target_sheets = _grp['L']
         elif '【9】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_E-")]
+            target_sheets = _grp['E']
         elif '【10】' in choice:
             target_sheets = list(sheets)
 
