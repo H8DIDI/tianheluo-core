@@ -133,7 +133,7 @@ def fill_template(tpl, values):
     return out
 
 
-def make_cfg(name_tpl, num_tpl, start_txt, digits_txt, per_system, codes):
+def make_cfg(name_tpl, num_tpl, start_txt, digits_txt, per_system):
     """校验界面上的输入，返回 (cfg, 错误说明)。错误说明为空字符串表示没问题。"""
     name_tpl = (name_tpl or u"").strip()
     num_tpl = (num_tpl or u"").strip()
@@ -154,24 +154,20 @@ def make_cfg(name_tpl, num_tpl, start_txt, digits_txt, per_system, codes):
         "start": start,
         "digits": digits,
         "per_system": bool(per_system),
-        "codes": dict(codes),
     }
     return cfg, u""
 
 
-def build_plan(items, cfg, hints=None):
-    """items：[(图名, 图纸id), ...]；cfg 见 make_cfg；hints：{图纸id数字: 「图纸系统」参数值}。
-    返回 [(旧图名, 图纸id, 系统名, 新图号, 新图名), ...]，按新编号顺序排好。
-    per_system 为 True 时每个系统各自从起始序号编号；否则所有选中的图纸连续编号。"""
-    hints = hints or {}
-    infos = []
-    for name, sid in items:
-        infos.append((classify(name, hints.get(int(sid.Value))), name, sid))
-    infos.sort(key=lambda t: sort_key(t[0]))
+def build_plan(rows, cfg):
+    """rows：每张选中的图纸一行 {name, sid, sysname, code, gidx, order, series, num}。
+    sysname 是归类名（也写进「图纸系统」参数），code 是该归类的系统代码，gidx 是归类在列表里的顺序。
+    返回 [(旧图名, 图纸id, 归类名, 新图号, 新图名), ...]，按「归类顺序 → 系列 → 井号」排好。
+    per_system 为 True 时每个归类各自从起始序号编号；否则所有选中的图纸连续编号。"""
+    ordered = sorted(rows, key=lambda r: (r["gidx"], r["order"], r["series"], r["num"]))
     counters = {}
     plan = []
-    for info, name, sid in infos:
-        key = info["system"] if cfg["per_system"] else u"ALL"
+    for r in ordered:
+        key = r["sysname"] if cfg["per_system"] else u"ALL"
         seq = counters.get(key, cfg["start"])
         counters[key] = seq + 1
         if cfg["digits"] > 0:
@@ -179,15 +175,15 @@ def build_plan(items, cfg, hints=None):
         else:
             seq_txt = u"%d" % seq
         vals = {
-            u"旧名": name or u"",
-            u"井号": well_part(name),
-            u"系统": info["system"],
-            u"系统码": cfg["codes"].get(info["system"], info["code"]),
+            u"旧名": r["name"] or u"",
+            u"井号": well_part(r["name"]),
+            u"系统": r["sysname"],
+            u"系统码": r["code"],
             u"序号": seq_txt,
         }
         new_no = fill_template(cfg["num_tpl"], vals)
         new_name = fill_template(cfg["name_tpl"], vals)
-        plan.append((name, sid, info["system"], new_no, new_name))
+        plan.append((r["name"], r["sid"], r["sysname"], new_no, new_name))
     return plan
 
 
@@ -225,21 +221,31 @@ def plan_warnings(plan, other_names, other_numbers):
     return out
 
 
-def group_by_system(items, hints=None):
-    """按系统名分组（AA 和 A 都是强电井，合成一组），返回 [(系统名, [(图名, 图纸id), ...]), ...]。
-    组的顺序与 SYSTEM_MAP 一致，「其他」放最后。hints：{图纸id数字: 「图纸系统」参数值}。"""
+def auto_layout(items, hints=None):
+    """初始归类：按图名认系统（改过名的按「图纸系统」参数），分好组。
+    返回 [(归类名, 系统代码, [行, ...]), ...]；组的顺序与 SYSTEM_MAP 一致，「其他」放最后。
+    行是 {name, sid, sysname, code, order, series, num}；gidx 由窗口按列表里的组顺序补上。"""
     hints = hints or {}
     system_order = {}
     for i, (_prefix, sysname, _code) in enumerate(SYSTEM_MAP):
         system_order.setdefault(sysname, i)
     system_order.setdefault(OTHER[0], len(SYSTEM_MAP))
-    groups = {}
+    rows_by = {}
     for name, sid in items:
-        groups.setdefault(classify(name, hints.get(int(sid.Value)))["system"], []).append((name, sid))
+        info = classify(name, hints.get(int(sid.Value)))
+        rows_by.setdefault(info["system"], []).append({
+            "name": name,
+            "sid": sid,
+            "sysname": info["system"],
+            "code": SYSTEM_CODES.get(info["system"], info["code"]),
+            "order": info["order"],
+            "series": info["series"],
+            "num": info["num"],
+        })
     out = []
-    for sysname in sorted(groups.keys(), key=lambda s: system_order.get(s, len(SYSTEM_MAP))):
-        out.append((sysname, sorted(groups[sysname],
-                                    key=lambda t: sort_key(classify(t[0], hints.get(int(t[1].Value)))))))
+    for sysname in sorted(rows_by.keys(), key=lambda s: system_order.get(s, len(SYSTEM_MAP))):
+        lst = sorted(rows_by[sysname], key=lambda r: (r["order"], r["series"], r["num"]))
+        out.append((sysname, SYSTEM_CODES.get(sysname, OTHER[1]), lst))
     return out
 
 
@@ -434,29 +440,22 @@ def _sheet_info():
 #   右：设置（图名模板、图号模板、编号、系统代码、目标图框）+ 预览 + 提示
 #   底：按钮行
 # ============================================================
-def _children(node):
-    return [node.Nodes[i] for i in range(node.Nodes.Count)]
-
-
-def code_summary_text(systems, codes):
-    return u"   ".join([u"%s %s" % (s, codes.get(s, u"")) for s in systems])
-
-
-def edit_codes_dialog(owner, systems, codes):
-    """系统代码：每个系统一行，代码可直接改。点确定返回新的代码字典，点取消返回 None。"""
+def form_dialog(owner, title, rows, widths):
+    """通用小对话框：每行一个说明 + 若干个文本框。点确定返回 [[文本, ...], ...]，点取消返回 None。
+    rows：[(说明文字, [初始文本, ...]), ...]；widths：每个文本框的宽度。"""
     from System.Windows.Forms import (Form, Label, TextBox, Button, DialogResult, TableLayoutPanel,
                                       FlowLayoutPanel, FlowDirection, DockStyle, Padding, FormBorderStyle,
                                       FormStartPosition)
     from System.Drawing import Size, Font
 
     f = Form()
-    f.Text = u"系统代码"
+    f.Text = title
     f.Font = Font(u"Microsoft YaHei UI", 9.0)
     f.FormBorderStyle = FormBorderStyle.FixedDialog
     f.StartPosition = FormStartPosition.CenterParent
     f.MaximizeBox = False
     f.MinimizeBox = False
-    f.ClientSize = Size(340, 90 + 36 * len(systems))
+    f.ClientSize = Size(max(360, 200 + sum(widths) + 40), 110 + 38 * len(rows))
 
     root = TableLayoutPanel()
     root.Dock = DockStyle.Fill
@@ -469,28 +468,32 @@ def edit_codes_dialog(owner, systems, codes):
 
     body = TableLayoutPanel()
     body.Dock = DockStyle.Fill
-    body.ColumnCount = 2
+    body.ColumnCount = 1 + len(widths)
     body.RowCount = 0
-    body.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Absolute, 150))
-    body.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Percent, 100))
+    body.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Absolute, 180))
+    for w in widths:
+        body.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Absolute, w))
     root.Controls.Add(body, 0, 0)
 
     boxes = []
-    for sysname in systems:
+    for label_text, values in rows:
         lb = Label()
-        lb.Text = sysname
+        lb.Text = label_text
         lb.TextAlign = SD.ContentAlignment.MiddleLeft
         lb.Dock = DockStyle.Fill
         lb.Margin = Padding(0, 4, 0, 4)
-        tb = TextBox()
-        tb.Text = codes.get(sysname, u"")
-        tb.Width = 120
         body.RowCount += 1
         body.RowStyles.Add(WF.RowStyle(WF.SizeType.AutoSize))
         row = body.RowCount - 1
         body.Controls.Add(lb, 0, row)
-        body.Controls.Add(tb, 1, row)
-        boxes.append((sysname, tb))
+        row_boxes = []
+        for j, v in enumerate(values):
+            tb = TextBox()
+            tb.Text = v
+            tb.Width = widths[j]
+            body.Controls.Add(tb, 1 + j, row)
+            row_boxes.append(tb)
+        boxes.append(row_boxes)
 
     btns = FlowLayoutPanel()
     btns.Dock = DockStyle.Fill
@@ -511,18 +514,19 @@ def edit_codes_dialog(owner, systems, codes):
 
     out = None
     if f.ShowDialog(owner) == DialogResult.OK:
-        out = dict(codes)
-        for sysname, tb in boxes:
-            out[sysname] = tb.Text.strip()
+        out = [[tb.Text.strip() for tb in rb] for rb in boxes]
     return out
 
 
 def build_form(result):
-    from System.Windows.Forms import (Form, Label, TextBox, Button, ComboBox, ComboBoxStyle, TreeView, TreeNode,
-                                      ListBox, CheckBox, DialogResult, FormBorderStyle, FormStartPosition,
-                                      DockStyle, FlowLayoutPanel, FlowDirection, TableLayoutPanel, Padding,
-                                      MessageBoxButtons)
-    from System.Drawing import Size, Font, Color
+    # 开启视觉样式，否则列表的分组标题（归类名）可能不显示
+    WF.Application.EnableVisualStyles()
+    from System.Windows.Forms import (Form, Label, TextBox, Button, ComboBox, ComboBoxStyle, ListView, ListViewItem,
+                                      ListViewGroup, ColumnHeader, ListBox, CheckBox, DialogResult,
+                                      FormBorderStyle, FormStartPosition, DockStyle, FlowLayoutPanel, FlowDirection,
+                                      TableLayoutPanel, Padding, MessageBoxButtons, ContextMenuStrip,
+                                      ToolStripMenuItem, View)
+    from System.Drawing import Size, Font, Color, Point
 
     FONT = Font(u"Microsoft YaHei UI", 9.0)
     GREY = Color.FromArgb(90, 90, 90)
@@ -540,58 +544,90 @@ def build_form(result):
     root.Padding = Padding(14, 12, 14, 10)
     root.ColumnCount = 2
     root.RowCount = 2
-    root.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Absolute, 440))
+    root.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Absolute, 460))
     root.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Percent, 100))
     root.RowStyles.Add(WF.RowStyle(WF.SizeType.Percent, 100))
     root.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 46))
     form.Controls.Add(root)
 
-    # ---------- 左：图纸树（系统分组，可展开到单张） ----------
+    # ---------- 左：图纸列表（分组 = 归类，勾选 = 参与出图，高亮选中后可移动归类） ----------
     left = TableLayoutPanel()
     left.Dock = DockStyle.Fill
     left.ColumnCount = 1
-    left.RowCount = 3
+    left.RowCount = 4
     left.Margin = Padding(0, 0, 14, 0)
     left.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 26))
     left.RowStyles.Add(WF.RowStyle(WF.SizeType.Percent, 100))
-    left.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 40))
+    left.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 36))
+    left.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 36))
     root.Controls.Add(left, 0, 0)
 
     lb_title = Label()
-    lb_title.Text = u"1. 选择图纸（勾系统名整组选中；展开后可单张勾选）"
+    lb_title.Text = u"1. 选择图纸与归类（勾选 = 参与；高亮选中后可移动归类）"
     lb_title.Dock = DockStyle.Fill
     lb_title.TextAlign = SD.ContentAlignment.MiddleLeft
     left.Controls.Add(lb_title, 0, 0)
 
-    tree = TreeView()
-    tree.Dock = DockStyle.Fill
-    tree.CheckBoxes = True
-    tree.HideSelection = False
-    left.Controls.Add(tree, 0, 1)
+    lv = ListView()
+    lv.Dock = DockStyle.Fill
+    lv.View = View.Details
+    lv.CheckBoxes = True
+    lv.FullRowSelect = True
+    lv.HideSelection = False
+    lv.ShowGroups = True
+    col_name = ColumnHeader()
+    col_name.Text = u"图名"
+    col_name.Width = 300
+    lv.Columns.Add(col_name)
+    col_no = ColumnHeader()
+    col_no.Text = u"原图号"
+    col_no.Width = 120
+    lv.Columns.Add(col_no)
+    left.Controls.Add(lv, 0, 1)
 
-    sel_row = FlowLayoutPanel()
-    sel_row.Dock = DockStyle.Fill
-    sel_row.FlowDirection = FlowDirection.LeftToRight
-    left.Controls.Add(sel_row, 0, 2)
+    row_a = FlowLayoutPanel()
+    row_a.Dock = DockStyle.Fill
+    row_a.FlowDirection = FlowDirection.LeftToRight
+    left.Controls.Add(row_a, 0, 2)
+    row_b = FlowLayoutPanel()
+    row_b.Dock = DockStyle.Fill
+    row_b.FlowDirection = FlowDirection.LeftToRight
+    left.Controls.Add(row_b, 0, 3)
 
-    items = _sheets_wanted()
-    hints = _system_hints()
-    groups = group_by_system(items, hints)
+    def small_button(holder, text, width):
+        b = Button()
+        b.Text = text
+        b.Size = Size(width, 28)
+        holder.Controls.Add(b)
+        return b
+
+    btn_all = small_button(row_a, u"全选", 64)
+    btn_none = small_button(row_a, u"全不选", 72)
+    btn_check_sel = small_button(row_a, u"勾选所选", 86)
+    btn_uncheck_sel = small_button(row_a, u"取消所选", 86)
+    btn_move = small_button(row_b, u"移到归类…", 96)
+    btn_new = small_button(row_b, u"新建归类…", 96)
+    btn_settings = small_button(row_b, u"归类设置…", 96)
+
+    # 原图号：从模型里读，方便对照
     sheet_info = _sheet_info()
-    group_nodes = []
-    for sysname, lst in groups:
-        gnode = TreeNode(sysname)
-        for name, sid in lst:
-            cnode = TreeNode(name)
-            cnode.Tag = (name, sid)
-            cnode.Checked = (name or u"").startswith(SHEET_PREFIX_NAME)
-            gnode.Nodes.Add(cnode)
-        kids = _children(gnode)
-        gnode.Checked = len(kids) > 0 and all([c.Checked for c in kids])
-        tree.Nodes.Add(gnode)
-        group_nodes.append((gnode, sysname))
-        if any([c.Checked for c in kids]) and not gnode.Checked:
-            gnode.Expand()
+    num_by_id = {}
+    for (v, _n, num) in sheet_info:
+        num_by_id[v] = num
+
+    # 初始归类：按系统分组（改过名的按「图纸系统」参数认），每个归类一个分组
+    hints = _system_hints()
+    for sysname, code, rows in auto_layout(_sheets_wanted(), hints):
+        g = ListViewGroup(sysname)
+        g.Tag = {"name": sysname, "code": code}
+        lv.Groups.Add(g)
+        for r in rows:
+            it = ListViewItem(r["name"])
+            it.SubItems.Add(num_by_id.get(int(r["sid"].Value), u""))
+            it.Checked = (r["name"] or u"").startswith(SHEET_PREFIX_NAME)
+            it.Tag = r
+            it.Group = g
+            lv.Items.Add(it)
 
     # ---------- 右：设置 + 预览 + 提示 ----------
     right = TableLayoutPanel()
@@ -660,10 +696,11 @@ def build_form(result):
         cb_num.Items.Add(p)
     cb_num.Text = DEFAULT_NUM_TPL
     add_row(u"图号", cb_num)
-    add_hint(u"不要中间的系统代码（TX、NT 这些）？把模板里的 {系统码} 删掉即可，例如 AG-{序号}。")
+    add_hint(u"{系统} 是归类名，{系统码} 是归类的系统代码（在「归类设置」里改）。\n"
+             u"不要中间的代码（TX、NT 这些）？把 {系统码} 删掉即可。")
 
     cb_per = CheckBox()
-    cb_per.Text = u"每个系统单独编号（每个系统都从起始序号开始）"
+    cb_per.Text = u"每个归类单独编号（每个归类都从起始序号开始）"
     cb_per.Checked = True
     cb_per.AutoSize = True
     add_row(u"编号方式", cb_per)
@@ -678,23 +715,6 @@ def build_form(result):
     tb_digits.Width = 90
     add_row(u"序号位数", tb_digits)
     add_hint(u"位数 3 → 000、001……；填 0 则不补零。")
-
-    codes_state = [dict(SYSTEM_CODES)]
-    btn_codes = Button()
-    btn_codes.Text = u"编辑系统代码…"
-    btn_codes.AutoSize = True
-    lb_codes = Label()
-    lb_codes.AutoSize = True
-    lb_codes.ForeColor = GREY
-    lb_codes.MaximumSize = Size(520, 0)
-    lb_codes.Margin = Padding(8, 7, 0, 0)
-    codes_flow = FlowLayoutPanel()
-    codes_flow.AutoSize = True
-    codes_flow.WrapContents = False
-    codes_flow.Controls.Add(btn_codes)
-    codes_flow.Controls.Add(lb_codes)
-    add_row(u"系统代码", codes_flow)
-    add_hint(u"只有模板里用到 {系统码} 时才生效。")
 
     cb_tb = ComboBox()
     cb_tb.DropDownStyle = ComboBoxStyle.DropDownList
@@ -750,80 +770,133 @@ def build_form(result):
     form.AcceptButton = btn_ok
     form.CancelButton = btn_cancel
 
-    def small_button(text, width):
-        b = Button()
-        b.Text = text
-        b.Size = Size(width, 28)
-        sel_row.Controls.Add(b)
-        return b
+    # ---------- 列表辅助 ----------
+    def items_all():
+        return [lv.Items[i] for i in range(lv.Items.Count)]
 
-    sel_all = small_button(u"全选", 70)
-    sel_none = small_button(u"全不选", 80)
-    expand_all = small_button(u"全部展开", 90)
-    collapse_all = small_button(u"全部收起", 90)
+    def items_selected():
+        return [lv.SelectedItems[i] for i in range(lv.SelectedItems.Count)]
 
-    # 勾选变化时，父节点和子节点互相同步。busy 防止程序自己改勾选时又触发一次。
+    def group_list():
+        return [lv.Groups[i] for i in range(lv.Groups.Count)]
+
+    def group_named(name):
+        for g in group_list():
+            if g.Tag["name"] == name:
+                return g
+        return None
+
+    def row_of(it):
+        r = dict(it.Tag)
+        g = it.Group
+        r["sysname"] = g.Tag["name"]
+        r["code"] = g.Tag["code"]
+        r["gidx"] = lv.Groups.IndexOf(g)
+        return r
+
+    # 勾选变化时重算预览。busy 防止批量勾选时每张都重算一次。
     busy = [False]
 
-    def on_after_check(sender, args):
+    def on_item_checked(sender, args):
         if busy[0]:
             return
+        recompute()
+
+    def set_checked(items, value):
         busy[0] = True
         try:
-            node = args.Node
-            if node.Tag is None:
-                for c in _children(node):
-                    c.Checked = node.Checked
-            elif node.Parent is not None:
-                kids = _children(node.Parent)
-                node.Parent.Checked = len(kids) > 0 and all([c.Checked for c in kids])
+            for it in items:
+                it.Checked = value
         finally:
             busy[0] = False
         recompute()
 
-    def set_all(value):
+    def move_selected_to(group):
+        sel = items_selected()
+        if not sel:
+            WF.MessageBox.Show(u"先在列表里高亮选中要移动的图纸。", TITLE)
+            return
+        for it in sel:
+            it.Group = group
+        recompute()
+
+    def make_move(group):
         def handler(sender, args):
-            busy[0] = True
-            try:
-                for gnode, _sys in group_nodes:
-                    gnode.Checked = value
-                    for c in _children(gnode):
-                        c.Checked = value
-            finally:
-                busy[0] = False
-            recompute()
+            move_selected_to(group)
         return handler
 
-    def selected_items():
-        out = []
-        for gnode, _sys in group_nodes:
-            for c in _children(gnode):
-                if c.Checked and c.Tag is not None:
-                    out.append(c.Tag)
-        return out
+    def on_move_menu(sender, args):
+        cms = ContextMenuStrip()
+        for g in group_list():
+            mi = ToolStripMenuItem(g.Tag["name"])
+            mi.Click += System.EventHandler(make_move(g))
+            cms.Items.Add(mi)
+        cms.Show(btn_move, Point(0, btn_move.Height))
 
-    def on_codes(sender, args):
-        new = edit_codes_dialog(form, [sysname for _g, sysname in group_nodes], codes_state[0])
-        if new is not None:
-            codes_state[0] = new
-            recompute()
+    def on_new_group(sender, args):
+        if not items_selected():
+            WF.MessageBox.Show(u"先在列表里高亮选中要归到新归类的图纸，再点「新建归类」。", TITLE)
+            return
+        out = form_dialog(form, u"新建归类", [(u"归类名称 / 系统代码", [u"新归类", u"XX"])], [150, 90])
+        if out is None:
+            return
+        name, code = out[0][0], out[0][1]
+        if not name or not code:
+            WF.MessageBox.Show(u"归类名称和系统代码都不能为空。", TITLE)
+            return
+        if group_named(name) is not None:
+            WF.MessageBox.Show(u"已经有叫「%s」的归类了。" % name, TITLE)
+            return
+        g = ListViewGroup(name)
+        g.Tag = {"name": name, "code": code}
+        lv.Groups.Add(g)
+        for it in items_selected():
+            it.Group = g
+        recompute()
+
+    def on_group_settings(sender, args):
+        groups = group_list()
+        counts = {}
+        for it in items_all():
+            counts[it.Group.Tag["name"]] = counts.get(it.Group.Tag["name"], 0) + 1
+        rows = [(u"%s（%d 张）" % (g.Tag["name"], counts.get(g.Tag["name"], 0)), [g.Tag["name"], g.Tag["code"]])
+                for g in groups]
+        out = form_dialog(form, u"归类设置（可改名字和系统代码）", rows, [150, 90])
+        if out is None:
+            return
+        names = [r[0] for r in out]
+        if not all(names):
+            WF.MessageBox.Show(u"归类名称不能为空。", TITLE)
+            return
+        if len(set(names)) != len(names):
+            WF.MessageBox.Show(u"归类名称有重复。", TITLE)
+            return
+        if not all([r[1] for r in out]):
+            WF.MessageBox.Show(u"系统代码不能为空。", TITLE)
+            return
+        for g, r in zip(groups, out):
+            g.Tag = {"name": r[0], "code": r[1]}
+        recompute()
+
+    def selected_rows():
+        return [row_of(it) for it in items_all() if it.Checked]
 
     def recompute(sender=None, args=None):
-        for gnode, sysname in group_nodes:
-            kids = _children(gnode)
-            picked = len([c for c in kids if c.Checked])
-            gnode.Text = u"%s    已选 %d / 共 %d" % (sysname, picked, len(kids))
-        lb_codes.Text = code_summary_text([s for _g, s in group_nodes], codes_state[0])
-        cfg, err = make_cfg(cb_name.Text, cb_num.Text, tb_start.Text, tb_digits.Text, cb_per.Checked,
-                            codes_state[0])
+        # 组标题上显示「已选 X / 共 Y」
+        all_items = items_all()
+        for g in group_list():
+            members = [it for it in all_items if it.Group == g]
+            picked = len([it for it in members if it.Checked])
+            g.Header = u"%s    已选 %d / 共 %d" % (g.Tag["name"], picked, len(members))
+        cfg, err = make_cfg(cb_name.Text, cb_num.Text, tb_start.Text, tb_digits.Text, cb_per.Checked)
         if err:
             lb_prev.Items.Clear()
             lb_note.ForeColor = Color.Firebrick
             lb_note.Text = err
             return
-        sel = selected_items()
-        plan = build_plan(sel, cfg, hints)
-        chosen = set([int(sid.Value) for _n, sid in sel])
+        rows = selected_rows()
+        plan = build_plan(rows, cfg)
+        chosen = set([int(r["sid"].Value) for r in rows])
         others = [(n, num) for (v, n, num) in sheet_info if v not in chosen]
         warns = plan_warnings(plan, set([n for n, _num in others]), set([num for _n, num in others]))
         lb_prev.Items.Clear()
@@ -841,17 +914,16 @@ def build_form(result):
         lb_note.ForeColor = Color.Firebrick if warns else GREY
 
     def on_ok(sender, args):
-        cfg, err = make_cfg(cb_name.Text, cb_num.Text, tb_start.Text, tb_digits.Text, cb_per.Checked,
-                            codes_state[0])
+        cfg, err = make_cfg(cb_name.Text, cb_num.Text, tb_start.Text, tb_digits.Text, cb_per.Checked)
         if err:
             WF.MessageBox.Show(err, TITLE)
             return
-        sel = selected_items()
-        if not sel:
+        rows = selected_rows()
+        if not rows:
             WF.MessageBox.Show(u"没有勾选图纸。", TITLE)
             return
-        plan = build_plan(sel, cfg, hints)
-        chosen = set([int(sid.Value) for _n, sid in sel])
+        plan = build_plan(rows, cfg)
+        chosen = set([int(r["sid"].Value) for r in rows])
         others = [(n, num) for (v, n, num) in sheet_info if v not in chosen]
         warns = plan_warnings(plan, set([n for n, _num in others]), set([num for _n, num in others]))
         if warns:
@@ -864,12 +936,14 @@ def build_form(result):
         result["set_system"] = cb_sys.Checked
         form.DialogResult = DialogResult.OK
 
-    tree.AfterCheck += WF.TreeViewEventHandler(on_after_check)
-    sel_all.Click += System.EventHandler(set_all(True))
-    sel_none.Click += System.EventHandler(set_all(False))
-    expand_all.Click += System.EventHandler(lambda s, a: tree.ExpandAll())
-    collapse_all.Click += System.EventHandler(lambda s, a: tree.CollapseAll())
-    btn_codes.Click += System.EventHandler(on_codes)
+    lv.ItemChecked += WF.ItemCheckedEventHandler(on_item_checked)
+    btn_all.Click += System.EventHandler(lambda s, a: set_checked(items_all(), True))
+    btn_none.Click += System.EventHandler(lambda s, a: set_checked(items_all(), False))
+    btn_check_sel.Click += System.EventHandler(lambda s, a: set_checked(items_selected(), True))
+    btn_uncheck_sel.Click += System.EventHandler(lambda s, a: set_checked(items_selected(), False))
+    btn_move.Click += System.EventHandler(on_move_menu)
+    btn_new.Click += System.EventHandler(on_new_group)
+    btn_settings.Click += System.EventHandler(on_group_settings)
     cb_name.TextChanged += recompute
     cb_num.TextChanged += recompute
     tb_start.TextChanged += recompute
