@@ -18,7 +18,7 @@
 | [`rebar-cage`](rebar-cage/) | 一键单构件快速配筋 | 0.2.1 | Python | didi | MIT |
 | [`schedule-excel`](schedule-excel/) | 明细表Excel互导 | 0.1.0 | C#（源码在 `plugins/`） | didi | 原创 |
 | [`sheet-manager`](sheet-manager/) | 图纸管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |
-| [`sheet-organize`](sheet-organize/) | 一键图纸归类与图框编号 | 0.3.0 | Python | didi | MIT |
+| [`sheet-organize`](sheet-organize/) | 一键图纸归类与图框编号 | 0.3.1 | Python | didi | MIT |
 | [`tag-check`](tag-check/) | 标注检查 | 0.2.0 | C#（源码在 `plugins/`） | didi | MIT |
 | [`view-manager`](view-manager/) | 视图管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |
 | [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.9 | Python | didi | MIT |

@@ -67,11 +67,35 @@ SYSTEM_CODES[OTHER[0]] = OTHER[1]
 # ============================================================
 # 纯逻辑：识别、编号、分组（可离线测试）
 # ============================================================
-def classify(sheet_name):
-    """从图名识别系统。返回 dict(series, system, code, num, order)；认不出的归到「其他」。"""
+_MARK_RE = re.compile(u"[A-Za-z]{1,3}-\\d+(?:-\\d+)?")
+
+
+def _classify_by_hint(s, system_hint):
+    """改过名的图纸（图名已经不是「井大样_…」）：系统用「图纸系统」参数。
+    序号取图名里最后的井号（如 T-084-1 取 84），取不到就取图名里最后的数字。"""
+    for i, (_prefix, sysname, code) in enumerate(SYSTEM_MAP):
+        if sysname == system_hint:
+            found = _MARK_RE.findall(s)
+            if found:
+                nums = _NUM.findall(found[-1])
+                num = int(nums[0]) if nums else 0
+            else:
+                nums = _NUM.findall(s)
+                num = int(nums[-1]) if nums else 0
+            return {"series": u"", "system": sysname, "code": code, "num": num, "order": i}
+    return None
+
+
+def classify(sheet_name, system_hint=None):
+    """从图名识别系统。返回 dict(series, system, code, num, order)；认不出的归到「其他」。
+    改过名的图纸（图名不再以「井大样_」开头）若有「图纸系统」参数，就以参数为准，不看图名。"""
     s = sheet_name or u""
     if s.startswith(SHEET_PREFIX_NAME):
         s = s[len(SHEET_PREFIX_NAME):]
+    elif system_hint:
+        hinted = _classify_by_hint(s, system_hint)
+        if hinted is not None:
+            return hinted
     for i, (prefix, sysname, code) in enumerate(SYSTEM_MAP):
         if s.startswith(prefix):
             rest = s[len(prefix):]
@@ -89,10 +113,15 @@ def sort_key(info):
 
 
 def well_part(name):
-    """图名去掉「井大样_」前缀后的部分，就是 {井号}。不是井大样的图名原样返回。"""
+    """{井号}：「井大样_」后面的部分；改过名的图纸取图名里最后的井号（如 T-068），取不到就取最后一段。"""
     s = name or u""
     if s.startswith(SHEET_PREFIX_NAME):
         return s[len(SHEET_PREFIX_NAME):]
+    found = _MARK_RE.findall(s)
+    if found:
+        return found[-1]
+    if u"-" in s:
+        return s.split(u"-")[-1]
     return s
 
 
@@ -130,13 +159,14 @@ def make_cfg(name_tpl, num_tpl, start_txt, digits_txt, per_system, codes):
     return cfg, u""
 
 
-def build_plan(items, cfg):
-    """items：[(图名, 图纸id), ...]；cfg 见 make_cfg。
+def build_plan(items, cfg, hints=None):
+    """items：[(图名, 图纸id), ...]；cfg 见 make_cfg；hints：{图纸id数字: 「图纸系统」参数值}。
     返回 [(旧图名, 图纸id, 系统名, 新图号, 新图名), ...]，按新编号顺序排好。
     per_system 为 True 时每个系统各自从起始序号编号；否则所有选中的图纸连续编号。"""
+    hints = hints or {}
     infos = []
     for name, sid in items:
-        infos.append((classify(name), name, sid))
+        infos.append((classify(name, hints.get(int(sid.Value))), name, sid))
     infos.sort(key=lambda t: sort_key(t[0]))
     counters = {}
     plan = []
@@ -195,19 +225,21 @@ def plan_warnings(plan, other_names, other_numbers):
     return out
 
 
-def group_by_system(items):
+def group_by_system(items, hints=None):
     """按系统名分组（AA 和 A 都是强电井，合成一组），返回 [(系统名, [(图名, 图纸id), ...]), ...]。
-    组的顺序与 SYSTEM_MAP 一致，「其他」放最后。"""
+    组的顺序与 SYSTEM_MAP 一致，「其他」放最后。hints：{图纸id数字: 「图纸系统」参数值}。"""
+    hints = hints or {}
     system_order = {}
     for i, (_prefix, sysname, _code) in enumerate(SYSTEM_MAP):
         system_order.setdefault(sysname, i)
     system_order.setdefault(OTHER[0], len(SYSTEM_MAP))
     groups = {}
     for name, sid in items:
-        groups.setdefault(classify(name)["system"], []).append((name, sid))
+        groups.setdefault(classify(name, hints.get(int(sid.Value)))["system"], []).append((name, sid))
     out = []
     for sysname in sorted(groups.keys(), key=lambda s: system_order.get(s, len(SYSTEM_MAP))):
-        out.append((sysname, sorted(groups[sysname], key=lambda t: sort_key(classify(t[0])))))
+        out.append((sysname, sorted(groups[sysname],
+                                    key=lambda t: sort_key(classify(t[0], hints.get(int(t[1].Value)))))))
     return out
 
 
@@ -221,6 +253,22 @@ def _sheets_wanted():
             if s.IsTemplate:
                 continue
             out.append((s.Name, s.Id))
+        except Exception:
+            continue
+    return out
+
+
+def _system_hints():
+    """已经写过「图纸系统」参数的图纸：{图纸 ElementId 数字: 系统名}。图名被改过以后，靠它认系统。"""
+    out = {}
+    for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
+        try:
+            p = s.LookupParameter(SYSTEM_PARAM)
+            if p is None or not p.HasValue:
+                continue
+            v = p.AsString()
+            if v:
+                out[int(s.Id.Value)] = v
         except Exception:
             continue
     return out
@@ -527,7 +575,8 @@ def build_form(result):
     left.Controls.Add(sel_row, 0, 2)
 
     items = _sheets_wanted()
-    groups = group_by_system(items)
+    hints = _system_hints()
+    groups = group_by_system(items, hints)
     sheet_info = _sheet_info()
     group_nodes = []
     for sysname, lst in groups:
@@ -773,7 +822,7 @@ def build_form(result):
             lb_note.Text = err
             return
         sel = selected_items()
-        plan = build_plan(sel, cfg)
+        plan = build_plan(sel, cfg, hints)
         chosen = set([int(sid.Value) for _n, sid in sel])
         others = [(n, num) for (v, n, num) in sheet_info if v not in chosen]
         warns = plan_warnings(plan, set([n for n, _num in others]), set([num for _n, num in others]))
@@ -801,7 +850,7 @@ def build_form(result):
         if not sel:
             WF.MessageBox.Show(u"没有勾选图纸。", TITLE)
             return
-        plan = build_plan(sel, cfg)
+        plan = build_plan(sel, cfg, hints)
         chosen = set([int(sid.Value) for _n, sid in sel])
         others = [(n, num) for (v, n, num) in sheet_info if v not in chosen]
         warns = plan_warnings(plan, set([n for n, _num in others]), set([num for _n, num in others]))
