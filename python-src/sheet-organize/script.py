@@ -45,16 +45,22 @@ SYSTEM_MAP = [
     (u"T", u"通信井", u"TX"),
     (u"L", u"低压拉线井", u"DY"),
     (u"E", u"预制井", u"YZ"),
+    (u"Y", u"雨水井", u"YS"),
 ]
 OTHER = (u"其他", u"QT")
 _NUM = re.compile(r"(\d+)")
 
 # 图名、图号模板里可用的字段，写成 {字段名}
-TOKEN_HINT = u"{旧名}  {井号}  {系统}  {系统码}  {序号}"
+TOKEN_HINT = u"{旧名}  {井号}  {系统}  {系统码}  {系列}  {序号}"
 DEFAULT_NAME_TPL = u"{旧名}"
-DEFAULT_NUM_TPL = u"AG-{系统码}-{序号}"
+DEFAULT_NUM_TPL = u"AG-{系列}-{序号}"
 NAME_PRESETS = [u"{旧名}", u"BTP-IF1 11KV-{井号} Detail Drawing", u"井大样_{井号}"]
-NUM_PRESETS = [u"AG-{系统码}-{序号}", u"AG-{序号}", u"BTP-{系统码}-{序号}"]
+NUM_PRESETS = [u"AG-{系列}-{序号}", u"AG-{系统码}-{序号}", u"AG-{序号}"]
+# 编号方式（下拉框的顺序）
+MODE_KEYS = [u"series", u"group", u"all"]
+MODE_LABELS = [u"每个系列单独编号（AA、BB、A… 各从起始序号开始）",
+               u"每个归类单独编号（归类内从起始序号连续）",
+               u"全部连续编号"]
 # Revit 不允许出现在图名、图号里的字符（花括号另外检查）
 BAD_CHARS = u":[]|;<>?`~"
 # 系统代码默认值（来自 SYSTEM_MAP），窗口里可以逐个改
@@ -67,41 +73,45 @@ SYSTEM_CODES[OTHER[0]] = OTHER[1]
 # ============================================================
 # 纯逻辑：识别、编号、分组（可离线测试）
 # ============================================================
-_MARK_RE = re.compile(u"[A-Za-z]{1,3}-\\d+(?:-\\d+)?")
+_MARK_RE = re.compile(u"(室内-)?[A-Za-z]{1,3}-?\\d+[A-Za-z]?(?:-\\d+)?")
 
 
-def _classify_by_hint(s, system_hint):
-    """改过名的图纸（图名已经不是「井大样_…」）：系统用「图纸系统」参数。
-    序号取图名里最后的井号（如 T-084-1 取 84），取不到就取图名里最后的数字。"""
-    for i, (_prefix, sysname, code) in enumerate(SYSTEM_MAP):
-        if sysname == system_hint:
-            found = _MARK_RE.findall(s)
-            if found:
-                nums = _NUM.findall(found[-1])
-                num = int(nums[0]) if nums else 0
-            else:
-                nums = _NUM.findall(s)
-                num = int(nums[-1]) if nums else 0
-            return {"series": u"", "system": sysname, "code": code, "num": num, "order": i}
+def _series_of(mark):
+    """井编号属于哪个系列（SYSTEM_MAP 里的前缀），返回 (序号, 前缀, 系统名, 代码)；认不出返回 None。
+    前缀后面（可以有一个 -）必须紧跟数字，所以 LV、ELV、Y 这种普通图名不会被误认。"""
+    for i, (prefix, sysname, code) in enumerate(SYSTEM_MAP):
+        if mark.startswith(prefix):
+            rest = mark[len(prefix):]
+            if rest[:1] == u"-":
+                rest = rest[1:]
+            if rest[:1].isdigit():
+                return i, prefix, sysname, code
     return None
 
 
 def classify(sheet_name, system_hint=None):
-    """从图名识别系统。返回 dict(series, system, code, num, order)；认不出的归到「其他」。
-    改过名的图纸（图名不再以「井大样_」开头）若有「图纸系统」参数，就以参数为准，不看图名。"""
+    """识别图纸属于哪个系统。返回 dict(series, system, code, num, order)。
+    1) 图名是「井大样_xx」，或改过名后能找到井编号（如 …-AA-01），按井编号的系列认（AA、A、Y、室内-A…）；
+    2) 认不出井编号，但改过名且写有「图纸系统」参数的，按参数认；
+    3) 其余归到「其他」。"""
     s = sheet_name or u""
     if s.startswith(SHEET_PREFIX_NAME):
-        s = s[len(SHEET_PREFIX_NAME):]
-    elif system_hint:
-        hinted = _classify_by_hint(s, system_hint)
-        if hinted is not None:
-            return hinted
-    for i, (prefix, sysname, code) in enumerate(SYSTEM_MAP):
-        if s.startswith(prefix):
-            rest = s[len(prefix):]
-            m = _NUM.search(rest)
-            num = int(m.group(1)) if m else 0
-            return {"series": prefix, "system": sysname, "code": code, "num": num, "order": i}
+        mark = s[len(SHEET_PREFIX_NAME):]
+    else:
+        found = [m.group(0) for m in _MARK_RE.finditer(s)]
+        mark = found[-1] if found else u""
+    hit = _series_of(mark) if mark else None
+    if hit is not None:
+        i, prefix, sysname, code = hit
+        nums = _NUM.findall(mark[len(prefix):])
+        num = int(nums[0]) if nums else 0
+        return {"series": prefix, "system": sysname, "code": code, "num": num, "order": i}
+    if system_hint and not s.startswith(SHEET_PREFIX_NAME):
+        for i, (_p, sysname, code) in enumerate(SYSTEM_MAP):
+            if sysname == system_hint:
+                nums = _NUM.findall(s)
+                num = int(nums[-1]) if nums else 0
+                return {"series": u"", "system": sysname, "code": code, "num": num, "order": i}
     m = _NUM.search(s)
     num = int(m.group(1)) if m else 0
     return {"series": u"", "system": OTHER[0], "code": OTHER[1], "num": num, "order": len(SYSTEM_MAP)}
@@ -117,7 +127,7 @@ def well_part(name):
     s = name or u""
     if s.startswith(SHEET_PREFIX_NAME):
         return s[len(SHEET_PREFIX_NAME):]
-    found = _MARK_RE.findall(s)
+    found = [m.group(0) for m in _MARK_RE.finditer(s)]
     if found:
         return found[-1]
     if u"-" in s:
@@ -133,8 +143,9 @@ def fill_template(tpl, values):
     return out
 
 
-def make_cfg(name_tpl, num_tpl, start_txt, digits_txt, per_system):
-    """校验界面上的输入，返回 (cfg, 错误说明)。错误说明为空字符串表示没问题。"""
+def make_cfg(name_tpl, num_tpl, start_txt, digits_txt, mode):
+    """校验界面上的输入，返回 (cfg, 错误说明)。错误说明为空字符串表示没问题。
+    mode：'series' 每个系列（AA、BB、A…）各自从起始序号编号；'group' 每个归类各自编号；'all' 全部连续编号。"""
     name_tpl = (name_tpl or u"").strip()
     num_tpl = (num_tpl or u"").strip()
     if not name_tpl:
@@ -148,26 +159,37 @@ def make_cfg(name_tpl, num_tpl, start_txt, digits_txt, per_system):
         return None, u"起始序号和位数必须是整数。"
     if start < 0 or digits < 0:
         return None, u"起始序号和位数不能是负数。"
+    if mode not in (u"series", u"group", u"all"):
+        return None, u"编号方式不对。"
     cfg = {
         "name_tpl": name_tpl,
         "num_tpl": num_tpl,
         "start": start,
         "digits": digits,
-        "per_system": bool(per_system),
+        "mode": mode,
     }
     return cfg, u""
 
 
 def build_plan(rows, cfg):
-    """rows：每张选中的图纸一行 {name, sid, sysname, code, gidx, order, series, num}。
-    sysname 是归类名（也写进「图纸系统」参数），code 是该归类的系统代码，gidx 是归类在列表里的顺序。
+    """rows：每张选中的图纸一行 {name, sid, sysname, code, series, gidx, order, num}。
+    sysname 是归类名（也写进「图纸系统」参数），code 是该归类的系统代码，series 是井的系列（AA、A、Y…）。
     返回 [(旧图名, 图纸id, 归类名, 新图号, 新图名), ...]，按「归类顺序 → 系列 → 井号」排好。
-    per_system 为 True 时每个归类各自从起始序号编号；否则所有选中的图纸连续编号。"""
+    编号方式 cfg['mode']：
+      series：每个系列各自从起始序号编号（AA 从起始号，BB 也从起始号）；
+      group：每个归类各自从起始序号编号；
+      all：所有选中的图纸连续编号。"""
     ordered = sorted(rows, key=lambda r: (r["gidx"], r["order"], r["series"], r["num"]))
     counters = {}
     plan = []
     for r in ordered:
-        key = r["sysname"] if cfg["per_system"] else u"ALL"
+        series = r["series"] or r["code"]
+        if cfg["mode"] == u"series":
+            key = series
+        elif cfg["mode"] == u"group":
+            key = r["sysname"]
+        else:
+            key = u"ALL"
         seq = counters.get(key, cfg["start"])
         counters[key] = seq + 1
         if cfg["digits"] > 0:
@@ -179,6 +201,7 @@ def build_plan(rows, cfg):
             u"井号": well_part(r["name"]),
             u"系统": r["sysname"],
             u"系统码": r["code"],
+            u"系列": series,
             u"序号": seq_txt,
         }
         new_no = fill_template(cfg["num_tpl"], vals)
@@ -368,10 +391,40 @@ def ensure_system_param():
             pass
 
 
+def _sheet_state(sheet):
+    """图纸改之前的状态：(图名, 图号, 「图纸系统」参数值或 None)，用来失败时还原。"""
+    p = sheet.LookupParameter(SYSTEM_PARAM)
+    sysv = None
+    if p is not None and p.HasValue:
+        sysv = p.AsString()
+    return (sheet.Name, sheet.SheetNumber, sysv)
+
+
+def _restore_sheet(sid, old, set_system, fails):
+    """第二遍改名/改号失败时，把图纸还原成改之前的图名、图号和参数，不留 TMP 名。"""
+    name, number, sysv = old
+    st = DB.SubTransaction(doc)
+    st.Start()
+    try:
+        sh = doc.GetElement(sid)
+        sh.Name = name
+        sh.SheetNumber = number
+        if set_system and sysv is not None:
+            p = sh.LookupParameter(SYSTEM_PARAM)
+            if p is not None and not p.IsReadOnly:
+                p.Set(sysv)
+        st.Commit()
+    except Exception as ex:
+        if st.HasStarted() and not st.HasEnded():
+            st.RollBack()
+        fails.append(u"还原 %s 失败，请手动改回：%s" % (name, ex))
+
+
 def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
     """应用：改图框（可选）、写「图纸系统」参数（可选）、改图名和图号。
     先把所有选中的图纸临时改成 TMP 名、TMP 号，再统一改成新的，避免新旧名字互相撞车。
-    每张图纸单独子事务，出错只跳过那一张。返回 (成功数, [失败说明])。"""
+    第二遍改失败的，还原成改之前的图名、图号和参数，不留 TMP 名。每张图纸单独子事务，出错只跳过那一张。
+    返回 (成功数, [失败说明])。"""
     tb_map = _titleblock_by_sheet()
     done = 0
     fails = []
@@ -384,6 +437,7 @@ def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
             st.Start()
             try:
                 sheet = doc.GetElement(sid)
+                old = _sheet_state(sheet)
                 if not keep_tb and tb_type is not None:
                     tb = tb_map.get(int(sid.Value))
                     if tb is not None and tb.GetTypeId().Value != tb_type.Id.Value:
@@ -395,12 +449,12 @@ def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
                 sheet.Name = u"TMP-NAME-%d" % int(sid.Value)
                 sheet.SheetNumber = u"TMP-%d" % int(sid.Value)
                 st.Commit()
-                temp_ok.append((name, sid, new_no, new_name))
+                temp_ok.append((name, sid, new_no, new_name, old))
             except Exception as ex:
                 if st.HasStarted() and not st.HasEnded():
                     st.RollBack()
                 fails.append(u"%s：%s" % (name, ex))
-        for name, sid, new_no, new_name in temp_ok:
+        for name, sid, new_no, new_name, old in temp_ok:
             st = DB.SubTransaction(doc)
             st.Start()
             try:
@@ -412,7 +466,8 @@ def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
             except Exception as ex:
                 if st.HasStarted() and not st.HasEnded():
                     st.RollBack()
-                fails.append(u"%s 改为「%s」/ %s 失败：%s" % (name, new_name, new_no, ex))
+                fails.append(u"%s 改为「%s」/ %s 失败：%s（已还原）" % (name, new_name, new_no, ex))
+                _restore_sheet(sid, old, set_system, fails)
         t.Commit()
     except Exception as ex:
         if t.HasStarted() and not t.HasEnded():
@@ -674,6 +729,7 @@ def build_form(result):
         hint.AutoSize = True
         hint.ForeColor = GREY
         hint.Margin = Padding(0, 0, 0, 8)
+        hint.MaximumSize = Size(560, 0)
         opts.RowCount += 1
         opts.RowStyles.Add(WF.RowStyle(WF.SizeType.AutoSize))
         row = opts.RowCount - 1
@@ -696,14 +752,17 @@ def build_form(result):
         cb_num.Items.Add(p)
     cb_num.Text = DEFAULT_NUM_TPL
     add_row(u"图号", cb_num)
-    add_hint(u"{系统} 是归类名，{系统码} 是归类的系统代码（在「归类设置」里改）。\n"
+    add_hint(u"{系统} 是归类名，{系统码} 是归类的系统代码（在「归类设置」里改），{系列} 是井的系列（AA、BB、A、Y…）。\n"
              u"不要中间的代码（TX、NT 这些）？把 {系统码} 删掉即可。")
 
-    cb_per = CheckBox()
-    cb_per.Text = u"每个归类单独编号（每个归类都从起始序号开始）"
-    cb_per.Checked = True
-    cb_per.AutoSize = True
-    add_row(u"编号方式", cb_per)
+    cb_mode = ComboBox()
+    cb_mode.DropDownStyle = ComboBoxStyle.DropDownList
+    cb_mode.Dock = DockStyle.Fill
+    for label in MODE_LABELS:
+        cb_mode.Items.Add(label)
+    cb_mode.SelectedIndex = 0
+    add_row(u"编号方式", cb_mode)
+    add_hint(u"「每个系列单独编号」时，AA 和 BB 都从起始序号开始；图号里要带 {系列} 才不会重号。")
 
     tb_start = TextBox()
     tb_start.Text = u"0"
@@ -893,7 +952,7 @@ def build_form(result):
             members = [it for it in all_items if it.Group == g]
             picked = len([it for it in members if it.Checked])
             g.Header = u"%s    已选 %d / 共 %d" % (g.Tag["name"], picked, len(members))
-        cfg, err = make_cfg(cb_name.Text, cb_num.Text, tb_start.Text, tb_digits.Text, cb_per.Checked)
+        cfg, err = make_cfg(cb_name.Text, cb_num.Text, tb_start.Text, tb_digits.Text, MODE_KEYS[cb_mode.SelectedIndex])
         if err:
             lb_prev.Items.Clear()
             lb_note.ForeColor = Color.Firebrick
@@ -919,7 +978,7 @@ def build_form(result):
         lb_note.ForeColor = Color.Firebrick if warns else GREY
 
     def on_ok(sender, args):
-        cfg, err = make_cfg(cb_name.Text, cb_num.Text, tb_start.Text, tb_digits.Text, cb_per.Checked)
+        cfg, err = make_cfg(cb_name.Text, cb_num.Text, tb_start.Text, tb_digits.Text, MODE_KEYS[cb_mode.SelectedIndex])
         if err:
             WF.MessageBox.Show(err, TITLE)
             return
@@ -954,7 +1013,7 @@ def build_form(result):
     cb_num.TextChanged += recompute
     tb_start.TextChanged += recompute
     tb_digits.TextChanged += recompute
-    cb_per.CheckedChanged += recompute
+    cb_mode.SelectedIndexChanged += recompute
     cb_tb.SelectedIndexChanged += recompute
     btn_ok.Click += System.EventHandler(on_ok)
     recompute()
