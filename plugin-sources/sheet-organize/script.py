@@ -268,12 +268,15 @@ def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
 #   左：图纸列表（按系统分组，可勾选）
 #   右上：设置    右中：预览    右下：说明 + 按钮行
 # ============================================================
+def _children(node):
+    return [node.Nodes[i] for i in range(node.Nodes.Count)]
+
+
 def build_form(result):
-    from System.Windows.Forms import (Form, Label, TextBox, Button, ComboBox, ComboBoxStyle, CheckedListBox,
+    from System.Windows.Forms import (Form, Label, TextBox, Button, ComboBox, ComboBoxStyle, TreeView, TreeNode,
                                       ListBox, CheckBox, DialogResult, FormBorderStyle, FormStartPosition,
-                                      DockStyle, FlowLayoutPanel, FlowDirection, TableLayoutPanel, Padding,
-                                      AnchorStyles)
-    from System.Drawing import Size, Point, Font, Color
+                                      DockStyle, FlowLayoutPanel, FlowDirection, TableLayoutPanel, Padding)
+    from System.Drawing import Size, Font, Color
 
     FONT = Font(u"Microsoft YaHei UI", 9.0)
     form = Form()
@@ -281,79 +284,110 @@ def build_form(result):
     form.Font = FONT
     form.StartPosition = FormStartPosition.CenterScreen
     form.FormBorderStyle = FormBorderStyle.Sizable
-    form.MinimumSize = Size(1000, 620)
-    form.ClientSize = Size(1120, 680)
+    form.MinimumSize = Size(1040, 640)
+    form.ClientSize = Size(1140, 720)
 
-    # ---------- 左：图纸列表 ----------
+    # 根布局：第 1 行左右两块，第 2 行是按钮（横跨两列）。全部用表格布局，互不抢空间。
+    root = TableLayoutPanel()
+    root.Dock = DockStyle.Fill
+    root.Padding = Padding(14, 12, 14, 10)
+    root.ColumnCount = 2
+    root.RowCount = 2
+    root.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Absolute, 440))
+    root.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Percent, 100))
+    root.RowStyles.Add(WF.RowStyle(WF.SizeType.Percent, 100))
+    root.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 46))
+    form.Controls.Add(root)
+
+    # ---------- 左：图纸树（系统分组，可展开到单张） ----------
     left = TableLayoutPanel()
-    left.Dock = DockStyle.Left
-    left.Width = 430
+    left.Dock = DockStyle.Fill
     left.ColumnCount = 1
     left.RowCount = 3
-    left.Padding = Padding(10)
-    left.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 28))
+    left.Margin = Padding(0, 0, 14, 0)
+    left.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 26))
     left.RowStyles.Add(WF.RowStyle(WF.SizeType.Percent, 100))
-    left.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 34))
-    form.Controls.Add(left)
+    left.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 40))
+    root.Controls.Add(left, 0, 0)
 
     lb_title = Label()
-    lb_title.Text = u"选择图纸（按系统分组，默认勾井大样）"
+    lb_title.Text = u"1. 选择图纸（勾系统名整组选中；展开后可单张勾选）"
     lb_title.Dock = DockStyle.Fill
     lb_title.TextAlign = SD.ContentAlignment.MiddleLeft
     left.Controls.Add(lb_title, 0, 0)
 
-    clb = CheckedListBox()
-    clb.Dock = DockStyle.Fill
-    clb.CheckOnClick = True
-    left.Controls.Add(clb, 0, 1)
+    tree = TreeView()
+    tree.Dock = DockStyle.Fill
+    tree.CheckBoxes = True
+    tree.HideSelection = False
+    left.Controls.Add(tree, 0, 1)
 
     sel_row = FlowLayoutPanel()
     sel_row.Dock = DockStyle.Fill
     sel_row.FlowDirection = FlowDirection.LeftToRight
     left.Controls.Add(sel_row, 0, 2)
 
+    # 分组：每个系统一个父节点，父节点下面是该系统的图纸
     items = _sheets_wanted()
     groups = group_by_system(items)
-    row_map = []
+    group_nodes = []
     for sysname, lst in groups:
+        gnode = TreeNode(sysname)
         for name, sid in lst:
-            clb.Items.Add(u"[%s] %s" % (sysname, name), (name or u"").startswith(SHEET_PREFIX_NAME))
-            row_map.append((name, sid))
-    override = {}
+            cnode = TreeNode(name)
+            cnode.Tag = (name, sid)
+            cnode.Checked = (name or u"").startswith(SHEET_PREFIX_NAME)
+            gnode.Nodes.Add(cnode)
+        kids = _children(gnode)
+        gnode.Checked = len(kids) > 0 and all([c.Checked for c in kids])
+        tree.Nodes.Add(gnode)
+        group_nodes.append((gnode, sysname))
+        if any([c.Checked for c in kids]) and not gnode.Checked:
+            gnode.Expand()
 
-    # ---------- 右：设置 + 预览 + 底部按钮 ----------
+    # ---------- 右：设置 + 预览 + 说明 ----------
     right = TableLayoutPanel()
     right.Dock = DockStyle.Fill
     right.ColumnCount = 1
-    right.RowCount = 4
-    right.Padding = Padding(12)
+    right.RowCount = 5
+    right.Margin = Padding(0)
+    right.RowStyles.Add(WF.RowStyle(WF.SizeType.AutoSize))
     right.RowStyles.Add(WF.RowStyle(WF.SizeType.AutoSize))
     right.RowStyles.Add(WF.RowStyle(WF.SizeType.AutoSize))
     right.RowStyles.Add(WF.RowStyle(WF.SizeType.Percent, 100))
-    right.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 92))
-    form.Controls.Add(right)
+    right.RowStyles.Add(WF.RowStyle(WF.SizeType.AutoSize))
+    root.Controls.Add(right, 1, 0)
 
-    # 设置区：两列，标签在左、控件在右
+    set_title = Label()
+    set_title.Text = u"2. 设置"
+    set_title.AutoSize = True
+    set_title.Margin = Padding(0, 0, 0, 4)
+    right.Controls.Add(set_title, 0, 0)
+
+    # 设置区：左边一列标签，右边一列控件。目标图框占满整列宽度，长名字也能看全。
     opts = TableLayoutPanel()
-    opts.Dock = DockStyle.Top
+    opts.Dock = DockStyle.Fill
     opts.AutoSize = True
     opts.ColumnCount = 2
-    opts.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Absolute, 92))
+    opts.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Absolute, 96))
     opts.ColumnStyles.Add(WF.ColumnStyle(WF.SizeType.Percent, 100))
-    right.Controls.Add(opts, 0, 0)
+    right.Controls.Add(opts, 0, 1)
 
     def add_row(label_text, control):
         lb = Label()
         lb.Text = label_text
         lb.TextAlign = SD.ContentAlignment.MiddleLeft
         lb.Dock = DockStyle.Fill
+        lb.Margin = Padding(0, 4, 0, 4)
         opts.RowCount += 1
-        opts.Controls.Add(lb)
-        opts.Controls.Add(control)
+        opts.RowStyles.Add(WF.RowStyle(WF.SizeType.AutoSize))
+        row = opts.RowCount - 1
+        opts.Controls.Add(lb, 0, row)
+        opts.Controls.Add(control, 1, row)
 
     tb_prefix = TextBox()
     tb_prefix.Text = DEFAULT_PREFIX
-    tb_prefix.Width = 200
+    tb_prefix.Width = 180
     add_row(u"图号前缀", tb_prefix)
 
     tb_start = TextBox()
@@ -369,13 +403,13 @@ def build_form(result):
 
     cb_tb = ComboBox()
     cb_tb.DropDownStyle = ComboBoxStyle.DropDownList
-    cb_tb.Width = 380
-    cb_tb.Items.Add(u"（保持不变）")
+    cb_tb.Dock = DockStyle.Fill
+    cb_tb.Items.Add(u"（不替换，保持原图框）")
     tb_types = _titleblock_types()
     for t in tb_types:
         cb_tb.Items.Add(u"%s / %s" % (t.FamilyName, t.Name))
     cb_tb.SelectedIndex = 0
-    add_row(u"替换图框", cb_tb)
+    add_row(u"目标图框", cb_tb)
 
     cb_sys = CheckBox()
     cb_sys.Text = u"写入「图纸系统」参数（项目浏览器按它分组）"
@@ -385,77 +419,102 @@ def build_form(result):
 
     # 预览区
     prev_title = Label()
-    prev_title.Text = u"预览（旧图名  →  新图号）"
+    prev_title.Text = u"3. 预览（旧图名  →  新图号）"
     prev_title.AutoSize = True
-    prev_title.Margin = Padding(0, 8, 0, 4)
-    right.Controls.Add(prev_title, 0, 1)
+    prev_title.Margin = Padding(0, 10, 0, 4)
+    right.Controls.Add(prev_title, 0, 2)
 
     lb_prev = ListBox()
     lb_prev.Dock = DockStyle.Fill
-    right.Controls.Add(lb_prev, 0, 2)
-
-    # 底部：说明 + 按钮行（按钮靠右）
-    bottom = TableLayoutPanel()
-    bottom.Dock = DockStyle.Fill
-    bottom.ColumnCount = 1
-    bottom.RowCount = 2
-    bottom.RowStyles.Add(WF.RowStyle(WF.SizeType.Percent, 100))
-    bottom.RowStyles.Add(WF.RowStyle(WF.SizeType.Absolute, 40))
-    right.Controls.Add(bottom, 0, 3)
+    right.Controls.Add(lb_prev, 0, 3)
 
     lb_note = Label()
-    lb_note.Dock = DockStyle.Fill
+    lb_note.AutoSize = True
     lb_note.ForeColor = Color.FromArgb(70, 70, 70)
-    bottom.Controls.Add(lb_note, 0, 0)
+    lb_note.Margin = Padding(0, 6, 0, 0)
+    right.Controls.Add(lb_note, 0, 4)
 
+    # ---------- 底部按钮（横跨两列，靠右） ----------
     btns = FlowLayoutPanel()
     btns.Dock = DockStyle.Fill
     btns.FlowDirection = FlowDirection.RightToLeft
-    bottom.Controls.Add(btns, 0, 1)
+    root.Controls.Add(btns, 0, 1)
+    root.SetColumnSpan(btns, 2)
 
     btn_cancel = Button()
     btn_cancel.Text = u"取消"
-    btn_cancel.Size = Size(96, 30)
+    btn_cancel.Size = Size(96, 32)
     btn_cancel.DialogResult = DialogResult.Cancel
     btns.Controls.Add(btn_cancel)
 
     btn_ok = Button()
     btn_ok.Text = u"应用"
-    btn_ok.Size = Size(120, 30)
+    btn_ok.Size = Size(120, 32)
     btns.Controls.Add(btn_ok)
     form.AcceptButton = btn_ok
     form.CancelButton = btn_cancel
 
-    sel_all = Button()
-    sel_all.Text = u"全选"
-    sel_all.Size = Size(70, 28)
-    sel_row.Controls.Add(sel_all)
-    sel_none = Button()
-    sel_none.Text = u"全不选"
-    sel_none.Size = Size(80, 28)
-    sel_row.Controls.Add(sel_none)
+    # 左下角的快捷按钮
+    def small_button(text, width):
+        b = Button()
+        b.Text = text
+        b.Size = Size(width, 28)
+        sel_row.Controls.Add(b)
+        return b
 
-    def selected_items():
-        out = []
-        for i, (name, sid) in enumerate(row_map):
-            checked = override[i] if i in override else clb.GetItemChecked(i)
-            if checked:
-                out.append((name, sid))
-        return out
+    sel_all = small_button(u"全选", 70)
+    sel_none = small_button(u"全不选", 80)
+    expand_all = small_button(u"全部展开", 90)
+    collapse_all = small_button(u"全部收起", 90)
 
-    def on_item_check(sender, args):
-        override[args.Index] = (args.NewValue == WF.CheckState.Checked)
+    # 勾选变化时，父节点和子节点互相同步。busy 防止程序自己改勾选时又触发一次。
+    busy = [False]
+
+    def on_after_check(sender, args):
+        if busy[0]:
+            return
+        busy[0] = True
+        try:
+            node = args.Node
+            if node.Tag is None:
+                # 点的是系统名：整组跟着它变
+                for c in _children(node):
+                    c.Checked = node.Checked
+            elif node.Parent is not None:
+                # 点的是单张图纸：全部勾上时父节点才勾上
+                kids = _children(node.Parent)
+                node.Parent.Checked = len(kids) > 0 and all([c.Checked for c in kids])
+        finally:
+            busy[0] = False
         recompute()
 
     def set_all(value):
         def handler(sender, args):
-            for i in range(clb.Items.Count):
-                override[i] = value
-                clb.SetItemChecked(i, value)
+            busy[0] = True
+            try:
+                for gnode, _sys in group_nodes:
+                    gnode.Checked = value
+                    for c in _children(gnode):
+                        c.Checked = value
+            finally:
+                busy[0] = False
             recompute()
         return handler
 
+    def selected_items():
+        out = []
+        for gnode, _sys in group_nodes:
+            for c in _children(gnode):
+                if c.Checked and c.Tag is not None:
+                    out.append(c.Tag)
+        return out
+
     def recompute(sender=None, args=None):
+        # 系统名后面显示「已选 X / 共 Y」，不用展开也能看到每组选了多少
+        for gnode, sysname in group_nodes:
+            kids = _children(gnode)
+            picked = len([c for c in kids if c.Checked])
+            gnode.Text = u"%s    已选 %d / 共 %d" % (sysname, picked, len(kids))
         try:
             start = int(tb_start.Text)
         except Exception:
@@ -488,9 +547,11 @@ def build_form(result):
         result["set_system"] = cb_sys.Checked
         form.DialogResult = DialogResult.OK
 
-    clb.ItemCheck += WF.ItemCheckEventHandler(on_item_check)
+    tree.AfterCheck += WF.TreeViewEventHandler(on_after_check)
     sel_all.Click += System.EventHandler(set_all(True))
     sel_none.Click += System.EventHandler(set_all(False))
+    expand_all.Click += System.EventHandler(lambda s, a: tree.ExpandAll())
+    collapse_all.Click += System.EventHandler(lambda s, a: tree.CollapseAll())
     tb_prefix.TextChanged += recompute
     tb_start.TextChanged += recompute
     cb_per.CheckedChanged += recompute
