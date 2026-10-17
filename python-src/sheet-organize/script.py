@@ -794,12 +794,17 @@ def build_form(result):
         r["gidx"] = lv.Groups.IndexOf(g)
         return r
 
-    # 勾选变化时重算预览。busy 防止批量勾选时每张都重算一次。
-    busy = [False]
+    # 勾选变化时重算预览。窗口还没显示完之前，ListView 会为每个条目触发一次 ItemChecked（上千次），
+    # 所以 busy 先为 True，等窗口显示完（Shown）再放开，只重算一次。批量勾选时也用 busy 避免逐张重算。
+    busy = [True]
 
     def on_item_checked(sender, args):
         if busy[0]:
             return
+        recompute()
+
+    def on_shown(sender, args):
+        busy[0] = False
         recompute()
 
     def set_checked(items, value):
@@ -937,6 +942,7 @@ def build_form(result):
         form.DialogResult = DialogResult.OK
 
     lv.ItemChecked += WF.ItemCheckedEventHandler(on_item_checked)
+    form.Shown += System.EventHandler(on_shown)
     btn_all.Click += System.EventHandler(lambda s, a: set_checked(items_all(), True))
     btn_none.Click += System.EventHandler(lambda s, a: set_checked(items_all(), False))
     btn_check_sel.Click += System.EventHandler(lambda s, a: set_checked(items_selected(), True))

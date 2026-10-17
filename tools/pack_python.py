@@ -8,7 +8,7 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"well-sheets": "0.3.0", "well-annotate": "0.3.9", "pile-cushion": "0.3.9", "quantity-export": "0.2.1", "rebar-cage": "0.2.1", "sheet-organize": "0.4.0"}
+VERSION_OVERRIDE = {"well-sheets": "0.3.0", "well-annotate": "0.3.9", "pile-cushion": "0.3.9", "quantity-export": "0.2.1", "rebar-cage": "0.2.1", "sheet-organize": "0.4.1"}
 OUT.mkdir(exist_ok=True)
 
 # 文件夹名 -> (id, 分类, 图标上的字)
