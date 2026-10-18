@@ -11,7 +11,7 @@
 - 解压时防路径穿越（zip-slip）；宿主更新失败自动回滚。
 - 插件版本声明 `hostApi`，宿主过旧时拒绝安装而不是出错。
 - 社区投稿插件：自查脚本 `validate.py` 静态扫描 + 维护者人工审核源码 + 安装前提示。
-- 下载计数不保存原始 IP：只存加盐哈希的网段（用于 1 小时内去重，约 2 天后清理），并记下 Cloudflare 估算的城市级地区（国家、省州、城市、大致经纬度，保留 365 天，暂不对外展示）（`functions/api/dl/[id].js`、`migrations/download_geo.sql`）。
+- 下载与网站使用统计会记录访问 IP 和 Cloudflare 估算的地区（国家、省州、城市、大致经纬度），仅供站长分析，保留 180 天后整条删除，不出售、不分享、不对外展示；另用加盐哈希的网段做 1 小时内去重（约 2 天后清理）（`functions/api/dl/[id].js`、`migrations/download_geo.sql`）。
 - 网站响应头：CSP、`X-Frame-Options: DENY`、HSTS、`nosniff`、Permissions-Policy（`_headers`）。
 
 ## 需要你知道的限制
