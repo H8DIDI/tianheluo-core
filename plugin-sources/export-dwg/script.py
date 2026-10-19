@@ -16,19 +16,155 @@ doc = revit.doc
 uidoc = revit.uidoc
 
 
+# 图纸名前缀、井编号系列、logo 位置都来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
+# ---- well_config（天河落共用片段，打包时内联进脚本）-----------------------------
+# 井大样系列插件（一键井展开图 / 一键井大样标注 / 图纸归类与图框编号 / 导出井大样DWG）共用的项目配置。
+# 配置文件：文档\KaifaTools\井大样配置.json。第一次运行时自动写出一份默认配置（与原来写死的规则完全一样），
+# 换项目时只改这个文件：图纸名前缀、图号前缀、井编号系列（前缀 → 系统名 → 系统代码）、图框 logo 位置。
+import io as _wc_io
+import os as _wc_os
+import json as _wc_json
+import re as _wc_re
+
+WCFG_FILE = _wc_os.path.join(
+    __import__('System').Environment.GetFolderPath(__import__('System').Environment.SpecialFolder.MyDocuments),
+    u"KaifaTools", u"井大样配置.json")
+
+WCFG_DEFAULTS = {
+    u"说明": (u"井大样系列插件的项目配置。改完保存，下次点插件生效；删掉这个文件会恢复默认。"
+            u"series 里每一项是一个井编号系列：prefix=井号前缀（井号形如 AA-01、T-068、室内-A-01，前缀后面可以有一个 -，再跟数字），"
+            u"system=系统名（写进图纸的「图纸系统」参数、用来归类），code=系统代码（图号模板里的 {系统码}），label=菜单里显示的名字。"
+            u"顺序就是菜单和排序的顺序；匹配时长的前缀优先（AA 先于 A）。"),
+    u"sheet_name_prefix": u"井大样_",
+    u"sheet_number_prefix": u"AG-",
+    u"indoor_prefix": u"室内-",
+    u"system_param": u"图纸系统",
+    u"series": [
+        {u"prefix": u"室内-A", u"system": u"室内强电井", u"code": u"NQ", u"label": u"室内-A- 强电井"},
+        {u"prefix": u"室内-T", u"system": u"室内通信井", u"code": u"NT", u"label": u"室内-T- 通信井"},
+        {u"prefix": u"室内-E", u"system": u"室内弱电井", u"code": u"NR", u"label": u"室内-E- 弱电井"},
+        {u"prefix": u"室内-L", u"system": u"室内低压拉线井", u"code": u"ND", u"label": u"室内-L- 低压拉线井"},
+        {u"prefix": u"AA", u"system": u"强电井", u"code": u"QD", u"label": u"AA- 强电特型井"},
+        {u"prefix": u"A", u"system": u"强电井", u"code": u"QD", u"label": u"A- 强电井"},
+        {u"prefix": u"BB", u"system": u"弱电井", u"code": u"RD", u"label": u"BB- 弱电特型井"},
+        {u"prefix": u"B", u"system": u"弱电井", u"code": u"RD", u"label": u"B- 弱电井"},
+        {u"prefix": u"T", u"system": u"通信井", u"code": u"TX", u"label": u"T- 通信井"},
+        {u"prefix": u"L", u"system": u"低压拉线井", u"code": u"DY", u"label": u"L- 低压拉线井"},
+        {u"prefix": u"E", u"system": u"预制井", u"code": u"YZ", u"label": u"E- 预制井"},
+        {u"prefix": u"Y", u"system": u"雨水井", u"code": u"YS", u"label": u"Y- 雨水井"},
+    ],
+    u"other": {u"system": u"其他", u"code": u"QT"},
+    u"logo": {u"enabled": True, u"file": u"frame_logo.jpg", u"x0": 736.54, u"y0": 141.10, u"w": 91.49,
+              u"说明": u"导出 DWG 后补插的图框 logo：x0/y0 = logo 左下角在 Layout1 里的坐标，w = 宽度（按 A1 横向图框标定）。换图框要改；enabled=false 不补 logo。"},
+}
+
+_WCFG_CACHE = [None]
+
+
+def _wcfg_merge(base, extra):
+    out = dict(base)
+    for k, v in (extra or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _wcfg_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def wcfg_load(write_default=True):
+    """读项目配置（缺的项用默认值补齐）。文件不存在时写出默认配置，方便用户找到并修改。"""
+    if _WCFG_CACHE[0] is not None:
+        return _WCFG_CACHE[0]
+    cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    try:
+        if _wc_os.path.exists(WCFG_FILE):
+            with _wc_io.open(WCFG_FILE, 'r', encoding='utf-8-sig') as f:
+                cfg = _wcfg_merge(cfg, _wc_json.load(f))
+        elif write_default:
+            d = _wc_os.path.dirname(WCFG_FILE)
+            if not _wc_os.path.isdir(d):
+                _wc_os.makedirs(d)
+            with _wc_io.open(WCFG_FILE, 'w', encoding='utf-8') as f:
+                f.write(_wc_json.dumps(WCFG_DEFAULTS, ensure_ascii=False, indent=2))
+    except Exception:
+        cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    # series 至少要有 prefix
+    good = []
+    for s in cfg.get(u"series") or []:
+        try:
+            p = (s.get(u"prefix") or u"").strip()
+        except Exception:
+            continue
+        if not p:
+            continue
+        s = dict(s)
+        s[u"prefix"] = p
+        s.setdefault(u"system", p)
+        s.setdefault(u"code", p)
+        s.setdefault(u"label", p + u"-")
+        good.append(s)
+    cfg[u"series"] = good or list(WCFG_DEFAULTS[u"series"])
+    _WCFG_CACHE[0] = cfg
+    return cfg
+
+
+def wcfg_series_of(mark, cfg=None, strict=False):
+    """井号属于哪个系列：前缀（长的优先）后面可以有一个 -，必须紧跟数字。认不出返回 None。
+    strict=True 时前缀后面必须是「-数字」（井的标记用这个：雨水井的 A1、BB24 这类不带 - 的不算强电/弱电井）。"""
+    cfg = cfg or wcfg_load()
+    m = (mark or u"").strip()
+    for s in sorted(cfg[u"series"], key=lambda x: -len(x[u"prefix"])):
+        p = s[u"prefix"]
+        if m.startswith(p):
+            rest = m[len(p):]
+            if rest[:1] == u"-":
+                rest = rest[1:]
+            elif strict:
+                continue
+            if rest[:1].isdigit():
+                return s
+    return None
+
+
+def wcfg_series_index(s, cfg=None):
+    cfg = cfg or wcfg_load()
+    for i, x in enumerate(cfg[u"series"]):
+        if x is s:
+            return i
+    return len(cfg[u"series"])
+
+
+def wcfg_natural_key(text):
+    out = []
+    for tok in _wc_re.split(r'(\d+)', text or u''):
+        out.append((0, int(tok), u'') if tok.isdigit() else (1, 0, tok.lower()))
+    return out
+
+
+def wcfg_well_sort_key(mark, cfg=None, strict=True):
+    """先按系列在配置里的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
+    s = wcfg_series_of(mark, cfg, strict)
+    return (wcfg_series_index(s, cfg) if s is not None else 9999, wcfg_natural_key(mark))
+# ---- well_config 结束 ----------------------------------------------------------
+
+WCFG = wcfg_load()
+
 # 井的编号：AA-01、室内-A-01 这种。改过名的图纸里也能找到
-_MARK_RE = re.compile(u"(室内-)?[A-Za-z]{1,3}-\\d+(?:-\\d+)?")
+_MARK_RE = re.compile(u"(" + re.escape(WCFG[u"indoor_prefix"]) + u")?[A-Za-z]{1,3}-\\d+(?:-\\d+)?")
 
 # ---- DWG 补 logo 的参数 ----
 # Revit 导出 DWG 时不会带上图纸里的光栅图片（比如图框右侧「总承包商」框里的 logo），
 # 所以导出后用 AutoCAD 在后台把 logo 补插到每张 DWG 的 Layout1（图纸空间）。
 # 下面的位置是按 A1 横向图框标定的（单位 mm，图纸空间坐标，原点在图框左下角）：
 #   LOGO_X0, LOGO_Y0 = logo 图片左下角；LOGO_W = logo 宽度（高度按图片比例自动算）。
-# 换了别的图框，只需要改这三个数。
-LOGO_X0 = 736.54
-LOGO_Y0 = 141.10
-LOGO_W = 91.49
-LOGO_FILE_NAME = u"frame_logo.jpg"
+# 换了别的图框，改配置文件里 logo 的 x0 / y0 / w 三个数（enabled=false 则不补 logo）。
+LOGO_ENABLED = bool(WCFG[u"logo"].get(u"enabled", True))
+LOGO_X0 = float(WCFG[u"logo"].get(u"x0", 736.54))
+LOGO_Y0 = float(WCFG[u"logo"].get(u"y0", 141.10))
+LOGO_W = float(WCFG[u"logo"].get(u"w", 91.49))
+LOGO_FILE_NAME = WCFG[u"logo"].get(u"file") or u"frame_logo.jpg"
+# DWG 导出设置：模型里有这个名字的导出设置就用它，没有就用默认设置
+DWG_SETUP_NAME = WCFG.get(u"dwg_export_setup") or u"机电导图设置"
 
 # 内置的 logo 图片（JPEG，base64）。导出时会写成 frame_logo.jpg 放在 DWG 同一个文件夹，
 # DWG 里引用的就是这个文件，所以 DWG 和这个 jpg 要一起带走。
@@ -410,7 +546,9 @@ _PS_LOGO = u"""param(
   [string]$Log,
   [double]$X0,
   [double]$Y0,
-  [double]$W
+  [double]$W,
+  [int]$AddLogo = 1,
+  [int]$Purge = 0
 )
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -426,7 +564,7 @@ try {
   Write-Log '无法启动 AutoCAD，DWG 未补 logo（DWG 本身已导出）'
   exit 1
 }
-$done = 0; $skip = 0; $fail = 0
+$done = 0; $skip = 0; $fail = 0; $script:purged = 0
 foreach ($n in $names) {
   $path = Join-Path $Folder $n
   if (-not (Test-Path -LiteralPath $path)) { $fail++; Write-Log ('找不到: ' + $n); continue }
@@ -438,12 +576,24 @@ foreach ($n in $names) {
       $blk = $doc.Layouts.Item('Layout1').Block
       $has = $false
       foreach ($e in $blk) { if ($e.ObjectName -eq 'AcDbRasterImage') { $has = $true; break } }
-      if ($has) { $skip++ } else {
-        $ip = [double[]]@($X0, $Y0, 0.0)
-        [void]$blk.AddRaster($Png, $ip, $W, 0.0)
-        $doc.Save()
-        $done++
+      $changed = $false
+      if ($AddLogo -eq 1) {
+        if ($has) { $skip++ } else {
+          $ip = [double[]]@($X0, $Y0, 0.0)
+          [void]$blk.AddRaster($Png, $ip, $W, 0.0)
+          $changed = $true
+          $done++
+        }
       }
+      if ($Purge -eq 1) {
+        $before = (Get-Item -LiteralPath $path).Length
+        # 清理未使用的图层、块、线型、文字样式等；嵌套的要清几遍
+        for ($k = 0; $k -lt 3; $k++) { $doc.PurgeAll() }
+        $changed = $true
+        $script:purged++
+      }
+      if ($changed) { $doc.Save() }
+      if ($Purge -eq 1) { Write-Log ('瘦身: ' + $n + '  ' + [math]::Round($before / 1MB, 2) + ' MB -> ' + [math]::Round((Get-Item -LiteralPath $path).Length / 1MB, 2) + ' MB') }
       $ok = $true
     } catch {
       Start-Sleep -Seconds 4
@@ -454,7 +604,7 @@ foreach ($n in $names) {
   if (-not $ok) { $fail++; Write-Log ('失败: ' + $n) }
 }
 if (-not $was) { try { $acad.Quit() } catch { } }
-Write-Log ('完成：补 logo ' + $done + ' 张，已有 logo 跳过 ' + $skip + ' 张，失败 ' + $fail + ' 张')
+Write-Log ('完成：补 logo ' + $done + ' 张，已有 logo 跳过 ' + $skip + ' 张，瘦身 ' + $script:purged + ' 张，失败 ' + $fail + ' 张')
 """
 
 
@@ -463,9 +613,10 @@ def _well_mark(sheet):
     「井大样_」开头的，取前缀后面的部分；改过名的（例如 BTP-IF1 11KV-…-AA-01），
     只要写过「图纸系统」参数（归类插件写入的），就取图名里最后的井编号。"""
     nm = sheet.Name or u""
-    if nm.startswith(u"井大样_"):
-        return nm[len(u"井大样_"):]
-    p = sheet.LookupParameter(u"图纸系统")
+    pre = WCFG[u"sheet_name_prefix"]
+    if pre and nm.startswith(pre):
+        return nm[len(pre):]
+    p = sheet.LookupParameter(WCFG[u"system_param"])
     if p is None or not p.HasValue or not p.AsString():
         return u""
     found = [m.group(0) for m in _MARK_RE.finditer(nm)]
@@ -483,13 +634,15 @@ def _autocad_available():
         return False
 
 
-def _start_logo_job(folder, dwg_names):
-    """后台启动 AutoCAD 给 DWG 补 logo。返回 (是否已启动, 说明, 日志路径)。"""
+def _start_logo_job(folder, dwg_names, add_logo=True, purge=False):
+    """后台启动 AutoCAD 给 DWG 补 logo 和/或瘦身（PurgeAll）。返回 (是否已启动, 说明, 日志路径)。"""
     log_path = os.path.join(folder, u"补logo日志.txt")
+    if not (add_logo or purge):
+        return False, u"", log_path
     if not dwg_names:
-        return False, u"没有导出成功的 DWG，不需要补 logo", log_path
+        return False, u"没有导出成功的 DWG，不需要后处理", log_path
     if not _autocad_available():
-        return False, u"这台电脑没有装 AutoCAD，DWG 里没有 logo（DWG 本身已导出）", log_path
+        return False, u"这台电脑没有装 AutoCAD，DWG 没有补 logo / 瘦身（DWG 本身已导出）", log_path
     # logo 放在 DWG 同一个文件夹：DWG 引用的就是它
     logo_path = os.path.join(folder, LOGO_FILE_NAME)
     data = base64.b64decode(u"".join(_LOGO_B64))
@@ -503,15 +656,16 @@ def _start_logo_job(folder, dwg_names):
     with io.open(lst, "w", encoding="utf-8-sig") as f:
         f.write(u"\n".join(dwg_names) + u"\n")
     args = (u'-NoProfile -ExecutionPolicy Bypass -File "{}" -Folder "{}" -ListFile "{}" '
-            u'-Png "{}" -Log "{}" -X0 {} -Y0 {} -W {}').format(
-        ps1, folder, lst, logo_path, log_path, LOGO_X0, LOGO_Y0, LOGO_W)
+            u'-Png "{}" -Log "{}" -X0 {} -Y0 {} -W {} -AddLogo {} -Purge {}').format(
+        ps1, folder, lst, logo_path, log_path, LOGO_X0, LOGO_Y0, LOGO_W, 1 if add_logo else 0, 1 if purge else 0)
     psi = System.Diagnostics.ProcessStartInfo()
     psi.FileName = "powershell.exe"
     psi.Arguments = args
     psi.UseShellExecute = False
     psi.CreateNoWindow = True
     System.Diagnostics.Process.Start(psi)
-    return True, u"已在后台启动 AutoCAD 补 logo（不影响 Revit，完成后日志见：{}）".format(log_path), log_path
+    what = u"、".join([x for x, on in ((u"补 logo", add_logo), (u"瘦身", purge)) if on])
+    return True, u"已在后台启动 AutoCAD {}（不影响 Revit，完成后日志见：{}）".format(what, log_path), log_path
 
 
 def _export_pdf(sheets, folder):
@@ -549,35 +703,26 @@ def main():
             return marks.get(int(s.Id.Value), u"")
 
         if not sheets or len(sheets) == 0:
-            forms.alert('模型中未找到井大样图纸（名称以「井大样_」开头，或已改名并写有「图纸系统」参数）！', title='提示')
+            forms.alert(u'模型中未找到井大样图纸（名称以「{}」开头，或已改名并写有「{}」参数）！\n\n图纸名前缀可在配置文件里改：{}'.format(
+                WCFG[u"sheet_name_prefix"], WCFG[u"system_param"], WCFG_FILE), title='提示')
             return
 
         # 2. 导出范围选择菜单
         # 菜单数量按当前模型实时统计 —— 原来写死的 947/127 等数字不会随后续
         # 增删图纸变化，容易让人以为"列表没刷新、导的还是老数据"。
-        _grp = {
-            'in': [s for s in sheets if mk_of(s).startswith(u"室内-")],
-            'AA': [s for s in sheets if mk_of(s).startswith(u"AA-")],
-            'BB': [s for s in sheets if mk_of(s).startswith(u"BB-")],
-            'A': [s for s in sheets if mk_of(s).startswith(u"A-")],
-            'B': [s for s in sheets if mk_of(s).startswith(u"B-")],
-            'T': [s for s in sheets if mk_of(s).startswith(u"T-")],
-            'L': [s for s in sheets if mk_of(s).startswith(u"L-")],
-            'E': [s for s in sheets if mk_of(s).startswith(u"E-")],
-        }
-
-        menu_opts = [
-            '【1】先行测试：导出前 5 张样板井图纸（当前共 {} 张可选）'.format(len(sheets)),
-            '【2】室内井全系列（当前 {} 张）'.format(len(_grp['in'])),
-            '【3】AA- 强电特型井全系列（当前 {} 张）'.format(len(_grp['AA'])),
-            '【4】BB- 弱电特型井全系列（当前 {} 张）'.format(len(_grp['BB'])),
-            '【5】A- 强电井全系列（当前 {} 张）'.format(len(_grp['A'])),
-            '【6】B- 弱电井全系列（当前 {} 张）'.format(len(_grp['B'])),
-            '【7】T- 通信井全系列（当前 {} 张）'.format(len(_grp['T'])),
-            '【8】L- 低压拉线井全系列（当前 {} 张）'.format(len(_grp['L'])),
-            '【9】E- 预制井全系列（当前 {} 张）'.format(len(_grp['E'])),
-            '【10】全模型全量导出（当前共 {} 张）'.format(len(sheets))
-        ]
+        _ind = WCFG[u"indoor_prefix"]
+        _items = [(u'先行测试：导出前 5 张图纸（当前共 {} 张可选）'.format(len(sheets)), list(sheets)[:5])]
+        _indoor = [s for s in sheets if mk_of(s).startswith(_ind)]
+        if _indoor:
+            _items.append((u'室内井全系列（当前 {} 张）'.format(len(_indoor)), _indoor))
+        for _sr in WCFG[u"series"]:
+            if _sr[u"prefix"].startswith(_ind):
+                continue
+            _ss = [s for s in sheets if wcfg_series_of(mk_of(s), WCFG, True) is _sr]
+            if _ss:
+                _items.append((u'{} 全系列（当前 {} 张）'.format(_sr[u"label"], len(_ss)), _ss))
+        _items.append((u'全模型全量导出（当前共 {} 张）'.format(len(sheets)), list(sheets)))
+        menu_opts = [u'【{}】{}'.format(i + 1, t) for i, (t, _l) in enumerate(_items)]
 
         choice = forms.SelectFromList.show(
             menu_opts,
@@ -586,30 +731,7 @@ def main():
         )
         if not choice:
             return
-
-        target_sheets = []
-        if '【1】' in choice:
-            # 原实现只取 AA- 前 5 张，模型里没有 AA- 井时就一张也导不出来；
-            # 改成取当前全部井大样图纸的前 5 张，任何模型都能试跑。
-            target_sheets = list(sheets)[:5]
-        elif '【2】' in choice:
-            target_sheets = _grp['in']
-        elif '【3】' in choice:
-            target_sheets = _grp['AA']
-        elif '【4】' in choice:
-            target_sheets = _grp['BB']
-        elif '【5】' in choice:
-            target_sheets = _grp['A']
-        elif '【6】' in choice:
-            target_sheets = _grp['B']
-        elif '【7】' in choice:
-            target_sheets = _grp['T']
-        elif '【8】' in choice:
-            target_sheets = _grp['L']
-        elif '【9】' in choice:
-            target_sheets = _grp['E']
-        elif '【10】' in choice:
-            target_sheets = list(sheets)
+        target_sheets = list(_items[menu_opts.index(choice)][1]) if choice in menu_opts else []
 
         if not target_sheets:
             forms.alert('未找到符合选择条件的图纸！', title='警告')
@@ -618,15 +740,17 @@ def main():
         # 3. 选择导出格式（可多选）
         fmt_dwg = u'DWG（导出后自动补插图框里的光栅 logo）'
         fmt_pdf = u'PDF（所有选中图纸合并成一个文件，图框完整、带 logo）'
+        fmt_slim = u'DWG 瘦身：导出后用 AutoCAD 清理未使用的图层、块、样式（PurgeAll，需要装 AutoCAD）'
         fmts = forms.SelectFromList.show(
-            [fmt_dwg, fmt_pdf],
+            [fmt_dwg, fmt_slim, fmt_pdf],
             title='选择导出格式（可多选）',
             multiselect=True,
             button_name='开始导出'
         )
         if not fmts:
             return
-        do_dwg = fmt_dwg in fmts
+        do_slim = fmt_slim in fmts
+        do_dwg = fmt_dwg in fmts or do_slim
         do_pdf = fmt_pdf in fmts
 
         # 4. 导出文件夹
@@ -652,7 +776,7 @@ def main():
 
             dwg_setup = None
             for s in all_dwg_setups:
-                if s.Name == "机电导图设置":
+                if s.Name == DWG_SETUP_NAME:
                     dwg_setup = s
                     break
 
@@ -698,7 +822,8 @@ def main():
         logo_msg = u""
         if do_dwg:
             try:
-                started, logo_msg, _log = _start_logo_job(default_folder, exported_names)
+                started, logo_msg, _log = _start_logo_job(default_folder, exported_names,
+                                                          add_logo=LOGO_ENABLED, purge=do_slim)
             except Exception as ex:
                 logo_msg = u"启动补 logo 失败（DWG 本身已导出）：{}".format(ex)
 

@@ -1,7 +1,7 @@
 {
   "id": "export-dwg",
   "name": "一键导出井大样DWG",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "一键批量导出井大样图纸为 DWG（自动补插图框里的光栅 logo）和/或合并成一个文件的 PDF，直接保存在指定文件夹中。",
   "category": "导出",
   "revit": "2026",

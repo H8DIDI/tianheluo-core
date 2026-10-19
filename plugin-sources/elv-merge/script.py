@@ -1,116 +1,160 @@
-import clr
-clr.AddReference('RevitAPI')
-from Autodesk.Revit.DB import *
-from pyrevit import forms
+# -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+__title__ = '族类型清洗合并'
+__author__ = 'didi'
+__doc__ = ('把同一个族里「名字只差一点」的重复类型合并成一个（原「强电井清洗合并」，现在任何族都能用）：\n'
+           '按规则文件改类型名（例如去掉名字末尾的深度 x3500(D)、把 EM1- 前缀纠正成族对应的 EM2-），\n'
+           '改完重名的类型合并：构件换到保留的类型上，多余类型删除。先列出要改什么再确认，整次可 Ctrl+Z 撤销。\n'
+           '规则在 文档\\KaifaTools\\族类型清洗规则.json（第一次运行自动生成，默认就是原来强电井的规则）。')
+
+import io
+import os
+import re
+import json
 import traceback
+import clr
+import System
+clr.AddReference('RevitAPI')
+from Autodesk.Revit import DB
+from pyrevit import revit, forms
 
-doc = __revit__.ActiveUIDocument.Document
-
-family_prefix_map = {
-    "ELE-EM1-I": "EM1",
-    "ELE-EM1-L": "EM1",
-    "ELE-EM2-I": "EM2",
-    "ELE-EM2-L": "EM2",
-    "ELE-EM4-I": "EM4",
-    "ELE-EM4-L": "EM4",
-    "ELE-EM4-T": "EM4"
+doc = revit.doc
+TITLE = '族类型清洗合并'
+RULES = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
+                     'KaifaTools', '族类型清洗规则.json')
+DEFAULT = {
+    '说明': ('families：要处理的族名 → 这个族的类型名应有的前缀（类型名以别的族的前缀开头时纠正过来，如 EM1- → EM2-）。'
+           'strip：对类型名做的正则替换（pattern → repl），默认把「…(L)x…(W)x深度」末尾的深度去掉。'
+           '改名后同名的类型合并成一个。'),
+    'families': {'ELE-EM1-I': 'EM1', 'ELE-EM1-L': 'EM1', 'ELE-EM2-I': 'EM2', 'ELE-EM2-L': 'EM2',
+                 'ELE-EM4-I': 'EM4', 'ELE-EM4-L': 'EM4', 'ELE-EM4-T': 'EM4'},
+    'strip': [{'pattern': r'^(.*\(L\)x[^x]*?\))x.*$', 'repl': r'\1'}],
 }
 
-instances_updated = 0
-deleted_count = 0
-skipped_grouped = 0
-error_msg = ""
 
-t = Transaction(doc, "强电井瘦身合并")
-t.Start()
+def load_rules():
+    try:
+        if os.path.exists(RULES):
+            with io.open(RULES, 'r', encoding='utf-8-sig') as f:
+                d = json.load(f)
+            return {'families': d.get('families') or {}, 'strip': d.get('strip') or []}
+        dd = os.path.dirname(RULES)
+        if not os.path.isdir(dd):
+            os.makedirs(dd)
+        with io.open(RULES, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(DEFAULT, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+    return {'families': DEFAULT['families'], 'strip': DEFAULT['strip']}
 
-try:
-    fam_coll = FilteredElementCollector(doc).OfClass(Family)
-    for f in fam_coll:
-        if f.Name not in family_prefix_map:
+
+def target_name(name, prefix, all_prefixes, strips):
+    new = name
+    if prefix:
+        for q in all_prefixes:
+            if q != prefix and new.startswith(q + '-'):
+                new = prefix + '-' + new[len(q) + 1:]
+                break
+    for r in strips:
+        try:
+            new = re.sub(r['pattern'], r.get('repl', ''), new)
+        except Exception:
+            pass
+    return new.strip() or name
+
+
+def plan(rules):
+    fams = rules['families']
+    prefixes = sorted(set(fams.values()), key=lambda x: -len(x))
+    out = []
+    for fam in DB.FilteredElementCollector(doc).OfClass(DB.Family):
+        if fam.Name not in fams:
             continue
-        correct_prefix = family_prefix_map[f.Name]
-        
-        symbol_ids = f.GetFamilySymbolIds()
-        all_symbols = [doc.GetElement(sid) for sid in symbol_ids]
-        
-        symbol_target_name = {}
-        base_symbols = {}
-        
-        for fs in all_symbols:
-            old_name = fs.Name
-            new_name = old_name
-            
-            if old_name.startswith("EM1-") and correct_prefix == "EM2":
-                new_name = "EM2-" + old_name[4:]
-                
-            if ")x" in new_name:
-                depth_index = new_name.rfind(")x")
-                first_x = new_name.find("(L)x")
-                if first_x > 0 and depth_index > first_x + 2:
-                    new_name = new_name[:depth_index+1]
-                    
-            symbol_target_name[fs] = new_name
-            if old_name == new_name:
-                base_symbols[new_name] = fs
+        syms = [doc.GetElement(i) for i in fam.GetFamilySymbolIds()]
+        tgt = dict((s.Id, target_name(s.Name, fams[fam.Name], prefixes, rules['strip'])) for s in syms)
+        if all(tgt[s.Id] == s.Name for s in syms):
+            continue
+        out.append((fam, syms, tgt))
+    return out
 
-        for fs in all_symbols:
-            if fs not in symbol_target_name: continue
-            target = symbol_target_name[fs]
-            if target not in base_symbols:
-                new_base = fs.Duplicate(target)
-                if not new_base.IsActive: new_base.Activate()
-                base_symbols[target] = new_base
 
-        symbols_to_delete = []
-        for fs in all_symbols:
-            if fs not in symbol_target_name: continue
-            target_name = symbol_target_name[fs]
-            target_symbol = base_symbols[target_name]
-            
-            if fs.Id != target_symbol.Id:
-                if not target_symbol.IsActive: target_symbol.Activate()
-                
-                inst_coll = FilteredElementCollector(doc).WherePasses(FamilyInstanceFilter(doc, fs.Id))
-                for inst in inst_coll:
-                    # Check if in a group
-                    if inst.GroupId != ElementId.InvalidElementId:
-                        skipped_grouped += 1
+def count_instances(sym):
+    return DB.FilteredElementCollector(doc).WherePasses(DB.FamilyInstanceFilter(doc, sym.Id)).GetElementCount()
+
+
+def main():
+    rules = load_rules()
+    work = plan(rules)
+    if not work:
+        forms.alert('按规则没有需要改名或合并的类型。\n\n规则文件：%s' % RULES, title=TITLE)
+        return
+    lines = []
+    n_types = n_inst = 0
+    for fam, syms, tgt in work:
+        changes = [s for s in syms if tgt[s.Id] != s.Name]
+        n_types += len(changes)
+        k = sum(count_instances(s) for s in changes)
+        n_inst += k
+        lines.append('%s：%d 个类型改名/合并，涉及 %d 个构件' % (fam.Name, len(changes), k))
+        for s in changes[:3]:
+            lines.append('    %s → %s' % (s.Name, tgt[s.Id]))
+    msg = '\n'.join(lines[:40]) + ('\n…' if len(lines) > 40 else '')
+    msg += '\n\n共 %d 个类型、%d 个构件。编组里的构件改不了类型，会跳过并报告。\n继续？（可 Ctrl+Z 撤销）' % (n_types, n_inst)
+    if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
+        return
+    updated = deleted = renamed = grouped = 0
+    t = DB.Transaction(doc, '天河落 · 族类型清洗合并')
+    t.Start()
+    try:
+        for fam, syms, tgt in work:
+            base = {}
+            for s in syms:
+                if tgt[s.Id] == s.Name:
+                    base[s.Name] = s
+            for s in syms:
+                name = tgt[s.Id]
+                if name in base:
+                    continue
+                # 没有现成同名类型：直接改名当作保留的类型（不再复制一份）
+                s.Name = name
+                base[name] = s
+                renamed += 1
+            for s in syms:
+                keep = base[tgt[s.Id]]
+                if keep.Id == s.Id:
+                    continue
+                if not keep.IsActive:
+                    keep.Activate()
+                left = 0
+                for inst in DB.FilteredElementCollector(doc).WherePasses(DB.FamilyInstanceFilter(doc, s.Id)):
+                    if inst.GroupId != DB.ElementId.InvalidElementId:
+                        grouped += 1
+                        left += 1
                         continue
-                        
-                    # Handle pinned elements
-                    was_pinned = inst.Pinned
-                    if was_pinned:
+                    pinned = inst.Pinned
+                    if pinned:
                         inst.Pinned = False
-                        
                     try:
-                        inst.Symbol = target_symbol
-                        instances_updated += 1
-                    except Exception as e:
-                        pass
-                        
-                    # Re-pin if it was pinned
-                    if was_pinned:
+                        inst.Symbol = keep
+                        updated += 1
+                    except Exception:
+                        left += 1
+                    if pinned:
                         inst.Pinned = True
-                        
-                symbols_to_delete.append(fs.Id)
-                
-        for sid in symbols_to_delete:
-            try:
-                doc.Delete(sid)
-                deleted_count += 1
-            except:
-                pass
+                if left == 0:
+                    doc.Delete(s.Id)
+                    deleted += 1
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        forms.alert('出错，已撤销，模型未改动：\n' + traceback.format_exc(), title=TITLE)
+        return
+    msg = '完成：改名 %d 个类型，%d 个构件换到保留的类型，删除重复类型 %d 个。' % (renamed, updated, deleted)
+    if grouped:
+        msg += '\n\n有 %d 个构件在编组里，没有改（对应的旧类型也保留了）。解组后再运行一次即可。' % grouped
+    forms.alert(msg, title=TITLE)
 
-    t.Commit()
-except Exception as ex:
-    t.RollBack()
-    error_msg = traceback.format_exc()
 
-if error_msg:
-    forms.alert("程序发生异常:\n" + error_msg, title="错误日志")
-else:
-    msg = "强电预制井清理完成！\n\n共合并更新了 {} 个井。\n永久删除了 {} 个带有深度的冗余垃圾类型！".format(instances_updated, deleted_count)
-    if skipped_grouped > 0:
-        msg += "\n\n⚠️ 警告: 有 {} 个井因为被编入了【编组(Group)】中，无法直接修改类型被跳过。请解组后再试。".format(skipped_grouped)
-    forms.alert(msg, title="大瘦身成功")
+if __name__ == '__main__':
+    main()

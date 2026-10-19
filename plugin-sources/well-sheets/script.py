@@ -35,6 +35,142 @@ import json as _json
 import os as _os
 
 FT_MM = 304.8
+
+# 图纸名前缀、图号前缀、井编号系列来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
+# ---- well_config（天河落共用片段，打包时内联进脚本）-----------------------------
+# 井大样系列插件（一键井展开图 / 一键井大样标注 / 图纸归类与图框编号 / 导出井大样DWG）共用的项目配置。
+# 配置文件：文档\KaifaTools\井大样配置.json。第一次运行时自动写出一份默认配置（与原来写死的规则完全一样），
+# 换项目时只改这个文件：图纸名前缀、图号前缀、井编号系列（前缀 → 系统名 → 系统代码）、图框 logo 位置。
+import io as _wc_io
+import os as _wc_os
+import json as _wc_json
+import re as _wc_re
+
+WCFG_FILE = _wc_os.path.join(
+    __import__('System').Environment.GetFolderPath(__import__('System').Environment.SpecialFolder.MyDocuments),
+    u"KaifaTools", u"井大样配置.json")
+
+WCFG_DEFAULTS = {
+    u"说明": (u"井大样系列插件的项目配置。改完保存，下次点插件生效；删掉这个文件会恢复默认。"
+            u"series 里每一项是一个井编号系列：prefix=井号前缀（井号形如 AA-01、T-068、室内-A-01，前缀后面可以有一个 -，再跟数字），"
+            u"system=系统名（写进图纸的「图纸系统」参数、用来归类），code=系统代码（图号模板里的 {系统码}），label=菜单里显示的名字。"
+            u"顺序就是菜单和排序的顺序；匹配时长的前缀优先（AA 先于 A）。"),
+    u"sheet_name_prefix": u"井大样_",
+    u"sheet_number_prefix": u"AG-",
+    u"indoor_prefix": u"室内-",
+    u"system_param": u"图纸系统",
+    u"series": [
+        {u"prefix": u"室内-A", u"system": u"室内强电井", u"code": u"NQ", u"label": u"室内-A- 强电井"},
+        {u"prefix": u"室内-T", u"system": u"室内通信井", u"code": u"NT", u"label": u"室内-T- 通信井"},
+        {u"prefix": u"室内-E", u"system": u"室内弱电井", u"code": u"NR", u"label": u"室内-E- 弱电井"},
+        {u"prefix": u"室内-L", u"system": u"室内低压拉线井", u"code": u"ND", u"label": u"室内-L- 低压拉线井"},
+        {u"prefix": u"AA", u"system": u"强电井", u"code": u"QD", u"label": u"AA- 强电特型井"},
+        {u"prefix": u"A", u"system": u"强电井", u"code": u"QD", u"label": u"A- 强电井"},
+        {u"prefix": u"BB", u"system": u"弱电井", u"code": u"RD", u"label": u"BB- 弱电特型井"},
+        {u"prefix": u"B", u"system": u"弱电井", u"code": u"RD", u"label": u"B- 弱电井"},
+        {u"prefix": u"T", u"system": u"通信井", u"code": u"TX", u"label": u"T- 通信井"},
+        {u"prefix": u"L", u"system": u"低压拉线井", u"code": u"DY", u"label": u"L- 低压拉线井"},
+        {u"prefix": u"E", u"system": u"预制井", u"code": u"YZ", u"label": u"E- 预制井"},
+        {u"prefix": u"Y", u"system": u"雨水井", u"code": u"YS", u"label": u"Y- 雨水井"},
+    ],
+    u"other": {u"system": u"其他", u"code": u"QT"},
+    u"logo": {u"enabled": True, u"file": u"frame_logo.jpg", u"x0": 736.54, u"y0": 141.10, u"w": 91.49,
+              u"说明": u"导出 DWG 后补插的图框 logo：x0/y0 = logo 左下角在 Layout1 里的坐标，w = 宽度（按 A1 横向图框标定）。换图框要改；enabled=false 不补 logo。"},
+}
+
+_WCFG_CACHE = [None]
+
+
+def _wcfg_merge(base, extra):
+    out = dict(base)
+    for k, v in (extra or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _wcfg_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def wcfg_load(write_default=True):
+    """读项目配置（缺的项用默认值补齐）。文件不存在时写出默认配置，方便用户找到并修改。"""
+    if _WCFG_CACHE[0] is not None:
+        return _WCFG_CACHE[0]
+    cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    try:
+        if _wc_os.path.exists(WCFG_FILE):
+            with _wc_io.open(WCFG_FILE, 'r', encoding='utf-8-sig') as f:
+                cfg = _wcfg_merge(cfg, _wc_json.load(f))
+        elif write_default:
+            d = _wc_os.path.dirname(WCFG_FILE)
+            if not _wc_os.path.isdir(d):
+                _wc_os.makedirs(d)
+            with _wc_io.open(WCFG_FILE, 'w', encoding='utf-8') as f:
+                f.write(_wc_json.dumps(WCFG_DEFAULTS, ensure_ascii=False, indent=2))
+    except Exception:
+        cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    # series 至少要有 prefix
+    good = []
+    for s in cfg.get(u"series") or []:
+        try:
+            p = (s.get(u"prefix") or u"").strip()
+        except Exception:
+            continue
+        if not p:
+            continue
+        s = dict(s)
+        s[u"prefix"] = p
+        s.setdefault(u"system", p)
+        s.setdefault(u"code", p)
+        s.setdefault(u"label", p + u"-")
+        good.append(s)
+    cfg[u"series"] = good or list(WCFG_DEFAULTS[u"series"])
+    _WCFG_CACHE[0] = cfg
+    return cfg
+
+
+def wcfg_series_of(mark, cfg=None, strict=False):
+    """井号属于哪个系列：前缀（长的优先）后面可以有一个 -，必须紧跟数字。认不出返回 None。
+    strict=True 时前缀后面必须是「-数字」（井的标记用这个：雨水井的 A1、BB24 这类不带 - 的不算强电/弱电井）。"""
+    cfg = cfg or wcfg_load()
+    m = (mark or u"").strip()
+    for s in sorted(cfg[u"series"], key=lambda x: -len(x[u"prefix"])):
+        p = s[u"prefix"]
+        if m.startswith(p):
+            rest = m[len(p):]
+            if rest[:1] == u"-":
+                rest = rest[1:]
+            elif strict:
+                continue
+            if rest[:1].isdigit():
+                return s
+    return None
+
+
+def wcfg_series_index(s, cfg=None):
+    cfg = cfg or wcfg_load()
+    for i, x in enumerate(cfg[u"series"]):
+        if x is s:
+            return i
+    return len(cfg[u"series"])
+
+
+def wcfg_natural_key(text):
+    out = []
+    for tok in _wc_re.split(r'(\d+)', text or u''):
+        out.append((0, int(tok), u'') if tok.isdigit() else (1, 0, tok.lower()))
+    return out
+
+
+def wcfg_well_sort_key(mark, cfg=None, strict=True):
+    """先按系列在配置里的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
+    s = wcfg_series_of(mark, cfg, strict)
+    return (wcfg_series_index(s, cfg) if s is not None else 9999, wcfg_natural_key(mark))
+# ---- well_config 结束 ----------------------------------------------------------
+
+WCFG = wcfg_load()
+WS_PREFIX = WCFG[u"sheet_name_prefix"]      # 默认「井大样_」
+WS_NUMPRE = WCFG[u"sheet_number_prefix"]    # 默认「AG-」
+WS_INDOOR = WCFG[u"indoor_prefix"]          # 默认「室内-」
 RULES_PATH = _os.path.join(
     System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), "KaifaTools", "井展开图规则.json")
 DEFAULT_RULES = {
@@ -641,9 +777,9 @@ def _scan_existing_sheets(doc):
         for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
             try:
                 _nm = _s.Name or ""
-                if not _nm.startswith("井大样_"):
+                if not _nm.startswith(WS_PREFIX):
                     continue
-                _suffix = _nm[len("井大样_"):]
+                _suffix = _nm[len(WS_PREFIX):]
                 _kids = _vp_by_sheet.get(_s.Id.Value, [])
                 _tag = None
                 for _vid in _kids:
@@ -651,7 +787,7 @@ def _scan_existing_sheets(doc):
                     if not (_vv and _vv.Name):
                         continue
                     _parts = _vv.Name.split("_", 1)
-                    if len(_parts) != 2 or not _parts[1].startswith("AG-"):
+                    if len(_parts) != 2 or not _parts[1].startswith(WS_NUMPRE):
                         continue
                     _seg = _parts[1].split("-")
                     if len(_seg) >= 3:
@@ -671,35 +807,55 @@ def _scan_existing_sheets(doc):
     return stale_sheets
 
 
-_SYSTEM_PREFIXES = ["AA-", "BB-", "A-", "B-", "T-", "L-", "E-", "Y-", "室内-A-", "室内-T-", "室内-E-", "室内-L-"]
-
-
 def _well_sort_key(mk):
-    """井的排序：先按系统（AA、BB、A、B、T、L、E、Y、室内各组），同系统内按号。"""
-    for _i, _p in enumerate(_SYSTEM_PREFIXES):
-        if mk.startswith(_p):
-            return (_i, len(mk), mk)
-    return (len(_SYSTEM_PREFIXES), len(mk), mk)
+    """井的排序：先按配置里系列的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
+    return wcfg_well_sort_key(mk, WCFG)
 
 
-# 向导每个范围的井号判断（与下面的选择条件一致），只用来统计「已出 / 共」
-_WELL_GROUP_PRED = {
-    "【1】": lambda m: m in ("AA-01", "AA-02", "AA-03"),
-    "【2】": lambda m: m.startswith("AA-"),
-    "【3】": lambda m: m.startswith("BB-"),
-    "【4】": lambda m: m.startswith("A-") and not m.startswith("AA-"),
-    "【5】": lambda m: m.startswith("B-") and not m.startswith("BB-"),
-    "【6】": lambda m: m.startswith("T-"),
-    "【7】": lambda m: m.startswith("L-"),
-    "【8】": lambda m: m.startswith("E-"),
-    "【9】": lambda m: not m.startswith("室内-"),
-    "【10】": lambda m: m.startswith("室内-A-"),
-    "【11】": lambda m: m.startswith("室内-T-"),
-    "【12】": lambda m: m.startswith("室内-E-"),
-    "【13】": lambda m: m.startswith("室内-L-"),
-    "【14】": lambda m: m.startswith("室内-"),
-    "【15】": lambda m: True,
-}
+# 向导每个范围的井号判断，打开向导时按配置和模型里实际有的井生成（见 _build_range_menu）
+_WELL_GROUP_PRED = {}
+
+
+def _build_range_menu(wells):
+    """批量出图向导的范围菜单：按配置里的系列和模型里实际有的井生成，数量实时统计。
+    返回 (选项文字列表, 清理选项的标签)。选项的判断条件登记在 _WELL_GROUP_PRED。"""
+    marks = [_mark_of(w) for w in wells]
+    outdoor = lambda m: not m.startswith(WS_INDOOR)
+    items = []
+    first3 = sorted([m for m in marks if outdoor(m)] or marks, key=_well_sort_key)[:3]
+    if first3:
+        items.append((u'先行测试：生成前 3 座井（{}）'.format(u'、'.join(first3)),
+                      (lambda f3: (lambda m: m in f3))(set(first3))))
+    n_out = len([m for m in marks if outdoor(m)])
+    n_in = len(marks) - n_out
+    for sr in WCFG[u"series"]:
+        if sr[u"prefix"].startswith(WS_INDOOR):
+            continue
+        pred = (lambda x: (lambda m: wcfg_series_of(m, WCFG, True) is x))(sr)
+        n = len([m for m in marks if pred(m)])
+        if n:
+            items.append((u'{} 全系列（共 {} 座）'.format(sr[u"label"], n), pred))
+    if n_out:
+        items.append((u'全量 {} 座室外井排队连续生成'.format(n_out), outdoor))
+    for sr in WCFG[u"series"]:
+        if not sr[u"prefix"].startswith(WS_INDOOR):
+            continue
+        pred = (lambda x: (lambda m: wcfg_series_of(m, WCFG, True) is x))(sr)
+        n = len([m for m in marks if pred(m)])
+        if n:
+            items.append((u'{} 全系列（共 {} 座）'.format(sr[u"label"], n), pred))
+    if n_in:
+        items.append((u'全量 {} 座室内井排队连续生成'.format(n_in), lambda m: m.startswith(WS_INDOOR)))
+    items.append((u'全模型 {} 座井全量排队连续生成'.format(len(marks)), lambda m: True))
+    _WELL_GROUP_PRED.clear()
+    opts = []
+    for i, (text, pred) in enumerate(items):
+        tag = u'【{}】'.format(i + 1)
+        _WELL_GROUP_PRED[tag] = pred
+        opts.append(tag + text)
+    clean_tag = u'【{}】'.format(len(items) + 1)
+    opts.append(clean_tag + u'清理全部井大样图纸与视图（只清理，不出图）')
+    return opts, clean_tag
 
 
 def _status_label(opt, wells, built):
@@ -778,24 +934,7 @@ def main():
                 built_map = _scan_existing_sheets(doc)
             except:
                 built_map = {}
-            menu_opts = [
-                '【1】先行测试：生成前 3 座样板井 (AA-01 ~ AA-03)',
-                '【2】AA- 强电井全系列 (AA-01 ~ AA-22, 共22座)',
-                '【3】BB- 弱电井全系列 (BB-01 ~ BB-24, 共24座)',
-                '【4】A- 强电井全系列 (A-01 ~ A-127, 共127座)',
-                '【5】B- 弱电井全系列 (B-01 ~ B-126, 共126座)',
-                '【6】T- 通信井全系列 (T-001 ~ T-196, 共196座)',
-                '【7】L- 低压拉线井全系列 (L-001 ~ L-166, 共166座)',
-                '【8】E- 预制井全系列 (E-001 ~ E-163, 共163座)',
-                '【9】全量 824 座室外井排队连续生成',
-                '【10】室内-A- 强电井全系列 (室内-A-01 ~ 室内-A-42, 共42座)',
-                '【11】室内-T- 通信井全系列 (室内-T-01 ~ 室内-T-41, 共41座)',
-                '【12】室内-E- 弱电井全系列 (室内-E-01 ~ 室内-E-23, 共23座)',
-                '【13】室内-L- 低压拉线井全系列 (室内-L-01 ~ 室内-L-17, 共17座)',
-                '【14】全量 123 座室内井排队连续生成',
-                '【15】全模型 947 座井 (824室外 + 123室内) 全量排队连续生成',
-                '【16】清理全部井大样图纸与视图（只清理，不出图）'
-            ]
+            menu_opts, _clean_tag = _build_range_menu(wells_with_mark)
             menu_opts = [_status_label(o, wells_with_mark, built_map) for o in menu_opts]
             menu_opts.insert(0, '【0】出图进度：看哪些井已出图、哪些没有（勾选未出的井直接生成）')
             choice = forms.SelectFromList.show(
@@ -805,17 +944,18 @@ def main():
             if not choice:
                 return
 
-            if '【16】' in choice:
+            _tag = choice.split('】')[0] + '】'
+            if _tag == _clean_tag:
                 # 独立清理：不动井，只把模型中所有「井大样_」图纸连同其平面/剖面视图删掉。
                 # 专门用来清掉那批"对应井已不存在（Mark 改过或井已删）"的老图纸，
                 # 这类图纸在生成流程里不会被逐井替换命中。
                 _cnt_before = len([s for s in DB.FilteredElementCollector(doc)
                                    .OfClass(DB.ViewSheet).ToElements()
-                                   if (s.Name or "").startswith("井大样_")])
+                                   if (s.Name or "").startswith(WS_PREFIX)])
                 _det = _old_detail_candidates(doc)
                 _ok = forms.alert(
                     '将删除模型中全部「井大样_」图纸及其视图（当前共 {} 张），以及老旧井大样详图视图 {} 个，操作不可撤销。\n'
-                    '注意：若要用新剖面框重做全部井，请先执行本清理，再运行【1】~【15】生成；\n'
+                    '注意：若要用新剖面框重做全部井，请先执行本清理，再用上面的范围生成；\n'
                     '刚生成完的新图也会被本项删掉。\n确定继续？'.format(_cnt_before, len(_det)),
                     title='清理井大样图纸', ok=False, yes=True, no=True)
                 if _ok:
@@ -832,7 +972,7 @@ def main():
                                 pass
                         for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
                             try:
-                                if not (_s.Name or "").startswith("井大样_"):
+                                if not (_s.Name or "").startswith(WS_PREFIX):
                                     continue
                                 _kids = _vp_by_sheet.get(_s.Id.Value, [])
                                 doc.Delete(_s.Id)
@@ -866,7 +1006,7 @@ def main():
                                 _is_agy = False
                                 for _pre in ("平面_", "南_", "北_", "西_", "东_"):
                                     if _nm.startswith(_pre):
-                                        _is_agy = _nm[len(_pre):].startswith("AG-")
+                                        _is_agy = _nm[len(_pre):].startswith(WS_NUMPRE)
                                         break
                                 if not _is_agy:
                                     continue
@@ -895,55 +1035,17 @@ def main():
                                 title='清理结果')
                 return
 
-            if '【0】' in choice:
+            if _tag == '【0】':
                 picked_from_status = True
                 valid_elems = _pick_well_status(wells_with_mark, built_map)
                 if not valid_elems:
                     return
-            elif '【1】' in choice:
-                targets = ["AA-01", "AA-02", "AA-03"]
-                valid_elems = [e for e in wells_with_mark if get_mark(e) in targets]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【2】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("AA-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【3】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("BB-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【4】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("A-") and not get_mark(e).startswith("AA-")]
-                valid_elems.sort(key=lambda e: (len(get_mark(e)), get_mark(e)))
-            elif '【5】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("B-") and not get_mark(e).startswith("BB-")]
-                valid_elems.sort(key=lambda e: (len(get_mark(e)), get_mark(e)))
-            elif '【6】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("T-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【7】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("L-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【8】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("E-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【9】' in choice:
-                valid_elems = [e for e in wells_with_mark if not get_mark(e).startswith("室内-")]
-            elif '【10】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-A-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【11】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-T-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【12】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-E-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【13】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-L-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【14】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【15】' in choice:
-                valid_elems = wells_with_mark
+            else:
+                _pred = _WELL_GROUP_PRED.get(_tag)
+                if _pred is None:
+                    return
+                valid_elems = [e for e in wells_with_mark if _pred(get_mark(e))]
+                valid_elems.sort(key=lambda e: _well_sort_key(get_mark(e)))
 
         if not valid_elems:
             forms.alert('未找到符合条件的预制井！', title='错误')
@@ -1163,7 +1265,7 @@ def main():
                         _nm = _v.Name or ""
                         _dir = None
                         for _pre in ("平面", "南", "北", "西", "东"):
-                            if _nm.startswith(_pre + "_AG-"):
+                            if _nm.startswith(_pre + "_" + WS_NUMPRE):
                                 _dir = _pre
                                 break
                         if _dir is None:
@@ -1250,8 +1352,8 @@ def main():
 
                     rand_suffix = System.Guid.NewGuid().ToString()[:4]
 
-                    sheet.Name = "井大样_" + base_name
-                    sheet.SheetNumber = "AG-" + base_name + "-" + rand_suffix
+                    sheet.Name = WS_PREFIX + base_name
+                    sheet.SheetNumber = WS_NUMPRE + base_name + "-" + rand_suffix
                     for param_name in ["专业", "所属专业"]:
                         try:
                             sp = sheet.LookupParameter(param_name)

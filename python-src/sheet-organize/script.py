@@ -26,36 +26,28 @@ doc = revit.doc
 uidoc = revit.uidoc
 
 TITLE = u"一键图纸归类与图框编号"
-SHEET_PREFIX_NAME = u"井大样_"
-DEFAULT_PREFIX = u"AG-"
-SYSTEM_PARAM = u"图纸系统"
+# 图纸名前缀、图号前缀、井编号系列都来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
+# @include _shared/well_config.py
+WCFG = wcfg_load()
+SHEET_PREFIX_NAME = WCFG[u"sheet_name_prefix"]
+DEFAULT_PREFIX = WCFG[u"sheet_number_prefix"]
+SYSTEM_PARAM = WCFG[u"system_param"]
 SHARED_GROUP = u"KAIFA"
 OUT_DIR = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), "KaifaTools")
 
-# (图名里的系列前缀, 系统名, 图号里的系统代码)。顺序很重要：长的前缀放前面（AA 在 A 前，室内-X 在最前）
-SYSTEM_MAP = [
-    (u"室内-A", u"室内强电井", u"NQ"),
-    (u"室内-T", u"室内通信井", u"NT"),
-    (u"室内-E", u"室内弱电井", u"NR"),
-    (u"室内-L", u"室内低压拉线井", u"ND"),
-    (u"AA", u"强电井", u"QD"),
-    (u"A", u"强电井", u"QD"),
-    (u"BB", u"弱电井", u"RD"),
-    (u"B", u"弱电井", u"RD"),
-    (u"T", u"通信井", u"TX"),
-    (u"L", u"低压拉线井", u"DY"),
-    (u"E", u"预制井", u"YZ"),
-    (u"Y", u"雨水井", u"YS"),
-]
-OTHER = (u"其他", u"QT")
+# (图名里的系列前缀, 系统名, 图号里的系统代码)。来自配置的 series；匹配时长的前缀优先（AA 在 A 前，室内-X 在最前）
+SYSTEM_MAP = [(x[u"prefix"], x[u"system"], x[u"code"]) for x in WCFG[u"series"]]
+# 匹配时长的前缀先试（AA 先于 A），返回的仍是它在 SYSTEM_MAP 里的序号（决定归类和排序的顺序）
+_MATCH_ORDER = sorted(range(len(SYSTEM_MAP)), key=lambda i: -len(SYSTEM_MAP[i][0]))
+OTHER = (WCFG[u"other"][u"system"], WCFG[u"other"][u"code"])
 _NUM = re.compile(r"(\d+)")
 
 # 图名、图号模板里可用的字段，写成 {字段名}
 TOKEN_HINT = u"{旧名}  {井号}  {系统}  {系统码}  {系列}  {序号}"
 DEFAULT_NAME_TPL = u"{旧名}"
-DEFAULT_NUM_TPL = u"AG-{系列}-{序号}"
-NAME_PRESETS = [u"{旧名}", u"BTP-IF1 11KV-{井号} Detail Drawing", u"井大样_{井号}"]
-NUM_PRESETS = [u"AG-{系列}-{序号}", u"AG-{系统码}-{序号}", u"AG-{序号}"]
+DEFAULT_NUM_TPL = DEFAULT_PREFIX + u"{系列}-{序号}"
+NAME_PRESETS = [u"{旧名}", u"BTP-IF1 11KV-{井号} Detail Drawing", SHEET_PREFIX_NAME + u"{井号}"]
+NUM_PRESETS = [DEFAULT_PREFIX + u"{系列}-{序号}", DEFAULT_PREFIX + u"{系统码}-{序号}", DEFAULT_PREFIX + u"{序号}"]
 # 编号方式（下拉框的顺序）
 MODE_KEYS = [u"series", u"group", u"all"]
 MODE_LABELS = [u"每个系列单独编号（AA、BB、A… 各从起始序号开始）",
@@ -73,13 +65,14 @@ SYSTEM_CODES[OTHER[0]] = OTHER[1]
 # ============================================================
 # 纯逻辑：识别、编号、分组（可离线测试）
 # ============================================================
-_MARK_RE = re.compile(u"(室内-)?[A-Za-z]{1,3}-?\\d+[A-Za-z]?(?:-\\d+)?")
+_MARK_RE = re.compile(u"(" + re.escape(WCFG[u"indoor_prefix"]) + u")?[A-Za-z]{1,3}-?\\d+[A-Za-z]?(?:-\\d+)?")
 
 
 def _series_of(mark):
     """井编号属于哪个系列（SYSTEM_MAP 里的前缀），返回 (序号, 前缀, 系统名, 代码)；认不出返回 None。
     前缀后面（可以有一个 -）必须紧跟数字，所以 LV、ELV、Y 这种普通图名不会被误认。"""
-    for i, (prefix, sysname, code) in enumerate(SYSTEM_MAP):
+    for i in _MATCH_ORDER:
+        prefix, sysname, code = SYSTEM_MAP[i]
         if mark.startswith(prefix):
             rest = mark[len(prefix):]
             if rest[:1] == u"-":

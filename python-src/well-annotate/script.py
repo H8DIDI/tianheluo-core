@@ -7,6 +7,11 @@ __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 生成两类尺寸
            '排管尺寸链在平面与剖面/立面视图都生成；每次运行先清除视图内引用井构件或排管的旧尺寸再重新生成（不动管道等其它尺寸）。')
 
 from pyrevit import revit, DB, UI, forms
+
+# 图纸名前缀来自项目配置（文档\KaifaTools\井大样配置.json），默认「井大样_」
+# @include _shared/well_config.py
+WCFG = wcfg_load()
+WS_PREFIX = WCFG[u"sheet_name_prefix"]
 import System
 import traceback
 
@@ -1540,7 +1545,7 @@ def _mark_of(e):
 
 
 def _sheet_by_mark(mark):
-    target = "井大样_" + mark
+    target = WS_PREFIX + mark
     for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
         try:
             if (s.Name or "") == target:
@@ -1612,7 +1617,7 @@ def main():
             if e is None:
                 continue
             sh = _sheet_of(e)
-            if sh is not None and (sh.Name or "").startswith("井大样_"):
+            if sh is not None and (sh.Name or "").startswith(WS_PREFIX):
                 if sh not in sheets:
                     sheets.append(sh)
                 continue
@@ -1625,7 +1630,7 @@ def main():
         if not sheets:
             try:
                 cur = doc.ActiveView
-                if isinstance(cur, DB.ViewSheet) and (cur.Name or "").startswith("井大样_"):
+                if isinstance(cur, DB.ViewSheet) and (cur.Name or "").startswith(WS_PREFIX):
                     sheets.append(cur)
             except:
                 pass
@@ -1633,10 +1638,10 @@ def main():
         if not sheets:
             # 没有选中图纸、当前也不在井大样图纸上：列出全部井大样图纸，由你勾选（按图纸标注，不再逐个视图选）
             all_sheets = [x for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements()
-                          if (x.Name or "").startswith("井大样_")]
+                          if (x.Name or "").startswith(WS_PREFIX)]
             all_sheets.sort(key=lambda x: x.Name or "")
             if not all_sheets:
-                forms.alert('项目里没有井大样图纸（名称以「井大样_」开头）。', title='一键井大样标注')
+                forms.alert(u'项目里没有井大样图纸（名称以「{}」开头，可在 {} 里改）。'.format(WS_PREFIX, WCFG_FILE), title='一键井大样标注')
                 return
             by_name = {}
             for x in all_sheets:
@@ -1666,7 +1671,7 @@ def main():
         mark_of_view = {}
         for sh in sheets:
             for _k, _nm, _v in _views_of(sh):
-                mark_of_view[str(_v.Id)] = (sh.Name or '')[len('井大样_'):]
+                mark_of_view[str(_v.Id)] = (sh.Name or '')[len(WS_PREFIX):]
 
         # 同一视图若放在多张图纸上会被重复选中：只处理一次，避免重复计数
         uniq_views = []

@@ -8,7 +8,12 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"well-sheets": "0.3.0", "well-annotate": "0.3.9", "pile-cushion": "0.3.9", "quantity-export": "0.2.1", "rebar-cage": "0.2.1", "sheet-organize": "0.5.0", "export-dwg": "0.2.0"}
+VERSION_OVERRIDE = {"well-sheets": "0.4.0", "well-annotate": "0.3.10", "pile-cushion": "0.4.0", "pile-cleanup": "0.2.0",
+                    "quantity-export": "0.2.1", "rebar-cage": "0.2.1", "sheet-organize": "0.6.0", "export-dwg": "0.3.0",
+                    "export-nwc": "0.2.0", "well-number": "0.2.0", "well-clear-marks": "0.1.1", "elv-merge": "0.2.0",
+                    "control-points": "0.1.0", "well-depth-report": "0.1.0"}
+# 商店里显示的名字改过的插件（文件夹名不变，图标照旧从原文件夹取）
+NAME_OVERRIDE = {"elv-merge": "族类型清洗合并"}
 OUT.mkdir(exist_ok=True)
 
 # 文件夹名 -> (id, 分类, 图标上的字)
@@ -26,7 +31,21 @@ PLUGINS = {
     "一键单构件快速配筋": ("rebar-cage", "数据处理", "配"),
     "一键导出井大样DWG":  ("export-dwg",      "导出",     "DWG"),
     "一键导出NWC":        ("export-nwc",      "导出",     "NWC"),
+    "控制点坐标表":       ("control-points",  "市政管线", "点"),
+    "井深统计报表":       ("well-depth-report", "市政管线", "深"),
+    "图纸快速预览":       ("sheet-preview",   "出图打印", "览"),
 }
+
+INCLUDE_RE = re.compile(r"^# @include (\S+)\s*$", re.M)
+
+
+def expand_includes(text):
+    """把脚本里的 `# @include _shared/xxx.py` 换成 python-src/_shared/xxx.py 的内容（插件包只有一个 script.py）。"""
+    def rep(m):
+        f = ROOT / "python-src" / m.group(1)
+        return f.read_text(encoding="utf-8").rstrip() + "\n"
+    return INCLUDE_RE.sub(rep, text)
+
 
 def doc_of(script_text):
     """取脚本里的 __doc__ 字符串作为简介。"""
@@ -44,7 +63,7 @@ TEXT_PATCHES = {
     "一键井展开图": [("正在批量生成井大样图及尺寸标注...", "正在批量生成井大样图...")],
 }
 # 标注类功能仍在优化，商店里标为实验功能
-EXPERIMENTAL = {"一键井大样标注"}
+EXPERIMENTAL = {"一键井大样标注", "图纸快速预览"}
 
 catalog = []
 for folder, (pid, cat, glyph) in PLUGINS.items():
@@ -52,14 +71,14 @@ for folder, (pid, cat, glyph) in PLUGINS.items():
     # 仓库里的 python-src/<id>/script.py 优先（可在仓库里直接改规则）；没有就用本机 Antigravity 的原文件
     repo_script = ROOT / "python-src" / pid / "script.py"
     script = repo_script if repo_script.exists() else d / "script.py"
-    text = script.read_text(encoding="utf-8")
+    text = expand_includes(script.read_text(encoding="utf-8"))
     for old, new in TEXT_PATCHES.get(folder, []):
         if old not in text: print("  [提示] 文字补丁未命中:", folder, old)
         text = text.replace(old, new)
     desc = doc_of(text) or folder
     if folder in EXPERIMENTAL: desc = "【实验功能，仍在优化】" + desc
     VER = VERSION_OVERRIDE.get(pid, VERSION)
-    mf = {"id": pid, "name": folder, "version": VER, "description": desc, "category": cat,
+    mf = {"id": pid, "name": NAME_OVERRIDE.get(pid, folder), "version": VER, "description": desc, "category": cat,
           "revit": "2026", "hostApi": 1, "type": "python", "script": "script.py", "glyph": glyph}
     pkg = OUT / f"{pid}_{VER}.thlp"
     with detzip.create(pkg) as z:
@@ -67,7 +86,7 @@ for folder, (pid, cat, glyph) in PLUGINS.items():
         detzip.writestr(z, "script.py", text)          # 除界面文字补丁外，逻辑一字不改
         icon = d / "icon.png"
         if icon.exists(): detzip.write(z, icon, "icon.png")
-    catalog.append((pid, folder, cat, desc, pkg.stat().st_size))
+    catalog.append((pid, NAME_OVERRIDE.get(pid, folder), cat, desc, pkg.stat().st_size))
     print(f"{pkg.name:34} {pkg.stat().st_size/1024:6.1f} KB  {folder}")
 json.dump([{"id":a,"name":b,"category":c,"desc":d,"size":e} for a,b,c,d,e in catalog],
           open(OUT / "python_catalog.json","w",encoding="utf-8"), ensure_ascii=False, indent=1)

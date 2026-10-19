@@ -1,8 +1,8 @@
 {
   "id": "export-nwc",
   "name": "一键导出NWC",
-  "version": "0.1.0",
-  "description": "一键导出NWC",
+  "version": "0.2.0",
+  "description": "把当前三维视图，或一次勾选多个三维视图，导出成 Navisworks 的 NWC（每个视图一个文件）。\n可选导出文件夹（会记住）、共享坐标/内部坐标、是否导出链接的 Revit 模型；默认不转换链接的 CAD（最常见的卡死原因）。\n需要电脑上装有 Navisworks 导出插件（Navisworks NWC Export Utility）。",
   "category": "导出",
   "revit": "2026",
   "hostApi": 1,
