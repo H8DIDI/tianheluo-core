@@ -141,6 +141,7 @@ def wcfg_well_sort_key(mark, cfg=None, strict=True):
 
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]
+import re
 import System
 import traceback
 
@@ -586,10 +587,9 @@ def _main_well(view, elems, mark=None):
     """视图里可能同时出现几口井（邻井也在裁剪框内）：只认最大的那口作为本井，其余忽略，
     否则外包框会把邻井也算进去、排管链会标到邻井上。"""
     if mark:
-        # 图纸编号（井大样_E-022 → E-022）与井的「标记」一致的构件才是本井；邻井体积再大也不是
-        same = [e for e in elems if _mark_of(e) == mark]
-        if same:
-            return same
+        # 图纸的井号（视图名 AG-E-022 → E-022）与井的「标记」一致的构件才是本井。
+        # 找不到就返回空（不标），绝不退回到"最大的那口"——那会把邻井当成本井标注
+        return [e for e in elems if _mark_of(e) == mark]
     if len(elems) <= 1:
         return elems
     fr = _frame(view)
@@ -662,6 +662,7 @@ def hide_irrelevant(view, main_elems):
             return 0
         pad = 0.3
         keep = set(int(e.Id.Value) for e in main_elems)
+        own_marks = set(_mark_of(e) for e in main_elems if _mark_of(e))
         # 先把本井和与本井相交的排管取消隐藏（以前运行误隐藏的，或上一次判错本井留下的）
         try:
             flt = DB.BoundingBoxIntersectsFilter(DB.Outline(DB.XYZ(mb[0] - pad, mb[1] - pad, mb[2] - pad),
@@ -685,6 +686,12 @@ def hide_irrelevant(view, main_elems):
                 if e.Category is None or int(e.Category.Id.Value) not in hide_cats:
                     continue
                 if int(e.Id.Value) in keep or e.IsHidden(view):
+                    continue
+                # 别的井（常规模型、带井号、且不是本井）：不论离得多近都隐藏，只留本井。
+                # 以前按"包围盒是否相交"判断，框得近的邻井会留下来
+                if (int(e.Category.Id.Value) == int(DB.BuiltInCategory.OST_GenericModel)
+                        and _mark_of(e) and _mark_of(e) not in own_marks):
+                    hide_ids.append(e.Id)
                     continue
                 bb = e.get_BoundingBox(None)
                 if bb is None:
@@ -1673,11 +1680,59 @@ def _mark_of(e):
         return None
 
 
+_MODEL_MARKS = [None]
+
+
+def _model_marks():
+    """模型里所有带井号的常规模型构件的井号（只查一次）。"""
+    if _MODEL_MARKS[0] is None:
+        s = set()
+        for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().ToElements():
+            mk = _mark_of(e)
+            if mk:
+                s.add(mk)
+        _MODEL_MARKS[0] = s
+    return _MODEL_MARKS[0]
+
+
+def _resolve_mark(mark):
+    """视图名里的井号可能带 TELCO 旧后缀（T-083-1），模型里的井号是 T-083：原号找不到时去掉 -1。"""
+    if mark and mark not in _model_marks():
+        base = re.sub(u'-1$', u'', mark)
+        if base in _model_marks():
+            return base
+    return mark
+
+
+def _sheet_mark(sheet):
+    """图纸的井号。优先取视图名里的 AG-<井号>-xxxx（井展开图生成视图时写入，与图纸名无关）；
+    取不到再按图名去掉前缀（旧命名「井大样_AA-01」）。图纸名改成「BTP-IF1 275Kv-AA-18 Detail Drawing」也能对上。"""
+    try:
+        for _k, _nm, _v in _views_of(sheet):
+            m = re.search(u'AG-(.+)-[0-9a-f]{4}$', _nm or u'')
+            if m:
+                return _resolve_mark(m.group(1))
+    except:
+        pass
+    nm = sheet.Name or u''
+    if nm.startswith(WS_PREFIX):
+        return _resolve_mark(nm[len(WS_PREFIX):])
+    return None
+
+
+def _is_well_sheet(sheet):
+    """是不是井大样图纸：图名以项目前缀开头，或平面视图名带 AG-<井号>-xxxx。"""
+    if sheet is None:
+        return False
+    if (sheet.Name or u'').startswith(WS_PREFIX):
+        return True
+    return _sheet_mark(sheet) is not None
+
+
 def _sheet_by_mark(mark):
-    target = WS_PREFIX + mark
     for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
         try:
-            if (s.Name or "") == target:
+            if _is_well_sheet(s) and (_sheet_mark(s) == mark or (s.Name or "") == WS_PREFIX + mark):
                 return s
         except:
             pass
@@ -1746,7 +1801,7 @@ def main():
             if e is None:
                 continue
             sh = _sheet_of(e)
-            if sh is not None and (sh.Name or "").startswith(WS_PREFIX):
+            if sh is not None and _is_well_sheet(sh):
                 if sh not in sheets:
                     sheets.append(sh)
                 continue
@@ -1759,7 +1814,7 @@ def main():
         if not sheets:
             try:
                 cur = doc.ActiveView
-                if isinstance(cur, DB.ViewSheet) and (cur.Name or "").startswith(WS_PREFIX):
+                if isinstance(cur, DB.ViewSheet) and _is_well_sheet(cur):
                     sheets.append(cur)
             except:
                 pass
@@ -1767,7 +1822,7 @@ def main():
         if not sheets:
             # 没有选中图纸、当前也不在井大样图纸上：列出全部井大样图纸，由你勾选（按图纸标注，不再逐个视图选）
             all_sheets = [x for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements()
-                          if (x.Name or "").startswith(WS_PREFIX)]
+                          if _is_well_sheet(x)]
             all_sheets.sort(key=lambda x: x.Name or "")
             if not all_sheets:
                 forms.alert(u'项目里没有井大样图纸（名称以「{}」开头，可在 {} 里改）。'.format(WS_PREFIX, WCFG_FILE), title='一键井大样标注')
@@ -1799,8 +1854,9 @@ def main():
 
         mark_of_view = {}
         for sh in sheets:
+            _mk = _sheet_mark(sh) or ''
             for _k, _nm, _v in _views_of(sh):
-                mark_of_view[str(_v.Id)] = (sh.Name or '')[len(WS_PREFIX):]
+                mark_of_view[str(_v.Id)] = _mk
 
         # 同一视图若放在多张图纸上会被重复选中：只处理一次，避免重复计数
         uniq_views = []
@@ -1857,6 +1913,9 @@ def main():
                     if not elems:
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
+                    # 适配裁剪框用整个井的包围盒（含盖板、爬梯，否则井顶会被切）；
+                    # 尺寸用的框裁到当前视图裁剪框之内，且只取内壁面（_face_box），两者不能混用
+                    full_box = union_box(v, elems)
                     box = _clip_box(union_box(v, elems), crop_world_range(v))
                     if box is not None:
                         box = _face_box(elems, box)
@@ -1937,7 +1996,9 @@ def main():
                             res['cn'] = 0
                             failed_steps.append('{}：排管尺寸链（Revit 判定参照失效）'.format(v.Name))
 
-                    _step('适配裁剪框', lambda: fit_crop(v, box))
+                    _step('适配裁剪框', lambda: fit_crop(v, full_box if full_box is not None else box))
+                    # 裁剪框扩大后，原来在框外的邻井可能进入视图：适配之后再隐藏一次
+                    _step('隐藏裁剪后的邻井', lambda: hide_irrelevant(v, elems))
                     _bump(stats, _ST_DUP, led.dup)
                     cn = res['cn']
                     n = res['n']

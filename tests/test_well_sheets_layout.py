@@ -23,7 +23,11 @@ System = types.SimpleNamespace(
         GetFolderPath=lambda _: str(ROOT / "_deploytest" / "rules_test"),
         SpecialFolder=types.SimpleNamespace(MyDocuments=1)))
 ns = {"System": System}
-exec(compile(src, "script.py(rules block)", "exec"), ns)
+# the rules block calls wcfg_load() from the shared project-config snippet (pack_python inlines it;
+# here it is exec'd first, with the stubbed System module that the snippet reads its folder from)
+sys.modules["System"] = System
+shared = (ROOT / "python-src" / "_shared" / "well_config.py").read_text(encoding="utf-8")
+exec(compile(shared + "\n" + src, "script.py(rules block)", "exec"), ns)
 
 FT = 304.8
 

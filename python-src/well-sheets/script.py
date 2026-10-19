@@ -1489,6 +1489,17 @@ def main():
                             v.DetailLevel = DB.ViewDetailLevel.Fine
                         except:
                             pass
+                        # 只留本井：视图里别的井（邻井）一律隐藏，本井保持显示（不论邻井离多近）
+                        try:
+                            _own_mark = _mark_of(elem)
+                            _nb_ids = []
+                            for _e in DB.FilteredElementCollector(doc, v.Id).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType():
+                                if _e.Id != elem.Id and _mark_of(_e) and _mark_of(_e) != _own_mark and _e.CanBeHidden(v):
+                                    _nb_ids.append(_e.Id)
+                            if _nb_ids:
+                                v.HideElements(System.Collections.Generic.List[DB.ElementId](_nb_ids))
+                        except:
+                            pass
                         # 隐藏轴网与标高
                         for cat in ([DB.BuiltInCategory.OST_Grids, DB.BuiltInCategory.OST_Levels] if R_HIDE else []):
                             try:
