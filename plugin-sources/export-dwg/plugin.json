@@ -1,8 +1,8 @@
 {
   "id": "export-dwg",
-  "name": "一键导出井大样DWG",
-  "version": "0.3.0",
-  "description": "一键批量导出井大样图纸为 DWG（自动补插图框里的光栅 logo）和/或合并成一个文件的 PDF，直接保存在指定文件夹中。",
+  "name": "一键导出图纸DWG/PDF",
+  "version": "0.4.0",
+  "description": "批量导出图纸为 DWG / PDF：井大样按系列一键选，也能导项目浏览器里选中的图纸、全部图纸或手动勾选。\nDWG 每 20 张一批导出（比逐张快），导出前检查没有图框的图纸，文件名按图号去重不再互相覆盖，可只补导缺的；\n可选 AutoCAD 后台补 logo、瘦身（PurgeAll）；PDF 可合并成一个或每张一个。每次在文件夹里留一份导出清单。",
   "category": "导出",
   "revit": "2026",
   "hostApi": 1,

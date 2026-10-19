@@ -8,7 +8,7 @@
 | [`control-points`](control-points/) | 控制点坐标表 | 0.1.0 | Python | didi | MIT |
 | [`duct-snap`](duct-snap/) | 排管贴井内壁 | 0.1.8 | C#（源码在 `plugins/`） | didi | MIT |
 | [`elv-merge`](elv-merge/) | 族类型清洗合并 | 0.2.0 | Python | didi | MIT |
-| [`export-dwg`](export-dwg/) | 一键导出井大样DWG | 0.3.0 | Python | didi | MIT |
+| [`export-dwg`](export-dwg/) | 一键导出图纸DWG/PDF | 0.4.0 | Python | didi | MIT |
 | [`export-nwc`](export-nwc/) | 一键导出NWC | 0.2.0 | Python | didi | MIT |
 | [`issue-manager`](issue-manager/) | 图纸签发管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |
 | [`pile-cleanup`](pile-cleanup/) | 清理重复松木桩垫层 | 0.2.0 | Python | didi | MIT |

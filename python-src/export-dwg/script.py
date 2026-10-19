@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-__title__ = '一键导出井大样DWG'
-__doc__ = '一键批量导出井大样图纸为 DWG（自动补插图框里的光栅 logo）和/或合并成一个文件的 PDF，直接保存在指定文件夹中。'
+__title__ = '一键导出图纸DWG/PDF'
+__doc__ = ('批量导出图纸为 DWG / PDF：井大样按系列一键选，也能导项目浏览器里选中的图纸、全部图纸或手动勾选。\n'
+           'DWG 每 20 张一批导出（比逐张快），导出前检查没有图框的图纸，文件名按图号去重不再互相覆盖，可只补导缺的；\n'
+           '可选 AutoCAD 后台补 logo、瘦身（PurgeAll）；PDF 可合并成一个或每张一个。每次在文件夹里留一份导出清单。')
 
 import os
 import re
@@ -541,7 +543,7 @@ def _start_logo_job(folder, dwg_names, add_logo=True, purge=False):
 
 def _export_pdf(sheets, folder):
     """所有图纸按图号排序，合并导出成一个 PDF，文件名用第一张图纸的图名。返回 (成功, 说明)。"""
-    ordered = sorted(sheets, key=lambda s: s.SheetNumber)
+    ordered = sorted(sheets, key=lambda s: getattr(s, 'SheetNumber', None) or s.Name)
     pdf_dir = os.path.join(folder, u"PDF")
     if not os.path.exists(pdf_dir):
         os.makedirs(pdf_dir)
@@ -559,180 +561,577 @@ def _export_pdf(sheets, folder):
     return False, u"PDF 导出失败（文件夹：{}）".format(pdf_dir)
 
 
-def main():
+
+# ============================================================
+# 导出主流程（0.4.0 重写）：一个窗口设好全部选项；DWG 按批导出（每次 20 张，比逐张快）；
+# 导出前检查没有图框的图纸；文件名按图号去重（不会再因为同名图纸互相覆盖）；可只补导缺的；
+# 每次导出在文件夹里留一份「导出清单.csv」（图号、图名、文件、大小、结果）。
+# ============================================================
+import time as _time
+import json as _json
+clr.AddReference('System.Windows.Forms')
+clr.AddReference('System.Drawing')
+import System.Windows.Forms as WF
+import System.Drawing as SD
+
+TITLE = u'一键导出图纸 DWG/PDF'
+BATCH = 20
+SETTINGS = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
+                        u'KaifaTools', u'导出图纸设置.json')
+NAME_MODES = [(u'name', u'图名（同名的自动加图号区分）'), (u'num_name', u'图号_图名'), (u'num', u'图号')]
+
+
+def _load_settings():
+    s = {u'folder': os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop), u'所有井大样图纸导出'),
+         u'dwg': True, u'pdf_merge': False, u'pdf_each': False, u'logo': True, u'slim': False,
+         u'name_mode': u'name', u'skip_existing': False, u'setup': DWG_SETUP_NAME,
+         u'big_medium': True, u'big_hide_cad': False}
     try:
-        # 1. 收集全模型所有井大样图纸
-        well = []
-        for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
-            mk = _well_mark(s)
-            if mk:
-                well.append((mk, s))
-        sheets = [s for mk, s in well]
-        marks = dict((int(s.Id.Value), mk) for mk, s in well)
+        with io.open(SETTINGS, 'r', encoding='utf-8') as f:
+            s.update(_json.load(f))
+    except Exception:
+        pass
+    return s
 
-        def mk_of(s):
-            return marks.get(int(s.Id.Value), u"")
 
-        if not sheets or len(sheets) == 0:
-            forms.alert(u'模型中未找到井大样图纸（名称以「{}」开头，或已改名并写有「{}」参数）！\n\n图纸名前缀可在配置文件里改：{}'.format(
-                WCFG[u"sheet_name_prefix"], WCFG[u"system_param"], WCFG_FILE), title='提示')
-            return
+def _save_settings(s):
+    try:
+        d = os.path.dirname(SETTINGS)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        with io.open(SETTINGS, 'w', encoding='utf-8') as f:
+            f.write(_json.dumps(s, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
 
-        # 2. 导出范围选择菜单
-        # 菜单数量按当前模型实时统计 —— 原来写死的 947/127 等数字不会随后续
-        # 增删图纸变化，容易让人以为"列表没刷新、导的还是老数据"。
+
+def _titleblock_sheet_ids():
+    ids = set()
+    for tb in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_TitleBlocks).WhereElementIsNotElementType():
+        try:
+            ids.add(tb.OwnerViewId.Value)
+        except Exception:
+            pass
+    return ids
+
+
+def _frame_hidden(sheet):
+    try:
+        return sheet.GetCategoryHidden(DB.ElementId(DB.BuiltInCategory.OST_TitleBlocks))
+    except Exception:
+        return False
+
+
+def _file_stems(sheets, mode):
+    """每张图纸的文件名（不含扩展名），保证不重名。"""
+    out, used = {}, {}
+    for s in sheets:
+        num, nm = (getattr(s, 'SheetNumber', None) or u''), s.Name or u''
+        stem = {u'num_name': u'%s_%s' % (num, nm), u'num': num}.get(mode, nm)
+        stem = _safe_name(stem)
+        used[stem] = used.get(stem, 0) + 1
+        out[s.Id.Value] = stem
+    for s in sheets:
+        if used[out[s.Id.Value]] > 1:
+            out[s.Id.Value] = _safe_name(u'%s_%s' % (out[s.Id.Value], getattr(s, 'SheetNumber', None) or s.Id.Value))
+    return out
+
+
+def _scope_items(sheets_all, well_sheets, mk_of):
+    """范围下拉框：(显示文字, 图纸列表)。"""
+    items = []
+    picked = []
+    for i in uidoc.Selection.GetElementIds():
+        e = doc.GetElement(i)
+        if isinstance(e, DB.ViewSheet):
+            picked.append(e)
+    views = []
+    for i in uidoc.Selection.GetElementIds():
+        e = doc.GetElement(i)
+        if isinstance(e, DB.View) and not isinstance(e, DB.ViewSheet) and not e.IsTemplate and e.CanBePrinted:
+            views.append(e)
+    if picked:
+        items.append((u'项目浏览器里选中的 %d 张图纸' % len(picked), picked))
+    if views:
+        items.append((u'项目浏览器里选中的 %d 个视图（直接导视图，没有图框）' % len(views), views))
+    av = doc.ActiveView
+    if not picked and not views and av is not None and not isinstance(av, DB.ViewSheet) and av.CanBePrinted:
+        items.append((u'当前视图「%s」（没有图框）' % av.Name, [av]))
+    elif isinstance(av, DB.ViewSheet) and not picked:
+        items.append((u'当前图纸「%s %s」' % (av.SheetNumber, av.Name), [av]))
+    if well_sheets:
+        items.append((u'先行测试：前 5 张井大样图纸', list(well_sheets)[:5]))
         _ind = WCFG[u"indoor_prefix"]
-        _items = [(u'先行测试：导出前 5 张图纸（当前共 {} 张可选）'.format(len(sheets)), list(sheets)[:5])]
-        _indoor = [s for s in sheets if mk_of(s).startswith(_ind)]
-        if _indoor:
-            _items.append((u'室内井全系列（当前 {} 张）'.format(len(_indoor)), _indoor))
+        _indoor = [s for s in well_sheets if mk_of(s).startswith(_ind)]
         for _sr in WCFG[u"series"]:
             if _sr[u"prefix"].startswith(_ind):
                 continue
-            _ss = [s for s in sheets if wcfg_series_of(mk_of(s), WCFG, True) is _sr]
+            _ss = [s for s in well_sheets if wcfg_series_of(mk_of(s), WCFG, True) is _sr]
             if _ss:
-                _items.append((u'{} 全系列（当前 {} 张）'.format(_sr[u"label"], len(_ss)), _ss))
-        _items.append((u'全模型全量导出（当前共 {} 张）'.format(len(sheets)), list(sheets)))
-        menu_opts = [u'【{}】{}'.format(i + 1, t) for i, (t, _l) in enumerate(_items)]
+                items.append((u'井大样 %s（%d 张）' % (_sr[u"label"], len(_ss)), _ss))
+        if _indoor:
+            items.append((u'井大样 室内井（%d 张）' % len(_indoor), _indoor))
+        items.append((u'全部井大样图纸（%d 张）' % len(well_sheets), list(well_sheets)))
+    items.append((u'项目里全部图纸（%d 张）' % len(sheets_all), list(sheets_all)))
+    items.append((u'手动勾选图纸…', None))
+    return items
 
-        choice = forms.SelectFromList.show(
-            menu_opts,
-            title='一键批量导出井大样 - 范围选择',
-            button_name='下一步'
-        )
-        if not choice:
-            return
-        target_sheets = list(_items[menu_opts.index(choice)][1]) if choice in menu_opts else []
 
-        if not target_sheets:
-            forms.alert('未找到符合选择条件的图纸！', title='警告')
-            return
+def _dialog(s, items):
+    f = WF.Form()
+    f.Text = TITLE
+    f.Font = SD.Font(u'Microsoft YaHei UI', 9.0)
+    f.StartPosition = WF.FormStartPosition.CenterScreen
+    f.FormBorderStyle = WF.FormBorderStyle.FixedDialog
+    f.MaximizeBox = False
+    f.MinimizeBox = False
+    W = 560
+    y = [14]
 
-        # 3. 选择导出格式（可多选）
-        fmt_dwg = u'DWG（导出后自动补插图框里的光栅 logo）'
-        fmt_pdf = u'PDF（所有选中图纸合并成一个文件，图框完整、带 logo）'
-        fmt_slim = u'DWG 瘦身：导出后用 AutoCAD 清理未使用的图层、块、样式（PurgeAll，需要装 AutoCAD）'
-        fmts = forms.SelectFromList.show(
-            [fmt_dwg, fmt_slim, fmt_pdf],
-            title='选择导出格式（可多选）',
-            multiselect=True,
-            button_name='开始导出'
-        )
-        if not fmts:
-            return
-        do_slim = fmt_slim in fmts
-        do_dwg = fmt_dwg in fmts or do_slim
-        do_pdf = fmt_pdf in fmts
+    def label(t, bold=False, x=16, w=W - 32):
+        l = WF.Label(); l.Text = t; l.Location = SD.Point(x, y[0]); l.Size = SD.Size(w, 20)
+        if bold:
+            l.Font = SD.Font(f.Font, SD.FontStyle.Bold)
+        f.Controls.Add(l)
 
-        # 4. 导出文件夹
-        desktop = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop)
-        default_folder = os.path.join(desktop, "所有井大样图纸导出")
-        if not os.path.exists(default_folder):
-            os.makedirs(default_folder)
+    def check(t, v, x=28, w=W - 44):
+        c = WF.CheckBox(); c.Text = t; c.Checked = bool(v); c.Location = SD.Point(x, y[0]); c.Size = SD.Size(w, 22)
+        f.Controls.Add(c); y[0] += 24
+        return c
 
-        # 5. DWG 导出（不要把链接作为外部参照，直接合并到图纸中）
-        success_count = 0
-        new_count = 0
-        overwrite_count = 0
-        fail_count = 0
-        fail_names = []
-        skip_count = 0
-        exported_names = []
-        total = len(target_sheets)
+    def combo(vals, idx):
+        c = WF.ComboBox(); c.DropDownStyle = WF.ComboBoxStyle.DropDownList
+        for v in vals:
+            c.Items.Add(v)
+        c.SelectedIndex = max(0, min(idx, len(vals) - 1))
+        c.Location = SD.Point(28, y[0]); c.Size = SD.Size(W - 44, 24); f.Controls.Add(c); y[0] += 32
+        return c
 
-        if do_dwg:
-            all_dwg_setups = DB.FilteredElementCollector(doc)\
-                .OfClass(DB.ExportDWGSettings)\
-                .ToElements()
+    label(u'导出范围', True); y[0] += 22
+    cb_scope = combo([t for t, _l in items], 0)
+    label(u'格式', True); y[0] += 22
+    c_dwg = check(u'DWG（每次 %d 张一批导出，比逐张导快）' % BATCH, s[u'dwg'])
+    c_logo = check(u'  DWG 导出后用 AutoCAD 在后台补插图框 logo（已有 logo 的跳过）', s[u'logo'] and LOGO_ENABLED, x=44)
+    c_slim = check(u'  DWG 瘦身：AutoCAD 后台清理没用到的图层、块、样式（PurgeAll），日志里记前后大小', s[u'slim'], x=44)
+    c_med = check(u'  大图提速：范围超过 %d 米的平面/剖面，导出时临时改成「中等」详细程度（管道单线），导完自动还原' % int(BIG_SPAN_M), s[u'big_medium'], x=44)
+    c_cad = check(u'  大图提速：这些视图里导入的（非链接）CAD 底图不导出', s[u'big_hide_cad'], x=44)
+    c_pm = check(u'PDF：所有图纸按图号合并成一个文件', s[u'pdf_merge'])
+    c_pe = check(u'PDF：每张图纸一个文件', s[u'pdf_each'])
+    y[0] += 6
+    label(u'DWG 导出设置', True); y[0] += 22
+    setups = [u'（Revit 默认设置）'] + sorted([x.Name for x in DB.FilteredElementCollector(doc).OfClass(DB.ExportDWGSettings)])
+    cb_setup = combo(setups, setups.index(s[u'setup']) if s[u'setup'] in setups else 0)
+    label(u'文件名', True); y[0] += 22
+    cb_name = combo([t for _k, t in NAME_MODES], [k for k, _t in NAME_MODES].index(s[u'name_mode']) if s[u'name_mode'] in [k for k, _t in NAME_MODES] else 0)
+    c_skip = check(u'只补导文件夹里还没有的（上次中断、或只想补几张时用；默认全部覆盖重导）', s[u'skip_existing'])
+    y[0] += 6
+    label(u'保存到', True); y[0] += 22
+    t_dir = WF.TextBox(); t_dir.Text = s[u'folder']; t_dir.Location = SD.Point(28, y[0]); t_dir.Size = SD.Size(W - 140, 24); f.Controls.Add(t_dir)
+    b_dir = WF.Button(); b_dir.Text = u'浏览…'; b_dir.Location = SD.Point(W - 104, y[0] - 1); b_dir.Size = SD.Size(88, 26); f.Controls.Add(b_dir)
 
-            dwg_setup = None
-            for s in all_dwg_setups:
-                if s.Name == DWG_SETUP_NAME:
-                    dwg_setup = s
-                    break
+    def _browse(sender, e):
+        d = WF.FolderBrowserDialog(); d.SelectedPath = t_dir.Text
+        if d.ShowDialog() == WF.DialogResult.OK:
+            t_dir.Text = d.SelectedPath
+    b_dir.Click += _browse
+    y[0] += 40
+    ok = WF.Button(); ok.Text = u'开始导出'; ok.DialogResult = WF.DialogResult.OK; ok.Location = SD.Point(W - 200, y[0]); ok.Size = SD.Size(90, 30)
+    ca = WF.Button(); ca.Text = u'取消'; ca.DialogResult = WF.DialogResult.Cancel; ca.Location = SD.Point(W - 104, y[0]); ca.Size = SD.Size(88, 30)
+    f.Controls.Add(ok); f.Controls.Add(ca); f.AcceptButton = ok; f.CancelButton = ca
+    f.ClientSize = SD.Size(W, y[0] + 44)
+    if f.ShowDialog() != WF.DialogResult.OK:
+        return None, None
+    s = dict(s)
+    s.update({u'dwg': c_dwg.Checked, u'logo': c_logo.Checked, u'slim': c_slim.Checked, u'pdf_merge': c_pm.Checked,
+              u'pdf_each': c_pe.Checked, u'setup': setups[cb_setup.SelectedIndex], u'name_mode': NAME_MODES[cb_name.SelectedIndex][0],
+              u'skip_existing': c_skip.Checked, u'folder': t_dir.Text.strip(),
+              u'big_medium': c_med.Checked, u'big_hide_cad': c_cad.Checked})
+    return s, cb_scope.SelectedIndex
 
-            if dwg_setup:
-                opt = dwg_setup.GetDWGExportOptions()
-            else:
-                opt = DB.DWGExportOptions()
 
-            opt.MergedViews = True  # 核心：合并外部参照，不导出为独立 XREF 文件
+class _SheetItem(object):
+    def __init__(self, s):
+        self.s = s
 
-            with forms.ProgressBar(title='正在批量导出井大样 DWG... ({value}/{max_value})', cancellable=True) as pb:
-                for idx, s in enumerate(target_sheets):
-                    if pb.cancelled:
-                        break
-                    pb.update_progress(idx + 1, total)
+    def __str__(self):
+        return u'%s  %s' % (self.s.SheetNumber, self.s.Name)
 
-                    # 覆盖式导出：不再"文件已存在就整张跳过"。
-                    # 原逻辑会让重新出图后磁盘上仍留着旧 DWG，看起来像"没更新/不是实时数据"。
-                    expected_file = os.path.join(default_folder, s.Name + ".dwg")
-                    existed = os.path.exists(expected_file)
 
-                    try:
-                        view_ids = List[DB.ElementId]()
-                        view_ids.Add(s.Id)
-                        ok = doc.Export(default_folder, s.Name, view_ids, opt)
-                        if ok:
-                            success_count += 1
-                            exported_names.append(s.Name + u".dwg")
-                            if existed:
-                                overwrite_count += 1
-                            else:
-                                new_count += 1
-                        else:
-                            fail_count += 1
-                            if len(fail_names) < 8:
-                                fail_names.append(s.Name + "（导出返回 False）")
-                    except Exception as ex:
-                        fail_count += 1
-                        if len(fail_names) < 8:
-                            fail_names.append(s.Name + ": " + str(ex))
+def _dwg_options(s):
+    opt = None
+    if s[u'setup'] and not s[u'setup'].startswith(u'（'):
+        for x in DB.FilteredElementCollector(doc).OfClass(DB.ExportDWGSettings):
+            if x.Name == s[u'setup']:
+                opt = x.GetDWGExportOptions()
+                break
+    if opt is None:
+        opt = DB.DWGExportOptions()
+    opt.MergedViews = True               # 不导出成独立的外部参照文件
+    try:
+        opt.PreserveCoincidentLines = False
+        opt.HideUnreferenceViewTags = True
+    except Exception:
+        pass
+    return opt
 
-        # 6. DWG 补 logo（后台，不卡 Revit）
-        logo_msg = u""
-        if do_dwg:
-            try:
-                started, logo_msg, _log = _start_logo_job(default_folder, exported_names,
-                                                          add_logo=LOGO_ENABLED, purge=do_slim)
-            except Exception as ex:
-                logo_msg = u"启动补 logo 失败（DWG 本身已导出）：{}".format(ex)
 
-        # 7. PDF 导出
-        pdf_msg = u""
-        if do_pdf:
-            try:
-                _ok, pdf_msg = _export_pdf(target_sheets, default_folder)
-            except Exception as ex:
-                pdf_msg = u"PDF 导出出错：{}".format(ex)
+BIG_VIEW = 3000
+_AUTO_DIALOGS = []
 
-        # 8. 完成提示并自动打开文件夹
-        msg = u"批量导出任务执行完毕！\n\n"
-        msg += u"• 目标文件夹: {}\n".format(default_folder)
-        if do_dwg:
-            msg += u"• DWG 成功导出: {} 张  (其中新增 {} 张 / 覆盖旧文件 {} 张)\n".format(
-                success_count, new_count, overwrite_count)
-            if fail_count > 0:
-                msg += u"• DWG 失败: {} 张\n".format(fail_count)
-                for fn in fail_names:
-                    msg += u"    - {}\n".format(fn)
-            if logo_msg:
-                msg += u"• {}\n".format(logo_msg)
-        if do_pdf and pdf_msg:
-            msg += u"• {}\n".format(pdf_msg)
-        if skip_count > 0:
-            msg += u"• 跳过: {} 张\n".format(skip_count)
 
-        forms.alert(msg, title='导出完成')
-
+def _on_dialog(sender, args):
+    """导出期间 Revit 弹出的提示框（如「导出范围太大/离原点太远」）自动点确定，记下内容放进完成报告。"""
+    try:
+        msg = u''
         try:
-            System.Diagnostics.Process.Start("explorer.exe", default_folder)
-        except:
+            msg = args.Message or u''
+        except Exception:
             pass
+        _AUTO_DIALOGS.append(u'%s %s' % (args.DialogId or u'', msg.replace(u'\n', u' ')[:120]))
+        for r in (1, 8, 6):          # 确定 / 关闭 / 是，按对话框支持的依次试
+            try:
+                if args.OverrideResult(r):
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
 
+
+def _auto_dialogs(on):
+    try:
+        uiapp = __revit__
+        if on:
+            uiapp.DialogBoxShowing += _on_dialog
+        else:
+            uiapp.DialogBoxShowing -= _on_dialog
+    except Exception:
+        pass
+
+
+BIG_SPAN_M = 100.0
+
+
+def _is_big(v):
+    """大范围视图：没开裁剪、或裁剪框对角线超过 BIG_SPAN_M 米的平面/剖面/立面（整片场地图）。
+    这类视图在「精细」下管道画双线、管件全画，是导出慢、DWG 大的主要原因。只看裁剪框，不数构件（数构件本身就很慢）。"""
+    try:
+        if v is None or v.IsTemplate or not isinstance(v, (DB.ViewPlan, DB.ViewSection)):
+            return False
+        if v.DetailLevel != DB.ViewDetailLevel.Fine:
+            return False
+        if not v.CropBoxActive:
+            return True
+        bb = v.CropBox      # 视图坐标系：X/Y 是视图里的宽和高，Z 是看进去的深度（不算）
+        return ((bb.Max.X - bb.Min.X) ** 2 + (bb.Max.Y - bb.Min.Y) ** 2) ** 0.5 * 0.3048 > BIG_SPAN_M
+    except Exception:
+        return False
+
+
+def _big_views(items):
+    out = []
+    for x in items:
+        vids = list(x.GetAllPlacedViews()) if isinstance(x, DB.ViewSheet) else [x.Id]
+        for vid in vids:
+            v = doc.GetElement(vid)
+            if _is_big(v):
+                out.append(v)
+    return out
+
+
+def _slim_start(views, medium, hide_cad):
+    """临时瘦身：改详细程度、隐藏导入的 CAD（一个事务提交），导完由 _slim_end 逐项改回原样。返回还原信息。"""
+    if not views or not (medium or hide_cad):
+        return None
+    undo = []
+    t = DB.Transaction(doc, u'天河落 · 导出临时瘦身')
+    t.Start()
+    try:
+        for v in views:
+            old = v.DetailLevel
+            changed = False
+            hid = []
+            if medium and old == DB.ViewDetailLevel.Fine:
+                try:
+                    v.DetailLevel = DB.ViewDetailLevel.Medium
+                    changed = True
+                except Exception:
+                    pass      # 视图样板锁定了详细程度，跳过
+            if hide_cad:
+                hid = [i.Id for i in DB.FilteredElementCollector(doc, v.Id).OfClass(DB.ImportInstance) if not i.IsLinked]
+                if hid:
+                    try:
+                        v.HideElements(List[DB.ElementId](hid))
+                    except Exception:
+                        hid = []
+            if changed or hid:
+                undo.append((v.Id, old, hid))
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        return None
+    _PENDING_UNDO.extend(undo)
+    return undo
+
+
+_PENDING_UNDO = []
+
+
+def _slim_end(undo):
+    """把临时改的视图逐项改回去。"""
+    if not undo:
+        return
+    t = DB.Transaction(doc, u'天河落 · 还原导出前的视图设置')
+    t.Start()
+    try:
+        for vid, old, hid in undo:
+            v = doc.GetElement(vid)
+            try:
+                if v.DetailLevel != old:
+                    v.DetailLevel = old
+                if hid:
+                    v.UnhideElements(List[DB.ElementId](hid))
+            except Exception:
+                pass
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        return
+    for u in undo:
+        if u in _PENDING_UNDO:
+            _PENDING_UNDO.remove(u)
+
+
+def _export_dwg_batches(sheets, folder, stems, opt, pb, report, slim=(False, False)):
+    """按批导出。Revit 一次导出多张时按「前缀-图纸 - 图号 - 图名.dwg」命名，导完按图号改成目标文件名。"""
+    done = []
+    total = len(sheets)
+    for b in range(0, total, BATCH):
+        if pb.cancelled:
+            break
+        chunk = sheets[b:b + BATCH]
+        pb.update_progress(b, total)
+        tag = u'thl%d' % b
+        before = set(os.listdir(folder))
+        t0 = _time.time()
+        bigs = _big_views(chunk) if (slim[0] or slim[1]) else []
+        tg = None
+        if bigs:
+            # 事务组：临时改动 + 导出 + 改回，最后整组回滚，模型不留任何改动（回滚失败时上面已逐项改回）
+            tg = DB.TransactionGroup(doc, u'天河落 · 导出临时瘦身')
+            tg.Start()
+        undo = _slim_start(bigs, slim[0], slim[1]) if bigs else None
+        try:
+            ids = List[DB.ElementId]([x.Id for x in chunk])
+            if len(chunk) == 1:
+                doc.Export(folder, stems[chunk[0].Id.Value], ids, opt)
+            else:
+                doc.Export(folder, tag, ids, opt)
+        except Exception as ex:
+            for x in chunk:
+                report.append((x, u'', 0, u'失败：%s' % ex))
+            continue
+        finally:
+            _slim_end(undo)
+            if tg is not None:
+                try:
+                    tg.RollBack()
+                except Exception:
+                    pass
+        sec = (_time.time() - t0) / max(1, len(chunk))
+        new = [n for n in os.listdir(folder) if n not in before and n.lower().endswith(u'.dwg')]
+        for x in chunk:
+            stem = stems[x.Id.Value]
+            target = os.path.join(folder, stem + u'.dwg')
+            src = None
+            if len(chunk) == 1:
+                src = target if os.path.exists(target) else None
+            else:
+                key = u' - %s - ' % _safe_name(getattr(x, 'SheetNumber', u'') or u'')
+                hit = [n for n in new if n.startswith(tag + u'-') and key in n]
+                if hit:
+                    src = os.path.join(folder, hit[0])
+            if src is None:
+                report.append((x, u'', 0, u'失败：Revit 没有生成文件'))
+                continue
+            if src != target:
+                try:
+                    if os.path.exists(target):
+                        os.remove(target)
+                    os.rename(src, target)
+                except Exception:
+                    target = src
+            done.append(os.path.basename(target))
+            report.append((x, os.path.basename(target), os.path.getsize(target), u'成功（约 %.1f 秒/张）' % sec))
+    pb.update_progress(total, total)
+    return done
+
+
+def _export_pdf_each(sheets, folder, stems):
+    pdf_dir = os.path.join(folder, u'PDF')
+    if not os.path.exists(pdf_dir):
+        os.makedirs(pdf_dir)
+    n = 0
+    for x in sheets:
+        o = DB.PDFExportOptions()
+        o.Combine = True
+        o.FileName = stems[x.Id.Value]
+        try:
+            if doc.Export(pdf_dir, List[DB.ElementId]([x.Id]), o):
+                n += 1
+        except Exception:
+            pass
+    return u'PDF（每张一个）已导出 %d / %d 张：%s' % (n, len(sheets), pdf_dir)
+
+
+def _write_report(folder, report):
+    path = os.path.join(folder, u'导出清单.csv')
+    try:
+        with io.open(path, 'w', encoding='utf-8-sig') as f:
+            f.write(u'图号,图名,文件,大小(MB),结果\r\n')
+            for x, fn, size, res in report:
+                f.write(u'%s,%s,%s,%.2f,%s\r\n' % ((getattr(x, 'SheetNumber', None) or u'（视图）').replace(u',', u' '), (x.Name or u'').replace(u',', u' '),
+                                                  fn.replace(u',', u' '), size / 1048576.0, res.replace(u',', u' ')))
+    except Exception:
+        return u''
+    return path
+
+
+def main():
+    try:
+        sheets_all = [x for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements() if not x.IsPlaceholder]
+        sheets_all.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
+        marks = {}
+        well = []
+        for x in sheets_all:
+            mk = _well_mark(x)
+            if mk:
+                marks[x.Id.Value] = mk
+                well.append(x)
+        well.sort(key=lambda x: wcfg_well_sort_key(marks[x.Id.Value], WCFG))
+
+        def mk_of(x):
+            return marks.get(x.Id.Value, u"")
+
+        items = _scope_items(sheets_all, well, mk_of)
+        s, idx = _dialog(_load_settings(), items)
+        if s is None:
+            return
+        _save_settings(s)
+        targets = items[idx][1]
+        if targets is None:
+            got = forms.SelectFromList.show([_SheetItem(x) for x in sheets_all], title=u'勾选要导出的图纸',
+                                            multiselect=True, button_name=u'导出')
+            if not got:
+                return
+            targets = [getattr(g, 's', g) for g in (got if isinstance(got, list) else [got])]
+        if not targets:
+            forms.alert(u'这个范围里没有图纸。', title=TITLE)
+            return
+        if not (s[u'dwg'] or s[u'pdf_merge'] or s[u'pdf_each'] or s[u'slim']):
+            forms.alert(u'没有勾选任何导出格式。', title=TITLE)
+            return
+        folder = s[u'folder']
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+
+        # 导出前检查图框：没有图框、或图框类别在图纸上被隐藏的，先告诉你
+        has_tb = _titleblock_sheet_ids()
+        no_frame = [x for x in targets if isinstance(x, DB.ViewSheet) and (x.Id.Value not in has_tb or _frame_hidden(x))]
+        if no_frame:
+            names = u'\n'.join(u'  %s  %s' % (x.SheetNumber, x.Name) for x in no_frame[:15])
+            pick = forms.CommandSwitchWindow.show(
+                [u'跳过这些没有图框的图纸，其余照常导出', u'照样全部导出', u'取消，我先去补图框'],
+                message=u'有 %d 张图纸上没有图框（或图框被隐藏），导出来也不会有图框：\n%s%s'
+                        % (len(no_frame), names, u'\n  …' if len(no_frame) > 15 else u''))
+            if not pick or pick.startswith(u'取消'):
+                return
+            if pick.startswith(u'跳过'):
+                bad = set(x.Id.Value for x in no_frame)
+                targets = [x for x in targets if x.Id.Value not in bad]
+                if not targets:
+                    return
+
+        stems = _file_stems(targets, s[u'name_mode'])
+        report = []
+        dwg_targets = targets
+        if s[u'skip_existing']:
+            dwg_targets = [x for x in targets if not os.path.exists(os.path.join(folder, stems[x.Id.Value] + u'.dwg'))]
+            for x in targets:
+                if x not in dwg_targets:
+                    report.append((x, stems[x.Id.Value] + u'.dwg', os.path.getsize(os.path.join(folder, stems[x.Id.Value] + u'.dwg')), u'已存在，跳过'))
+
+        t_start = _time.time()
+        exported = []
+        if (s[u'dwg'] or s[u'slim']) and dwg_targets:
+            opt = _dwg_options(s)
+            with forms.ProgressBar(title=u'正在导出 DWG（共 %d 张，每批 %d 张）…' % (len(dwg_targets), BATCH), cancellable=True) as pb:
+                _sl = (bool(s[u'big_medium']), bool(s[u'big_hide_cad']))
+                _sh = [x for x in dwg_targets if isinstance(x, DB.ViewSheet)]
+                _vw = [x for x in dwg_targets if not isinstance(x, DB.ViewSheet)]
+                _auto_dialogs(True)
+                try:
+                    exported = _export_dwg_batches(_sh, folder, stems, opt, pb, report, _sl) if _sh else []
+                    for _v in _vw:     # 视图逐个导（Revit 批量导视图的文件名不好对回去）
+                        exported += _export_dwg_batches([_v], folder, stems, opt, pb, report, _sl)
+                finally:
+                    _auto_dialogs(False)
+                    _slim_end(list(_PENDING_UNDO))   # 保险：中途取消或出错也一定还原
+        t_dwg = _time.time() - t_start
+
+        post_msg = u''
+        if exported and (s[u'logo'] or s[u'slim']):
+            try:
+                _ok, post_msg, _lg = _start_logo_job(folder, exported, add_logo=bool(s[u'logo'] and LOGO_ENABLED), purge=bool(s[u'slim']))
+            except Exception as ex:
+                post_msg = u'启动 AutoCAD 后处理失败（DWG 本身已导出）：%s' % ex
+
+        pdf_msgs = []
+        _auto_dialogs(True)
+        if s[u'pdf_merge']:
+            try:
+                pdf_msgs.append(_export_pdf(targets, folder)[1])
+            except Exception as ex:
+                pdf_msgs.append(u'合并 PDF 出错：%s' % ex)
+        if s[u'pdf_each']:
+            try:
+                pdf_msgs.append(_export_pdf_each(targets, folder, stems))
+            except Exception as ex:
+                pdf_msgs.append(u'单张 PDF 出错：%s' % ex)
+
+        _auto_dialogs(False)
+        rep = _write_report(folder, report)
+        ok_n = len([r for r in report if r[3].startswith(u'成功')])
+        fail = [r for r in report if r[3].startswith(u'失败')]
+        size = sum(r[2] for r in report if r[3].startswith(u'成功'))
+        msg = u'导出完成：%s\n\n' % folder
+        if s[u'dwg'] or s[u'slim']:
+            msg += u'• DWG 成功 %d 张，共 %.1f MB，用时 %d 分 %d 秒\n' % (ok_n, size / 1048576.0, int(t_dwg) // 60, int(t_dwg) % 60)
+            skipped = len([r for r in report if r[3].startswith(u'已存在')])
+            if skipped:
+                msg += u'• 文件夹里已有、跳过 %d 张\n' % skipped
+            if fail:
+                msg += u'• 失败 %d 张：\n' % len(fail) + u''.join(u'    %s %s：%s\n' % (getattr(r[0], 'SheetNumber', u''), r[0].Name, r[3]) for r in fail[:8])
+        if post_msg:
+            msg += u'• %s\n' % post_msg
+        for m in pdf_msgs:
+            msg += u'• %s\n' % m
+        if no_frame:
+            msg += u'• 没有图框的图纸 %d 张（见上一步提示）\n' % len(no_frame)
+        if _AUTO_DIALOGS:
+            msg += u'• Revit 弹出的提示已自动确认 %d 次：%s\n' % (len(_AUTO_DIALOGS), u'；'.join(sorted(set(_AUTO_DIALOGS))[:3]))
+        if rep:
+            msg += u'\n清单：%s' % rep
+        forms.alert(msg, title=TITLE)
+        try:
+            System.Diagnostics.Process.Start('explorer.exe', folder)
+        except Exception:
+            pass
     except Exception as e:
         import traceback
-        forms.alert("发生严重错误:\n" + str(e) + "\n\n" + traceback.format_exc(), title="报错追踪")
+        forms.alert(u'导出出错：\n' + str(e) + u'\n\n' + traceback.format_exc(), title=TITLE)
 
 
 if __name__ == '__main__':
