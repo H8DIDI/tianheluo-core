@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 __title__ = '一键井大样标注'
 __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 生成两类尺寸：\n'
-           '① 总尺寸：两侧内壁之间的净尺寸，下方标宽、左侧标高（平面、北只标宽；南标宽和高；东、西不标）；\n'
+           '① 总尺寸：两侧内壁之间的净尺寸，下方标宽、左侧标高（平面、南标宽和高；北只标宽；东、西不标）；\n'
            '② 井内壁至排管尺寸链：识别井内壁，对位于井内的每根排管，下方/上方标水平尺寸链'
            '（内壁—排管边—排管宽—排管边—内壁，一条多段尺寸），左侧/右侧标竖向尺寸链（同理，一条多段尺寸）。\n'
            '排管尺寸链在平面与剖面/立面视图都生成。\n'
@@ -1193,7 +1193,7 @@ def _total_margin(extents, key):
 
 
 # 每张视图标哪条总线（与标准图一致）：W = 宽（下方），H = 高（左侧）；按视图名前缀判断，未列出的视图两条都标
-_TOTAL_RULES = {'平面': 'W', '北': 'W', '南': 'WH', '西': '', '东': ''}
+_TOTAL_RULES = {'平面': 'WH', '北': 'W', '南': 'WH', '西': '', '东': ''}
 
 
 def _total_rule(view):
@@ -1222,7 +1222,7 @@ def _extremes(elems, axis):
 
 def make_total_dims(view, elems, box, ledger=None, extents=None):
     """生成总尺寸，取两侧内壁之间的净尺寸（与标准图一致）：宽度在下方标，高度在左侧标。
-    哪些视图标哪条由 _total_rule 决定（平面、北只标宽；南标宽和高；东、西不标）。
+    哪些视图标哪条由 _total_rule 决定（平面、南标宽和高；北只标宽；东、西不标）。
     找不到内壁时退回到构件最外侧的面。尺寸线摆在外包框之外，并投影到视图平面上（见 _try_dim）。
     extents 由 make_chain_dims 填好时，总线所在一侧若有尺寸链，总线外移到最外一道链线之外。
     """
@@ -1514,10 +1514,10 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                 if True:
                     off = _layer(side)
                     if side == 'B':
-                        vs = v0 - off
+                        vs = wB - off
                         _note_reach(extents, v + '-', off)
                     else:
-                        vs = v1 + off
+                        vs = wT + off
                         _note_reach(extents, v + '+', off)
                     refs = _chain_refs((wL, wl['ref']), (wR, wr['ref']),
                                        [(hb_lo, hb_lo_r), (hb_hi, hb_hi_r)])
@@ -1530,10 +1530,10 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                 if True:
                     off = _layer(side)
                     if side == 'L':
-                        hs = h0 - off
+                        hs = wL - off
                         _note_reach(extents, h + '-', off)
                     else:
-                        hs = h1 + off
+                        hs = wR + off
                         _note_reach(extents, h + '+', off)
                     refs = _chain_refs((wB, wb['ref']), (wT, wt['ref']),
                                        [(vb_lo, vb_lo_r), (vb_hi, vb_hi_r)])
