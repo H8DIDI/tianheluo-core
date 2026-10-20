@@ -6,7 +6,7 @@ __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 生成两类尺寸
            '（内壁—排管边—排管宽—排管边—内壁，一条多段尺寸），左侧/右侧标竖向尺寸链（同理，一条多段尺寸）。\n'
            '排管尺寸链在平面与剖面/立面视图都生成。\n'
            '本工具只新增尺寸，不改视图：不动裁剪框、不隐藏/显示任何构件、不删除视图里已有的尺寸；'
-           '同位置已有尺寸的不重复标；裁剪框放不下的尺寸不标，并在报告里列出（需要时自己放大该视图裁剪框后再运行）。')
+           '同位置已有尺寸的不重复标；超出注释裁剪框的尺寸照常标，报告里列出，需要显示时往外拉。')
 
 from pyrevit import revit, DB, UI, forms
 
@@ -272,6 +272,9 @@ _GAP_MIN_FT = 0.005
 
 # 排管是否位于井内壁之内的容差（英尺，0.01 约 3 mm）
 _IN_TOL_FT = 0.01
+
+# 排管伸出井内壁的容许量（英尺，0.6 约 180 mm）：排管截面稍伸出井墙、或端头贴着井墙，也算接入这口井，照常标链
+_PROTRUDE_FT = 0.6
 
 # 排管伸到井壁的容差（英尺，0.25 约 75 mm）：排管端面离井内壁差几毫米到几厘米也算接入这口井
 _REACH_TOL_FT = 0.25
@@ -998,7 +1001,7 @@ def _drop_dim(view, d):
 def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
     """用一组面引用建尺寸：两个引用是一条线性尺寸，三个及以上是多段尺寸（链，按坐标顺序，相邻引用之间各为一段）。
     两端先投影到视图平面。传入 ledger 时，同位置已有尺寸则跳过并计入 ledger.dup。
-    两端不在裁剪框内（留 _CROP_TEXT_FT）的不标，记入 _OUT_CROP；本函数从不改动裁剪框。
+    超出注释裁剪框的照常标，记入 _OUT_CROP 供报告；本函数从不改动裁剪框。
     dim_type=True 时改用 _find_dim_type_id() 找到的尺寸类型。换类型后位置不对的，撤掉改用默认样式重画。失败原因记入 _DIM_ERRS。"""
     if view is None or len(refs) < 2 or any(r is None for r in refs):
         return None
@@ -1007,12 +1010,10 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
     if ledger is not None and _has_same_line(ledger, p1, p2):
         ledger.dup += 1
         return None
-    # 注释裁剪开启时，Revit 只显示注释裁剪框之内的尺寸，框外的不标并记下缺口供报告；
-    # 注释裁剪关闭时（多数井大样视图如此）超出模型裁剪框的尺寸照常显示，不受限制
+    # 超出注释裁剪框的尺寸照常标注（不改视图、不挡），只记下缺口供报告；需要显示时往外拉或放大裁剪框
     gap = _crop_gap(view, p1, p2) if _annot_crop_on(view) else None
     if gap is not None:
         _OUT_CROP[_spot_key(p1, p2)] = gap
-        return None
 
     def _arr():
         a = DB.ReferenceArray()
@@ -1497,10 +1498,10 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                 if vb_lo is None:
                     vb_lo, vb_hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), v)
             # 水平链：截面水平宽在井内壁之间，且竖向范围与井相交
-            ok_h = (want_h and hb_lo >= wL - _IN_TOL_FT and hb_hi <= wR + _IN_TOL_FT
+            ok_h = (want_h and hb_lo >= wL - _PROTRUDE_FT and hb_hi <= wR + _PROTRUDE_FT
                     and vb_lo < wT + _REACH_TOL_FT and vb_hi > wB - _REACH_TOL_FT)
             # 竖向链：截面竖向范围在井内壁之间，且水平范围与井相交
-            ok_v = (want_v and vb_lo >= wB - _IN_TOL_FT and vb_hi <= wT + _IN_TOL_FT
+            ok_v = (want_v and vb_lo >= wB - _PROTRUDE_FT and vb_hi <= wT + _PROTRUDE_FT
                     and hb_lo < wR + _REACH_TOL_FT and hb_hi > wL - _REACH_TOL_FT)
             if not (ok_h or ok_v) or not _overlap(bb, (box[0] - 0.3, box[1] + 0.3, box[2] - 0.3, box[3] + 0.3, box[4] - 0.3, box[5] + 0.3)):
                 _bump(stats, _SKIP_BANK_OUT)
@@ -1922,9 +1923,7 @@ def main():
                         ok_views += 1
                         notes.append(('{}'.format(v.Name), n + cn))
                     else:
-                        if _OUT_CROP:
-                            why = '超出注释裁剪框，未标'
-                        elif res['why'] and res['why'] != '视图内无排管（结构框架）':
+                        if res['why'] and res['why'] != '视图内无排管（结构框架）':
                             why = res['why']
                         else:
                             why = '未生成尺寸'
@@ -1951,7 +1950,7 @@ def main():
         if stats.get(_ST_DUP):
             msg += '• 同位置已有或重复的尺寸（已跳过，不重复标）：{} 道\n'.format(stats[_ST_DUP])
         if out_total:
-            msg += '• 超出注释裁剪框、未标的尺寸：{} 道（视图没有改动；仅注释裁剪开启的视图受此限）\n'.format(out_total)
+            msg += '• 超出注释裁剪框的尺寸：{} 道（已照常标注；视图没有改动，需要显示时往外拉）\n'.format(out_total)
             for nm, cnt_, gap in out_views[:10]:
                 msg += '    - {}：{} 道（{}）\n'.format(nm, cnt_, gap)
             if len(out_views) > 10:
