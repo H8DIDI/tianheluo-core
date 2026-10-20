@@ -1786,7 +1786,13 @@ def main():
                         continue
                     # 适配裁剪框用整个井的包围盒（含盖板、爬梯，否则井顶会被切）；
                     # 尺寸用的框裁到当前视图裁剪框之内，且只取内壁面（_face_box），两者不能混用
-                    full_box = union_box(v, elems)
+                    full_union = union_box(v, elems)
+                    full_box = full_union
+                    if full_union is not None:
+                        # 水平范围用可见墙面：TELCO 族的包围盒比井身大一倍多（多出不可见的部分），用包围盒会把裁剪框撑大、井缩小；
+                        # 竖向仍用整个井（盖板在顶上，不能切掉）
+                        _fb = _face_box(elems, full_union)
+                        full_box = (_fb[0], _fb[1], _fb[2], _fb[3], full_union[4], full_union[5])
                     box = _clip_box(union_box(v, elems), crop_world_range(v))
                     if box is not None:
                         box = _face_box(elems, box)

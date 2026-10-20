@@ -74,6 +74,21 @@ WCFG_DEFAULTS = {
         {u"prefix": u"Y", u"system": u"雨水井", u"code": u"YS", u"label": u"Y- 雨水井"},
     ],
     u"other": {u"system": u"其他", u"code": u"QT"},
+    # 图名模板（按井号前缀，长前缀优先）：{井号} 换成井号，如 T-001。没有模板的井沿用「井大样_」前缀。
+    # 图纸集合（按井号前缀）：新图放进对应的图纸集合，便于按集合导出 PDF。名字须与项目里的图纸集合一致。
+    u"sheet_collection_by_prefix": {
+        u"AA": u"275KV井大样", u"BB": u"275KV井大样", u"A": u"11KV井大样", u"B": u"11KV井大样",
+        u"E": u"ELV井大样", u"L": u"LV井大样", u"T": u"TELCO井大样",
+    },
+    u"sheet_name_templates": {
+        u"AA": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"BB": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"A": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"B": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"E": u"BTP-IF1 ELV-{井号} Detail Drawing",
+        u"L": u"BTP-IF1 Lv-{井号} Detail Drawing",
+        u"T": u"BTP-IF1 TELcon-{井号} Detail Drawing",
+    },
     u"logo": {u"enabled": True, u"file": u"frame_logo.jpg", u"x0": 736.54, u"y0": 141.10, u"w": 91.49,
               u"说明": u"导出 DWG 后补插的图框 logo：x0/y0 = logo 左下角在 Layout1 里的坐标，w = 宽度（按 A1 横向图框标定）。换图框要改；enabled=false 不补 logo。"},
 }
@@ -165,7 +180,30 @@ def wcfg_well_sort_key(mark, cfg=None, strict=True):
     """先按系列在配置里的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
     s = wcfg_series_of(mark, cfg, strict)
     return (wcfg_series_index(s, cfg) if s is not None else 9999, wcfg_natural_key(mark))
+
+
+def wcfg_sheet_name(mark, cfg=None):
+    """井号 → 图名（按配置里的图名模板）。没有对应模板时返回 None，调用方沿用「井大样_」前缀。
+    模板前缀按长度从长到短匹配，且前缀后面必须紧跟 "-"（AA-04 不会误判成 A 系列）。"""
+    cfg = cfg or wcfg_load()
+    tpls = cfg.get(u"sheet_name_templates") or {}
+    m = (mark or u"").strip()
+    for key in sorted(tpls.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return tpls[key].replace(u"{井号}", m)
+    return None
 # ---- well_config 结束 ----------------------------------------------------------
+
+
+def wcfg_collection_name(mark, cfg=None):
+    """井号 → 图纸集合名（按配置 sheet_collection_by_prefix，长前缀优先，前缀后紧跟 -）。没有对应返回 None。"""
+    cfg = cfg or wcfg_load()
+    maps = cfg.get(u"sheet_collection_by_prefix") or {}
+    m = (mark or u"").strip()
+    for key in sorted(maps.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return maps[key]
+    return None
 
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]      # 默认「井大样_」
@@ -759,6 +797,37 @@ def _mark_of(elem):
     return p.AsString().strip() if (p and p.AsString()) else ""
 
 
+def _near_collector(doc, elem, category, margin_ft=25.0):
+    """井周围 margin_ft 范围内、指定类别的未定义类型图元。用空间过滤器（只扫描附近，不扫全模型）。"""
+    bb = elem.get_BoundingBox(None)
+    if bb is None:
+        return DB.FilteredElementCollector(doc).OfCategory(category).WhereElementIsNotElementType()
+    ol = DB.Outline(DB.XYZ(bb.Min.X - margin_ft, bb.Min.Y - margin_ft, bb.Min.Z - margin_ft),
+                    DB.XYZ(bb.Max.X + margin_ft, bb.Max.Y + margin_ft, bb.Max.Z + margin_ft))
+    return DB.FilteredElementCollector(doc).WherePasses(DB.BoundingBoxIntersectsFilter(ol)).OfCategory(category).WhereElementIsNotElementType()
+
+
+def _view_world_range(view):
+    """视图裁剪框在世界坐标里的范围 (x0,x1, y0,y1, z0,z1)。只做几何计算，不触发视图重算。"""
+    cb = view.CropBox
+    T = cb.Transform
+    xs, ys, zs = [], [], []
+    for a in (cb.Min.X, cb.Max.X):
+        for b in (cb.Min.Y, cb.Max.Y):
+            for c in (cb.Min.Z, cb.Max.Z):
+                p = T.OfPoint(DB.XYZ(a, b, c))
+                xs.append(p.X)
+                ys.append(p.Y)
+                zs.append(p.Z)
+    return (min(xs), max(xs), min(ys), max(ys), min(zs), max(zs))
+
+
+def _bb_hits(bb, r):
+    """包围盒 bb 是否与世界范围 r 相交（几何判断）。"""
+    return not (bb.Max.X < r[0] or bb.Min.X > r[1] or bb.Max.Y < r[2] or bb.Min.Y > r[3]
+                or bb.Max.Z < r[4] or bb.Min.Z > r[5])
+
+
 def _scan_existing_sheets(doc):
     """扫描模型里已有的「井大样_」图纸，返回 {井号: [(图纸 ElementId, 图纸上的视图 ElementId 列表), ...]}。
     历史图纸可能已被改过图纸名/图号（例如 图纸名=井大样_LV-L-026、图号=LV-L-026，
@@ -777,9 +846,10 @@ def _scan_existing_sheets(doc):
         for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
             try:
                 _nm = _s.Name or ""
-                if not _nm.startswith(WS_PREFIX):
-                    continue
-                _suffix = _nm[len(WS_PREFIX):]
+                # 图名以「井大样_」开头，或图名按模板改过（如 BTP-IF1 TELcon-T-001 Detail Drawing）
+                # 但图上视图名带 AG-井号-xxxx 的，都算井大样图（否则重新生成时旧图删不掉，会重复）
+                _is_prefix = _nm.startswith(WS_PREFIX)
+                _suffix = _nm[len(WS_PREFIX):] if _is_prefix else None
                 _kids = _vp_by_sheet.get(_s.Id.Value, [])
                 _tag = None
                 for _vid in _kids:
@@ -796,8 +866,10 @@ def _scan_existing_sheets(doc):
                 _keys = []
                 if _tag and _tag not in _keys:
                     _keys.append(_tag)
-                if _suffix not in _keys:
+                if _suffix and _suffix not in _keys:
                     _keys.append(_suffix)
+                if not _keys:
+                    continue
                 for _k in _keys:
                     stale_sheets.setdefault(_k, []).append((_s.Id, _kids))
             except:
@@ -899,6 +971,75 @@ def _pick_well_status(wells, built):
     if not isinstance(picked, (list, tuple)):
         picked = [picked]
     return [getattr(r, "well", r) for r in picked]
+
+
+# 耗时记录（测速用）：_pt_mark(名称) 把「上一个标记到现在」的时间记到上一个名称下
+_PT = {}
+_PT_STATE = {'name': None, 't': None}
+
+
+def _pt_mark(name):
+    import time as _tm
+    now = _tm.time()
+    if _PT_STATE['name'] is not None:
+        _PT[_PT_STATE['name']] = _PT.get(_PT_STATE['name'], 0.0) + (now - _PT_STATE['t'])
+    _PT_STATE['name'] = name
+    _PT_STATE['t'] = now
+
+
+# 平面视图快速新建：复制同一标高上已有的井大样平面（裁剪框已打开），复制约 0.35 秒；
+# 直接新建再打开裁剪框，Revit 要整体重算该平面，实测每口井约 45 秒。复制失败时退回新建。
+_PLAN_SRC = {}
+
+
+def _create_plan_view(doc, plan_type_id, level_id):
+    if not _PLAN_SRC.get('_built'):
+        _PLAN_SRC['_built'] = True
+        for _v in DB.FilteredElementCollector(doc).OfClass(DB.ViewPlan).ToElements():
+            try:
+                if _v.IsTemplate or u'_AG-' not in (_v.Name or u'') or not _v.CropBoxActive or _v.GenLevel is None:
+                    continue
+                _k = _v.GenLevel.Id.Value
+                if _k not in _PLAN_SRC:
+                    _PLAN_SRC[_k] = _v.Id
+            except:
+                pass
+    _src_id = _PLAN_SRC.get(level_id.Value)
+    if _src_id is not None:
+        try:
+            _src = doc.GetElement(_src_id)
+            if _src is not None:
+                _new = doc.GetElement(_src.Duplicate(DB.ViewDuplicateOption.Duplicate))
+                if _new is not None and str(_new.ViewType) == 'FloorPlan':
+                    return _new
+        except:
+            pass
+    return DB.ViewPlan.Create(doc, plan_type_id, level_id)
+
+
+_SHEET_COLL_IDS = {}
+
+
+def _set_sheet_collection(doc, sheet, mark):
+    """把图纸放进配置里对应的图纸集合（按井号前缀）；找不到集合或参数不可写时跳过，不影响出图。"""
+    try:
+        _name = wcfg_collection_name(mark, WCFG)
+        if not _name:
+            return
+        if _name not in _SHEET_COLL_IDS:
+            _SHEET_COLL_IDS[_name] = None
+            for _c in DB.FilteredElementCollector(doc).OfClass(DB.SheetCollection).ToElements():
+                if _c.Name == _name:
+                    _SHEET_COLL_IDS[_name] = _c.Id
+                    break
+        _cid = _SHEET_COLL_IDS.get(_name)
+        if _cid is None:
+            return
+        _p = sheet.get_Parameter(DB.BuiltInParameter.SHEET_COLLECTION)
+        if _p is not None and not _p.IsReadOnly:
+            _p.Set(_cid)
+    except:
+        pass
 
 
 def main():
@@ -1284,6 +1425,25 @@ def main():
                 if _dmk:
                     old_views.setdefault(_dmk, []).append(_did)
 
+            _num_next = [None]
+            _reuse_num = {}
+
+            def _new_sheet_number():
+                """下一个图号：现有纯数字图号的最大值 +1，之后每次递增（只扫描一次模型）。"""
+                if _num_next[0] is None:
+                    _mx = 0
+                    for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
+                        try:
+                            _sn = (_s.SheetNumber or "").strip()
+                            if _sn.isdigit():
+                                _mx = max(_mx, int(_sn))
+                        except:
+                            pass
+                    _num_next[0] = _mx + 1
+                _n = _num_next[0]
+                _num_next[0] += 1
+                return "%04d" % _n
+
             pb = forms.ProgressBar(title='正在批量生成井大样图... ({value}/{max_value})', cancellable=True)
             for idx, elem in enumerate(valid_elems):
                 if pb.cancelled:
@@ -1332,6 +1492,10 @@ def main():
 
                     for _sid, _kids in stale_sheets.get(base_name, []):
                         try:
+                            # 记下旧图的图号，新图沿用（替换后图号不空缺、不往后跳）
+                            _old_sheet = doc.GetElement(_sid)
+                            if _old_sheet is not None and (_old_sheet.SheetNumber or "").strip().isdigit():
+                                _reuse_num[base_name] = _old_sheet.SheetNumber.strip()
                             doc.Delete(_sid)
                             for _vid in _kids:
                                 try:
@@ -1344,6 +1508,7 @@ def main():
                         except:
                             pass
 
+                    _pt_mark('sheet_create')
                     # 1. 新建图纸（无图框模式用 InvalidElementId；不在图纸加入标题栏实例）
                     if selected_tb is not None:
                         sheet = DB.ViewSheet.Create(doc, selected_tb.Id)
@@ -1352,8 +1517,12 @@ def main():
 
                     rand_suffix = System.Guid.NewGuid().ToString()[:4]
 
-                    sheet.Name = WS_PREFIX + base_name
-                    sheet.SheetNumber = WS_NUMPRE + base_name + "-" + rand_suffix
+                    # 图名：按配置里的图名模板（如 BTP-IF1 TELcon-T-001 Detail Drawing）；没有模板沿用「井大样_」前缀
+                    sheet.Name = wcfg_sheet_name(base_name, WCFG) or (WS_PREFIX + base_name)
+                    # 图号：接着现有的最大数字图号往后排（0001、0002…），不再用 AG-井号-随机码
+                    sheet.SheetNumber = _reuse_num.pop(base_name, None) or _new_sheet_number()
+                    # 图纸集合：按井号系列放进对应的图纸集合（11KV/275KV/ELV/LV/TELCO），便于按集合导出 PDF
+                    _set_sheet_collection(doc, sheet, base_name)
                     for param_name in ["专业", "所属专业"]:
                         try:
                             sp = sheet.LookupParameter(param_name)
@@ -1373,6 +1542,7 @@ def main():
                     if not bbox:
                         continue
 
+                    _pt_mark('geometry')
                     # 1. Z 轴标高与高度：直接由构件 BBox.Min.Z / Max.Z 确定（100% 精确吻合实体，绝无符号线虚高）
                     center_z = (bbox.Min.Z + bbox.Max.Z) / 2.0
                     pit_dz = (bbox.Max.Z - bbox.Min.Z) / 2.0
@@ -1437,6 +1607,7 @@ def main():
                     face_out = R_FACE_OUT  # 剖切面外移（规则）
                     face_depth = R_FACE_DEPTH  # 剖面框厚度（规则）
 
+                    _pt_mark('plan_view')
                     # ============================================
                     # 2. 生成平面图 (ViewPlan)
                     # ============================================
@@ -1448,8 +1619,10 @@ def main():
                         level_id = levels[0].Id if levels else DB.ElementId.InvalidElementId
 
                     if plan_type_id != DB.ElementId.InvalidElementId and level_id != DB.ElementId.InvalidElementId:
-                        view_plan = DB.ViewPlan.Create(doc, plan_type_id, level_id)
+                        view_plan = _create_plan_view(doc, plan_type_id, level_id)
+                        _pt_mark('plan_after_create')
                         view_plan.CropBoxActive = True
+                        _pt_mark('plan_after_cropbox_active')
                         view_plan.CropBoxVisible = False
 
                         crop = DB.BoundingBoxXYZ()
@@ -1460,11 +1633,13 @@ def main():
                                           center.Y + pit_dy + offset,
                                           center.Z + pit_dz + offset)
                         view_plan.CropBox = crop
+                        _pt_mark('plan_after_crop')
 
                         # 视图范围按标高的“相对项目基点高程”换算（ProjectElevation）。
                         # 用 Elevation 时，本项目 0.00 标高的 Elevation 是 4390 m，偏移被算成 -4383 m，
                         # 平面视图范围落在井之外，平面空白。井的几何与 ProjectElevation 同一坐标系。
                         level_elev = doc.GetElement(level_id).ProjectElevation
+                        _pt_mark('plan_before_range')
                         view_range = view_plan.GetViewRange()
                         # 剖切面置于井顶之上：井整体落在剖切面以下，平面图以俯视投影
                         # 完整显示井身（含顶面轮廓）。原来 Cut 放在井中心高度，Revit
@@ -1493,8 +1668,10 @@ def main():
                         else:
                             view_plan = DB.ViewSection.CreateSection(doc, section_type_id, sbox)
 
-                    view_plan.Name = "{}_{}".format("平面", sheet.SheetNumber)
+                    # 视图名带井号（平面_AG-井号-随机码），「重新生成即替换」靠它认出这口井的旧视图
+                    view_plan.Name = "{}_{}{}-{}".format("平面", WS_NUMPRE, base_name, rand_suffix)
 
+                    _pt_mark('section_views')
                     # ============================================
                     # 3. 生成四个立面剖面视图
                     # ============================================
@@ -1521,7 +1698,7 @@ def main():
                             v = DB.ViewSection.CreateDetail(doc, detail_type_id, sbox)
                         else:
                             v = DB.ViewSection.CreateSection(doc, section_type_id, sbox)
-                        v.Name = "{}_{}".format(name_suffix, sheet.SheetNumber)
+                        v.Name = "{}_{}{}-{}".format(name_suffix, WS_NUMPRE, base_name, rand_suffix)
                         return v
 
                     # 实测(Revit 2026)：View.ViewDirection == CropBox.Transform.BasisZ == -输入BasisZ，
@@ -1599,9 +1776,28 @@ def main():
                                 except:
                                     continue
 
+                    _pt_mark('style')
                     # ============================================
                     # 4. 统一设置视图样式 & 隐藏轴网、标高、剖面标记
                     # ============================================
+                    # 整口井只扫描一次模型：别的井、剖面标记的包围盒。后面每个视图只做几何判断，
+                    # 不再逐个视图做视图级查询（那样每个新视图都要先重算，是出图慢的主要原因）
+                    _others_bb = []
+                    _viewers_bb = []
+                    try:
+                        _own_mark0 = _mark_of(elem)
+                        for _e in _near_collector(doc, elem, DB.BuiltInCategory.OST_GenericModel):
+                            if _e.Id == elem.Id or not _mark_of(_e) or _mark_of(_e) == _own_mark0:
+                                continue
+                            _b = _e.get_BoundingBox(None)
+                            if _b is not None:
+                                _others_bb.append((_e.Id, _b))
+                        for _e in _near_collector(doc, elem, DB.BuiltInCategory.OST_Viewers):
+                            _b = _e.get_BoundingBox(None)
+                            if _b is not None:
+                                _viewers_bb.append((_e.Id, _b))
+                    except:
+                        pass
                     for v in all_views:
                         # 视图套用样板后，被样板接管的 Scale/DisplayStyle/DetailLevel 再赋值
                         # 会抛 "DisplayStyle cannot be modified."（journal 实证 line 597），
@@ -1618,32 +1814,37 @@ def main():
                             v.DetailLevel = DB.ViewDetailLevel.Fine
                         except:
                             pass
-                        # 只留本井：视图里别的井（邻井）一律隐藏，本井保持显示（不论邻井离多近）
+                        # 只留本井：视图范围内别的井（邻井）一律隐藏，本井保持显示（不论邻井离多近）
+                        _rng = None
                         try:
-                            _own_mark = _mark_of(elem)
-                            _nb_ids = []
-                            for _e in DB.FilteredElementCollector(doc, v.Id).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType():
-                                if _e.Id != elem.Id and _mark_of(_e) and _mark_of(_e) != _own_mark and _e.CanBeHidden(v):
-                                    _nb_ids.append(_e.Id)
-                            if _nb_ids:
-                                v.HideElements(System.Collections.Generic.List[DB.ElementId](_nb_ids))
+                            _rng = _view_world_range(v)
                         except:
-                            pass
+                            _rng = None
+                        if _rng is not None:
+                            try:
+                                _nb_ids = [_i for _i, _b in _others_bb if _bb_hits(_b, _rng)]
+                                if _nb_ids:
+                                    v.HideElements(System.Collections.Generic.List[DB.ElementId](_nb_ids))
+                            except:
+                                pass
                         # 隐藏轴网与标高
                         for cat in ([DB.BuiltInCategory.OST_Grids, DB.BuiltInCategory.OST_Levels] if R_HIDE else []):
                             try:
                                 v.SetCategoryHidden(DB.ElementId(cat), True)
                             except:
                                 pass
-                        # 强力隐藏视图中的所有剖面标记/轴号标签 (OST_Viewers)
-                        try:
-                            viewers = [e.Id for e in DB.FilteredElementCollector(doc, v.Id)
-                                       .OfCategory(DB.BuiltInCategory.OST_Viewers).ToElements()
-                                       if e.CanBeHidden(v)]
-                            if viewers:
-                                v.HideElements(System.Collections.Generic.List[DB.ElementId](viewers))
-                        except:
-                            pass
+                        # 强力隐藏视图范围内的剖面标记/轴号标签 (OST_Viewers)：几何判断，逐个兜底
+                        if _rng is not None:
+                            _vw_ids = [_i for _i, _b in _viewers_bb if _bb_hits(_b, _rng)]
+                            if _vw_ids:
+                                try:
+                                    v.HideElements(System.Collections.Generic.List[DB.ElementId](_vw_ids))
+                                except:
+                                    for _i in _vw_ids:
+                                        try:
+                                            v.HideElements(System.Collections.Generic.List[DB.ElementId]([_i]))
+                                        except:
+                                            pass
                         # 自动归类至“井大样”子规程与专业，彻底隔离不影响其他专业
                         for param_name in ["子规程", "所属专业"]:
                             try:
@@ -1653,6 +1854,7 @@ def main():
                             except:
                                 pass
 
+                    _pt_mark('style_extra')
                     # ============================================
                     # 4.1 隐藏剖面取样标记等注释残留 + 复制主视图过滤器（井外观专业配色）
                     # ============================================
@@ -1674,6 +1876,7 @@ def main():
                                 pass
 
 
+                    _pt_mark('layout')
                     # ============================================
                     # 6. 排版到图纸
                     # ============================================

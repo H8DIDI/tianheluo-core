@@ -35,6 +35,21 @@ WCFG_DEFAULTS = {
         {u"prefix": u"Y", u"system": u"雨水井", u"code": u"YS", u"label": u"Y- 雨水井"},
     ],
     u"other": {u"system": u"其他", u"code": u"QT"},
+    # 图名模板（按井号前缀，长前缀优先）：{井号} 换成井号，如 T-001。没有模板的井沿用「井大样_」前缀。
+    # 图纸集合（按井号前缀）：新图放进对应的图纸集合，便于按集合导出 PDF。名字须与项目里的图纸集合一致。
+    u"sheet_collection_by_prefix": {
+        u"AA": u"275KV井大样", u"BB": u"275KV井大样", u"A": u"11KV井大样", u"B": u"11KV井大样",
+        u"E": u"ELV井大样", u"L": u"LV井大样", u"T": u"TELCO井大样",
+    },
+    u"sheet_name_templates": {
+        u"AA": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"BB": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"A": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"B": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"E": u"BTP-IF1 ELV-{井号} Detail Drawing",
+        u"L": u"BTP-IF1 Lv-{井号} Detail Drawing",
+        u"T": u"BTP-IF1 TELcon-{井号} Detail Drawing",
+    },
     u"logo": {u"enabled": True, u"file": u"frame_logo.jpg", u"x0": 736.54, u"y0": 141.10, u"w": 91.49,
               u"说明": u"导出 DWG 后补插的图框 logo：x0/y0 = logo 左下角在 Layout1 里的坐标，w = 宽度（按 A1 横向图框标定）。换图框要改；enabled=false 不补 logo。"},
 }
@@ -126,4 +141,27 @@ def wcfg_well_sort_key(mark, cfg=None, strict=True):
     """先按系列在配置里的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
     s = wcfg_series_of(mark, cfg, strict)
     return (wcfg_series_index(s, cfg) if s is not None else 9999, wcfg_natural_key(mark))
+
+
+def wcfg_sheet_name(mark, cfg=None):
+    """井号 → 图名（按配置里的图名模板）。没有对应模板时返回 None，调用方沿用「井大样_」前缀。
+    模板前缀按长度从长到短匹配，且前缀后面必须紧跟 "-"（AA-04 不会误判成 A 系列）。"""
+    cfg = cfg or wcfg_load()
+    tpls = cfg.get(u"sheet_name_templates") or {}
+    m = (mark or u"").strip()
+    for key in sorted(tpls.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return tpls[key].replace(u"{井号}", m)
+    return None
 # ---- well_config 结束 ----------------------------------------------------------
+
+
+def wcfg_collection_name(mark, cfg=None):
+    """井号 → 图纸集合名（按配置 sheet_collection_by_prefix，长前缀优先，前缀后紧跟 -）。没有对应返回 None。"""
+    cfg = cfg or wcfg_load()
+    maps = cfg.get(u"sheet_collection_by_prefix") or {}
+    m = (mark or u"").strip()
+    for key in sorted(maps.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return maps[key]
+    return None
