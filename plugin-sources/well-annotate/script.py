@@ -4,7 +4,9 @@ __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 生成两类尺寸
            '① 总尺寸：两侧内壁之间的净尺寸，下方标宽、左侧标高（平面、北只标宽；南标宽和高；东、西不标）；\n'
            '② 井内壁至排管尺寸链：识别井内壁，对位于井内的每根排管，下方/上方标水平尺寸链'
            '（内壁—排管边—排管宽—排管边—内壁，一条多段尺寸），左侧/右侧标竖向尺寸链（同理，一条多段尺寸）。\n'
-           '排管尺寸链在平面与剖面/立面视图都生成；每次运行先清除视图内引用井构件或排管的旧尺寸再重新生成（不动管道等其它尺寸）。')
+           '排管尺寸链在平面与剖面/立面视图都生成。\n'
+           '本工具只新增尺寸，不改视图：不动裁剪框、不隐藏/显示任何构件、不删除视图里已有的尺寸；'
+           '同位置已有尺寸的不重复标；裁剪框放不下的尺寸不标，并在报告里列出（需要时自己放大该视图裁剪框后再运行）。')
 
 from pyrevit import revit, DB, UI, forms
 
@@ -352,12 +354,10 @@ _PIPE_IDS = _ints(_PIPE_CATS)
 _BANK_CAT = DB.BuiltInCategory.OST_StructuralFraming
 _BANK_IDS = _ints([_BANK_CAT])
 
-# 裁剪框自动外扩量（英尺，1.8 约 550 mm）：保证尺寸链线及文字落在裁剪框内
-_CROP_PAD = 0.5
 
 # 统计用：跳过原因与同位置重复计数键（报告按 _REPORT_SKIPS 顺序列出，元组为 (键, 单位)）
 _ST_BANK_OK = '标注成功的排管'
-_ST_DUP = '同位置重复尺寸（已跳过）'
+_ST_DUP = '同位置已有或重复的尺寸（已跳过）'
 _SKIP_WALL_FB = '没有识别到井内壁（用了外壁）'
 _SKIP_BANK_OUT = '排管不在井内（未标注）'
 _SKIP_BANK_DIR = '排管方向不水平/不垂直（未标注）'
@@ -690,107 +690,6 @@ def _main_well(view, elems, mark=None):
     return out or [best]
 
 
-_HIDE_CATS = [DB.BuiltInCategory.OST_GenericModel] + _PIPE_CATS
-
-
-_WELLS_BY_MARK = {}
-
-
-def unhide_well(view, mark, apply=True):
-    """本井如果在这张视图里被隐藏（以前运行误隐藏的），先恢复显示，否则收集不到本井。"""
-    if not mark:
-        return 0
-    try:
-        if not _WELLS_BY_MARK:
-            for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().ToElements():
-                m = _mark_of(e)
-                if m:
-                    _WELLS_BY_MARK.setdefault(m, []).append(e)
-        back = [e.Id for e in _WELLS_BY_MARK.get(mark, []) if e.IsHidden(view)]
-        if apply and back:
-            view.UnhideElements(System.Collections.Generic.List[DB.ElementId](back))
-        return len(back)
-    except:
-        return 0
-
-
-def hide_irrelevant(view, main_elems):
-    """隐藏本视图里与本井无关的井和排管/管线：类别为常规模型（别的井）或管线类，且包围盒与本井不相交的构件。
-    只对这一张出图视图做元素级隐藏，不改模型；需要时在视图里用「显示隐藏的图元」可恢复。返回隐藏数。"""
-    try:
-        mb = None
-        for e in main_elems:
-            bb = e.get_BoundingBox(None)
-            if bb is None:
-                continue
-            if mb is None:
-                mb = [bb.Min.X, bb.Min.Y, bb.Min.Z, bb.Max.X, bb.Max.Y, bb.Max.Z]
-            else:
-                mb = [min(mb[0], bb.Min.X), min(mb[1], bb.Min.Y), min(mb[2], bb.Min.Z),
-                      max(mb[3], bb.Max.X), max(mb[4], bb.Max.Y), max(mb[5], bb.Max.Z)]
-        if mb is None:
-            return 0
-        pad = 0.3
-        keep = set(int(e.Id.Value) for e in main_elems)
-        own_marks = set(_mark_of(e) for e in main_elems if _mark_of(e))
-        # 先把本井和与本井相交的排管取消隐藏（以前运行误隐藏的，或上一次判错本井留下的）
-        try:
-            flt = DB.BoundingBoxIntersectsFilter(DB.Outline(DB.XYZ(mb[0] - pad, mb[1] - pad, mb[2] - pad),
-                                                            DB.XYZ(mb[3] + pad, mb[4] + pad, mb[5] + pad)))
-            back = []
-            hc = set(int(c) for c in _HIDE_CATS)
-            for e in DB.FilteredElementCollector(doc).WherePasses(flt).WhereElementIsNotElementType().ToElements():
-                try:
-                    if e.Category is not None and int(e.Category.Id.Value) in hc and e.IsHidden(view):
-                        back.append(e.Id)
-                except:
-                    continue
-            if back:
-                view.UnhideElements(System.Collections.Generic.List[DB.ElementId](back))
-        except:
-            pass
-        hide_ids = []
-        hide_cats = set(int(c) for c in _HIDE_CATS)
-        for e in DB.FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType().ToElements():
-            try:
-                if e.Category is None or int(e.Category.Id.Value) not in hide_cats:
-                    continue
-                if int(e.Id.Value) in keep or e.IsHidden(view):
-                    continue
-                # 别的井（常规模型、带井号、且不是本井）：不论离得多近都隐藏，只留本井。
-                # 以前按"包围盒是否相交"判断，框得近的邻井会留下来
-                if (int(e.Category.Id.Value) == int(DB.BuiltInCategory.OST_GenericModel)
-                        and _mark_of(e) and _mark_of(e) not in own_marks):
-                    hide_ids.append(e.Id)
-                    continue
-                bb = e.get_BoundingBox(None)
-                if bb is None:
-                    continue
-                touch = (bb.Max.X > mb[0] - pad and bb.Min.X < mb[3] + pad and
-                         bb.Max.Y > mb[1] - pad and bb.Min.Y < mb[4] + pad and
-                         bb.Max.Z > mb[2] - pad and bb.Min.Z < mb[5] + pad)
-                if not touch:
-                    hide_ids.append(e.Id)
-            except:
-                continue
-        n = 0
-        if hide_ids:
-            try:
-                lst = System.Collections.Generic.List[DB.ElementId](hide_ids)
-                view.HideElements(lst)
-                n = len(hide_ids)
-            except:
-                for i in hide_ids:
-                    try:
-                        view.HideElements(System.Collections.Generic.List[DB.ElementId]([i]))
-                        n += 1
-                    except:
-                        pass
-        return n
-    except:
-        return 0
-
-
 def _face_box(elems, fallback):
     """用本井大面（面积够大的墙面/底面）的位置求外包框，比包围盒准：有的井族包围盒比井体大一倍
     （带着盖板、爬梯等），按包围盒分区会把内壁认错。某个轴找不到足够的面时，该轴沿用 fallback。"""
@@ -817,58 +716,6 @@ def _face_box(elems, fallback):
         else:
             return fallback
     return tuple(out)
-
-
-_FIT_PAD_FT = 0.6   # 适配裁剪框：井和标注之外再留的余量（英尺，0.6 约 180 mm）
-
-
-def fit_crop(view, box):
-    """把视图裁剪框收紧到「井 + 本视图全部尺寸线」之外各留 _FIT_PAD_FT。裁剪框过大会缩小，不足会撑大
-    （深度方向不动）。用于出图后让视口只比内容大一圈。"""
-    try:
-        fr = _frame(view)
-        h, v, d = fr['h'], fr['v'], fr['d']
-        h0, h1 = _rng_of(box, h)
-        v0, v1 = _rng_of(box, v)
-        for dm in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension).ToElements():
-            try:
-                c = dm.Curve
-                o = c.Origin
-                try:
-                    length = sum(sg.Value for sg in dm.Segments) if dm.NumberOfSegments else dm.Value
-                except:
-                    length = dm.Value
-                p1 = DB.XYZ(o.X + c.Direction.X * length, o.Y + c.Direction.Y * length, o.Z + c.Direction.Z * length)
-                for p in (o, p1):
-                    ph = _coord(p, h)
-                    pv = _coord(p, v)
-                    h0 = min(h0, ph)
-                    h1 = max(h1, ph)
-                    v0 = min(v0, pv)
-                    v1 = max(v1, pv)
-            except:
-                continue
-        pad = _FIT_PAD_FT
-        cb = view.CropBox
-        T = cb.Transform
-        inv = T.Inverse
-        rng = crop_world_range(view)
-        dmid = sum(_rng_of(rng, d)) / 2.0
-        xs = []
-        ys = []
-        for hv in (h0 - pad, h1 + pad):
-            for vv in (v0 - pad, v1 + pad):
-                q = inv.OfPoint(_mk(fr, hv, vv, dmid))
-                xs.append(q.X)
-                ys.append(q.Y)
-        nb = DB.BoundingBoxXYZ()
-        nb.Transform = T
-        nb.Min = DB.XYZ(min(xs), min(ys), cb.Min.Z)
-        nb.Max = DB.XYZ(max(xs), max(ys), cb.Max.Z)
-        view.CropBox = nb
-        return True
-    except:
-        return False
 
 
 def _overlap(bb, rng):
@@ -926,73 +773,78 @@ def _view_left(view):
         return DB.XYZ(-1, 0, 0)
 
 
-def _grow_crop(view, wdir, amt):
-    """把裁剪框沿世界方向 wdir 外扩 amt（英尺）。必须同时复制两角点，否则另一角回落默认值把框撑坏。"""
-    try:
-        cb = view.CropBox
-        T = cb.Transform
-        dx = wdir.DotProduct(T.BasisX)
-        dy = wdir.DotProduct(T.BasisY)
-        dz = wdir.DotProduct(T.BasisZ)
-        nb = DB.BoundingBoxXYZ()
-        nb.Transform = T
-        nb.Min = DB.XYZ(cb.Min.X, cb.Min.Y, cb.Min.Z)
-        nb.Max = DB.XYZ(cb.Max.X, cb.Max.Y, cb.Max.Z)
-        if abs(dx) >= abs(dy) and abs(dx) >= abs(dz):
-            if dx > 0:
-                nb.Max = DB.XYZ(cb.Max.X + amt, cb.Max.Y, cb.Max.Z)
-            else:
-                nb.Min = DB.XYZ(cb.Min.X - amt, cb.Min.Y, cb.Min.Z)
-        elif abs(dy) >= abs(dz):
-            if dy > 0:
-                nb.Max = DB.XYZ(cb.Max.X, cb.Max.Y + amt, cb.Max.Z)
-            else:
-                nb.Min = DB.XYZ(cb.Min.X, cb.Min.Y - amt, cb.Min.Z)
-        else:
-            if dz > 0:
-                nb.Max = DB.XYZ(cb.Max.X, cb.Max.Y, cb.Max.Z + amt)
-            else:
-                nb.Min = DB.XYZ(cb.Min.X, cb.Min.Y, cb.Min.Z - amt)
-        view.CropBox = nb
-        return True
-    except:
-        return False
-
-
-def _ensure_crop_need(view, h_axis, v_axis, ext):
-    """幂等外扩裁剪框，使尺寸线及文字落在框内。ext = (h_lo, h_hi, v_lo, v_hi)，世界坐标。
-    h_axis / v_axis 为视图的水平与竖向世界轴；只在裁剪框盖不住时才加 _CROP_PAD 扩（平面的深度轴不动）。"""
-    try:
-        rng = crop_world_range(view)
-        if rng is None:
-            return
-        h_lo, h_hi, v_lo, v_hi = ext
-        pad = _CROP_PAD
-        hc0, hc1 = _rng_of(rng, h_axis)
-        vc0, vc1 = _rng_of(rng, v_axis)
-        if hc0 > h_lo - pad + 0.001:
-            _grow_crop(view, _unit(h_axis, -1), hc0 - (h_lo - pad))
-        if hc1 < h_hi + pad - 0.001:
-            _grow_crop(view, _unit(h_axis, 1), (h_hi + pad) - hc1)
-        if vc0 > v_lo - pad + 0.001:
-            _grow_crop(view, _unit(v_axis, -1), vc0 - (v_lo - pad))
-        if vc1 < v_hi + pad - 0.001:
-            _grow_crop(view, _unit(v_axis, 1), (v_hi + pad) - vc1)
-    except:
-        pass
-
-
 # ============================================================
 # 生成外包总尺寸
 # ============================================================
 
 
 class _SpotLedger(object):
-    """记录同一视图内已生成尺寸的位置：同位置再次生成时跳过并计数，避免重复标注。"""
+    """记录同一视图内已有的尺寸线（世界坐标的两端点）：新尺寸与之同位置时跳过并计数，避免重复标注。
+    既含视图里原有的尺寸，也含本次已生成的尺寸。"""
 
     def __init__(self):
-        self.keys = set()
+        self.segs = []
         self.dup = 0
+
+
+def _same_line(a, b, tol=0.05):
+    """两条尺寸线（各为 (p, q) 两个世界点）是否同一位置：平行、垂距不超过 tol（英尺，约 15 mm），
+    且沿线方向的范围重叠一半以上。尺寸线被 Revit 挪动端点时仍能认出同一道尺寸。"""
+    a1, a2 = a
+    b1, b2 = b
+    ax, ay, az = a2.X - a1.X, a2.Y - a1.Y, a2.Z - a1.Z
+    la = (ax * ax + ay * ay + az * az) ** 0.5
+    bx, by, bz = b2.X - b1.X, b2.Y - b1.Y, b2.Z - b1.Z
+    lb = (bx * bx + by * by + bz * bz) ** 0.5
+    if la < 1e-9 or lb < 1e-9:
+        return False
+    ux, uy, uz = ax / la, ay / la, az / la
+    if abs(ux * bx + uy * by + uz * bz) / lb < 0.999:
+        return False
+    wx, wy, wz = b1.X - a1.X, b1.Y - a1.Y, b1.Z - a1.Z
+    t1 = wx * ux + wy * uy + wz * uz
+    if ((wx - t1 * ux) ** 2 + (wy - t1 * uy) ** 2 + (wz - t1 * uz) ** 2) ** 0.5 > tol:
+        return False
+    t2 = (b2.X - a1.X) * ux + (b2.Y - a1.Y) * uy + (b2.Z - a1.Z) * uz
+    lo = max(0.0, min(t1, t2))
+    hi = min(la, max(t1, t2))
+    return hi - lo >= 0.5 * min(la, lb)
+
+
+def _has_same_line(led, p1, p2):
+    for s in led.segs:
+        if _same_line(s, (p1, p2)):
+            return True
+    return False
+
+
+def _existing_dim_segs(view):
+    """视图里已有尺寸的尺寸线（只读，不改动）：新尺寸若与之同位置就跳过，重复运行不会叠标。"""
+    segs = []
+    try:
+        dims = list(DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension).ToElements())
+    except:
+        return segs
+    for dm in dims:
+        try:
+            c = dm.Curve
+            o = c.Origin
+            try:
+                length = sum(sg.Value for sg in dm.Segments) if dm.NumberOfSegments else dm.Value
+            except:
+                length = dm.Value
+            p1 = DB.XYZ(o.X + c.Direction.X * length, o.Y + c.Direction.Y * length, o.Z + c.Direction.Z * length)
+            segs.append((o, p1))
+        except:
+            continue
+    return segs
+
+
+def _fresh_ledger(view):
+    """新的同位置判重表，已含视图里原有的尺寸（原有尺寸一律不删、不改）。"""
+    led = _SpotLedger()
+    led.segs.extend(_existing_dim_segs(view))
+    return led
 
 
 def _spot_key(p1, p2):
@@ -1031,6 +883,46 @@ def _find_dim_type_id():
 
 # 尺寸创建失败的原因（每个视图处理前清空，报告时汇总）
 _DIM_ERRS = []
+
+# 裁剪框放不下而未标的尺寸：键为尺寸端点（同一尺寸在多次尝试中只计一次），值为缺口说明（每个视图处理前清空）
+_OUT_CROP = {}
+
+# 排管处理时抛出的异常（只记最后一句，供报告说明原因；整次运行开始时清空）
+_BANK_ERRS = []
+
+# 尺寸线与裁剪框边之间留的最小净距（英尺，0.5 约 150 mm）：尺寸文字要有地方放，不能贴着框边
+_CROP_TEXT_FT = 0.5
+
+
+def _annot_crop_on(view):
+    """视图的注释裁剪是否开启（视图属性「注释裁剪」）。只读。"""
+    try:
+        p = view.get_Parameter(DB.BuiltInParameter.VIEWER_ANNOTATION_CROP_ACTIVE)
+        return p is not None and p.AsInteger() == 1
+    except:
+        return False
+
+
+def _crop_gap(view, p1, p2):
+    """两个端点（已投影到视图平面）的水平、竖向坐标都要落在裁剪框内（各留 _CROP_TEXT_FT）。
+    都在框内返回 None；否则返回缺口说明，如「下侧缺 350 mm」。只读，不改视图。"""
+    rng = crop_world_range(view)
+    if rng is None:
+        return None
+    fr = _frame(view)
+    h0, h1 = _rng_of(rng, fr['h'])
+    v0, v1 = _rng_of(rng, fr['v'])
+    need = {}
+    for p in (p1, p2):
+        ph = _coord(p, fr['h'])
+        pv = _coord(p, fr['v'])
+        for side, short in (('左侧', h0 + _CROP_TEXT_FT - ph), ('右侧', ph - (h1 - _CROP_TEXT_FT)),
+                            ('下侧', v0 + _CROP_TEXT_FT - pv), ('上侧', pv - (v1 - _CROP_TEXT_FT))):
+            if short > 0:
+                need[side] = max(need.get(side, 0.0), short)
+    if not need:
+        return None
+    return '、'.join('{}缺 {:.0f} mm'.format(s, need[s] * _MM_PER_FT) for s in sorted(need))
 
 
 def _on_plane(view, p):
@@ -1106,17 +998,21 @@ def _drop_dim(view, d):
 def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
     """用一组面引用建尺寸：两个引用是一条线性尺寸，三个及以上是多段尺寸（链，按坐标顺序，相邻引用之间各为一段）。
     两端先投影到视图平面。传入 ledger 时，同位置已有尺寸则跳过并计入 ledger.dup。
+    两端不在裁剪框内（留 _CROP_TEXT_FT）的不标，记入 _OUT_CROP；本函数从不改动裁剪框。
     dim_type=True 时改用 _find_dim_type_id() 找到的尺寸类型。换类型后位置不对的，撤掉改用默认样式重画。失败原因记入 _DIM_ERRS。"""
     if view is None or len(refs) < 2 or any(r is None for r in refs):
         return None
     p1 = _on_plane(view, world_p1)
     p2 = _on_plane(view, world_p2)
-    key = None
-    if ledger is not None:
-        key = _spot_key(p1, p2)
-        if key in ledger.keys:
-            ledger.dup += 1
-            return None
+    if ledger is not None and _has_same_line(ledger, p1, p2):
+        ledger.dup += 1
+        return None
+    # 注释裁剪开启时，Revit 只显示注释裁剪框之内的尺寸，框外的不标并记下缺口供报告；
+    # 注释裁剪关闭时（多数井大样视图如此）超出模型裁剪框的尺寸照常显示，不受限制
+    gap = _crop_gap(view, p1, p2) if _annot_crop_on(view) else None
+    if gap is not None:
+        _OUT_CROP[_spot_key(p1, p2)] = gap
+        return None
 
     def _arr():
         a = DB.ReferenceArray()
@@ -1157,8 +1053,8 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
                         _drop_dim(view, d)
                     _DIM_ERRS.append('Revit 尺寸位置不对或数值无效（已撤回）')
                     return None
-    if key is not None:
-        ledger.keys.add(key)
+    if ledger is not None:
+        ledger.segs.append((p1, p2))
     return d
 
 
@@ -1375,46 +1271,7 @@ def make_total_dims(view, elems, box, ledger=None, extents=None):
             if _try_dim(view, [a[1], b[1]], p1, p2, ledger, dim_type=True):
                 made += 1
 
-    # 尺寸线与外移后的总线都须落在裁剪框内（框被裁到模型之外时自动外扩）
-    _ensure_crop_need(view, h, v, (h0 - max(m_h, _DIM_MARGIN), h1 + _DIM_MARGIN,
-                                   v0 - max(m_w, _DIM_MARGIN), v1 + _DIM_MARGIN))
     return made
-
-
-def _in_purge_scope(cid):
-    """本工具的尺寸只引用这三类构件：井构件（非注释、非管道）或排管（结构框架）。"""
-    if cid in _BANK_IDS:
-        return True
-    return cid not in _EXCLUDE_IDS and cid not in _PIPE_IDS
-
-
-def purge_dims(view):
-    """清除该视图内「所有引用都是井构件或排管」的尺寸：外包总尺寸与排管尺寸链都在其中。
-    引用了管道、注释等其它构件的尺寸，以及无引用的尺寸保留不动。返回删除数。"""
-    n = 0
-    try:
-        dims = list(DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension).ToElements())
-    except:
-        return n
-    for d in dims:
-        try:
-            refs = d.References
-            els = []
-            for r in refs:
-                els.append(doc.GetElement(r.ElementId))
-            if not els:
-                continue
-            ok = True
-            for el in els:
-                if el is None or el.Category is None or not _in_purge_scope(el.Category.Id.Value):
-                    ok = False
-                    break
-            if ok:
-                doc.Delete(d.Id)
-                n += 1
-        except:
-            pass
-    return n
 
 
 # ============================================================
@@ -1544,8 +1401,6 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
         return _mk(fr, hv, vv, d_mid)
 
     cnt = {'L': 0, 'R': 0, 'B': 0, 'T': 0}   # 每侧已占用的层数（每条链占一层）
-    ext_h = [h0, h1]
-    ext_v = [v0, v1]
 
     def _layer(side):
         k = cnt[side]
@@ -1660,11 +1515,9 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                     if side == 'B':
                         vs = v0 - off
                         _note_reach(extents, v + '-', off)
-                        ext_v[0] = min(ext_v[0], vs)
                     else:
                         vs = v1 + off
                         _note_reach(extents, v + '+', off)
-                        ext_v[1] = max(ext_v[1], vs)
                     refs = _chain_refs((wL, wl['ref']), (wR, wr['ref']),
                                        [(hb_lo, hb_lo_r), (hb_hi, hb_hi_r)])
                     if len(refs) >= 3:
@@ -1678,11 +1531,9 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                     if side == 'L':
                         hs = h0 - off
                         _note_reach(extents, h + '-', off)
-                        ext_h[0] = min(ext_h[0], hs)
                     else:
                         hs = h1 + off
                         _note_reach(extents, h + '+', off)
-                        ext_h[1] = max(ext_h[1], hs)
                     refs = _chain_refs((wB, wb['ref']), (wT, wt['ref']),
                                        [(vb_lo, vb_lo_r), (vb_hi, vb_hi_r)])
                     if len(refs) >= 3:
@@ -1692,12 +1543,13 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                 _bump(stats, _ST_BANK_OK)
         except:
             _bump(stats, _SKIP_BANK_ERR)
+            # 记下原因（只留最后一句异常信息，供报告里说明）
+            _BANK_ERRS.append(_err_text(traceback.format_exc().strip().split('\n')[-1]))
             continue
 
     if made:
         for _ in fb_sides:
             _bump(stats, _SKIP_WALL_FB)
-        _ensure_crop_need(view, h, v, (ext_h[0], ext_h[1], ext_v[0], ext_v[1]))
     return made, None
 
 
@@ -1854,11 +1706,29 @@ class _ViewOption(forms.TemplateListItem):
             return "{}   [{}]".format(sheet_nm, tcode)
 
 
+def _axes_ok(elems, fr):
+    """本井是否有足够的正交大面，能定出视图水平、竖向两个方向的井墙位置（同 _face_box 的判据）。
+    井被旋转（如 TELCO 族旋转 171°）时墙面不与视图轴平行，按世界轴定位会把尺寸放到错误的位置，这种井暂不标。"""
+    cnt = {'X': 0, 'Y': 0, 'Z': 0}
+    for e in elems:
+        try:
+            for f in _extract_faces(e):
+                a = f.get('area')
+                if a is None or a < _WALL_AREA_MIN_FT2:
+                    continue
+                for ax in ('X', 'Y', 'Z'):
+                    if abs(_coord(f['norm'], ax)) >= _AXIAL_TOL:
+                        cnt[ax] += 1
+        except:
+            continue
+    return cnt[fr['h']] >= 2 and cnt[fr['v']] >= 2
+
+
 def main():
     try:
         _FACE_CACHE.clear()
         _EDGE_CACHE.clear()
-        _WELLS_BY_MARK.clear()
+        del _BANK_ERRS[:]
         # ---------- 1. 收集目标图纸 ----------
         sheets = []
         try:
@@ -1944,8 +1814,10 @@ def main():
         dup_views = len(target_views) - len(uniq_views)
         target_views = uniq_views
 
-        # ---------- 3. 执行（每张视图分「清旧尺寸、排管链、总尺寸」三步，各自一个事务；
-        #   Revit 提交时才会发现某些参照失效，失效的那一步整体回滚，其余步骤照常保留；整次运行合并为一次撤销） ----------
+        # ---------- 3. 执行 ----------
+        # 只新增尺寸，不改视图：不动裁剪框，不隐藏/显示任何构件，不删除视图里已有的尺寸。
+        # 每张视图先整体排（尺寸链 + 总尺寸）；某步被 Revit 判定参照失效则整体回滚，再分开排、逐根排管各自提交。
+        # 整次运行合并为一次撤销。
         tg = DB.TransactionGroup(doc, "KAIFA 一键井大样标注")
         tg.Start()
 
@@ -1965,33 +1837,27 @@ def main():
                     t.RollBack()
                 return False
 
-        purged = 0
         made = 0
         ok_views = 0
         stats = {}
         notes = []
         dim_errs = []
         failed_steps = []
-        hidden_total = 0
+        out_views = []   # 裁剪框放不下而未标的视图：(视图名, 未标道数, 缺口说明)
+        out_total = 0
         try:
             for v in target_views:
                 try:
                     del _DIM_ERRS[:]
-                    if unhide_well(v, mark_of_view.get(str(v.Id)), False):
-                        _step('恢复本井显示', lambda: unhide_well(v, mark_of_view.get(str(v.Id))))
+                    _OUT_CROP.clear()
                     elems = _main_well(v, collect_target_elems(v, stats), mark_of_view.get(str(v.Id)))
                     if not elems:
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
-                    # 适配裁剪框用整个井的包围盒（含盖板、爬梯，否则井顶会被切）；
-                    # 尺寸用的框裁到当前视图裁剪框之内，且只取内壁面（_face_box），两者不能混用
-                    full_union = union_box(v, elems)
-                    full_box = full_union
-                    if full_union is not None:
-                        # 水平范围用可见墙面：TELCO 族的包围盒比井身大一倍多（多出不可见的部分），用包围盒会把裁剪框撑大、井缩小；
-                        # 竖向仍用整个井（盖板在顶上，不能切掉）
-                        _fb = _face_box(elems, full_union)
-                        full_box = (_fb[0], _fb[1], _fb[2], _fb[3], full_union[4], full_union[5])
+                    if not _axes_ok(elems, _frame(v)):
+                        notes.append(('{}（井体旋转、墙面不与视图轴平行，暂不标）'.format(v.Name), 0))
+                        continue
+                    # 标注框：水平范围用可见墙面（TELCO 族的包围盒比井身大一倍，用包围盒会把内壁认偏），竖向仍用整个井
                     box = _clip_box(union_box(v, elems), crop_world_range(v))
                     if box is not None:
                         box = _face_box(elems, box)
@@ -1999,83 +1865,55 @@ def main():
                         notes.append(('{}（无法计算包围盒）'.format(v.Name), 0))
                         continue
 
-                    res = {'purged': 0, 'cn': 0, 'n': 0, 'why': None, 'hid': 0}
-
-                    def _purge():
-                        res['purged'] = purge_dims(v)
-
-                    def _prep():
-                        res['hid'] = hide_irrelevant(v, elems)
-                        _purge()
-                    _step("隐藏无关构件并清除旧尺寸", _prep)
-                    hidden_total += res['hid']
-                    purged += res['purged']
-
-                    # 先排尺寸链，再排总尺寸：总尺寸需要知道各侧最外一道链线的位置
-                    led = _SpotLedger()
+                    res = {'cn': 0, 'n': 0, 'why': None}
+                    # 先排尺寸链，再排总尺寸：总尺寸要知道各侧最外一道链线的位置
+                    led = _fresh_ledger(v)
                     ext = {}
 
                     def _chains():
                         res['cn'], res['why'] = make_chain_dims(v, elems, box, led, stats, ext)
+
                     def _totals():
                         res['n'] = make_total_dims(v, elems, box, led, ext)
 
                     def _both():
                         _chains()
                         _totals()
-                    if _step("标注", _both):
-                        chains_ok = True
-                    else:
-                        chains_ok = False
+
+                    if not _step("标注", _both):
+                        # 整体回滚：已回滚的尺寸不在视图里了，判重表与外移量重建后再分开排
                         res['cn'] = 0
                         res['n'] = 0
-                        led = _SpotLedger()
                         ext = {}
-                        del _DIM_ERRS[:]
-                    if chains_ok:
-                        pass
-                    elif not _step("排管尺寸链", _chains):
-                        # 整体提交失败：逐根排管各自提交，只丢弃参照失效的那一根
-                        res['cn'] = 0
-                        ext = {}
-                        led = _SpotLedger()
-                        try:
-                            frm = _frame(v)
-                            all_banks = _find_banks(crop_world_range(v), frm)
-                        except Exception:
-                            all_banks = []
-                        for bk in all_banks:
-                            for dr in ('h', 'v'):
-                                sub = {}
+                        led = _fresh_ledger(v)
+                        if not _step("排管尺寸链", _chains):
+                            # 逐根排管各自提交，只丢弃参照失效的那一根
+                            res['cn'] = 0
+                            ext = {}
+                            led = _fresh_ledger(v)
+                            try:
+                                frm = _frame(v)
+                                all_banks = _find_banks(crop_world_range(v), frm)
+                            except Exception:
+                                all_banks = []
+                            for bk in all_banks:
+                                for dr in ('h', 'v'):
+                                    sub = {}
 
-                                def _one(bk=bk, dr=dr, sub=sub):
-                                    sub['cn'], _w = make_chain_dims(v, elems, box, led, stats, ext, [bk], dr)
-                                if _step("排管尺寸链", _one):
-                                    res['cn'] += sub.get('cn', 0)
-                                else:
-                                    failed_steps.append('{}：排管 {} 的{}向尺寸链（Revit 判定参照失效）'.format(v.Name, bk.Id, '水平' if dr == 'h' else '竖'))
-
-                    if chains_ok:
-                        pass
-                    elif not _step("总尺寸", _totals):
-                        # 个别视图总线与链放在一起时 Revit 判定参照失效：清掉重做，改成先总线、后链
-                        res['n'] = 0
-                        _step("清除旧尺寸", _purge)
-                        led = _SpotLedger()
-                        ext = {}
-                        ok_t = _step("总尺寸", _totals)
-                        ok_c = _step("排管尺寸链", _chains)
-                        if not ok_t:
+                                    def _one(bk=bk, dr=dr, sub=sub):
+                                        sub['cn'], _w = make_chain_dims(v, elems, box, led, stats, ext, [bk], dr)
+                                    if _step("排管尺寸链", _one):
+                                        res['cn'] += sub.get('cn', 0)
+                                    else:
+                                        failed_steps.append('{}：排管 {} 的{}向尺寸链（Revit 判定参照失效）'.format(v.Name, bk.Id, '水平' if dr == 'h' else '竖'))
+                        if not _step("总尺寸", _totals):
                             res['n'] = 0
                             failed_steps.append('{}：总尺寸（Revit 判定参照失效）'.format(v.Name))
-                        if not ok_c:
-                            res['cn'] = 0
-                            failed_steps.append('{}：排管尺寸链（Revit 判定参照失效）'.format(v.Name))
 
-                    _step('适配裁剪框', lambda: fit_crop(v, full_box if full_box is not None else box))
-                    # 裁剪框扩大后，原来在框外的邻井可能进入视图：适配之后再隐藏一次
-                    _step('隐藏裁剪后的邻井', lambda: hide_irrelevant(v, elems))
                     _bump(stats, _ST_DUP, led.dup)
+                    if _OUT_CROP:
+                        out_total += len(_OUT_CROP)
+                        out_views.append((v.Name, len(_OUT_CROP), sorted(set(_OUT_CROP.values()))[0]))
                     cn = res['cn']
                     n = res['n']
                     made += n + cn
@@ -2084,12 +1922,16 @@ def main():
                         ok_views += 1
                         notes.append(('{}'.format(v.Name), n + cn))
                     else:
-                        why = res['why'] if (res['why'] and res['why'] != '视图内无排管（结构框架）') else '未生成尺寸'
+                        if _OUT_CROP:
+                            why = '超出注释裁剪框，未标'
+                        elif res['why'] and res['why'] != '视图内无排管（结构框架）':
+                            why = res['why']
+                        else:
+                            why = '未生成尺寸'
                         notes.append(('{}（{}）'.format(v.Name, why), 0))
                 except Exception as ev:
                     notes.append(('{}（异常：{}）'.format(v.Name, ev), 0))
             tg.Assimilate()
-            committed = True
         except Exception as inner:
             try:
                 tg.RollBack()
@@ -2100,23 +1942,26 @@ def main():
             return
 
         # ---------- 4. 报告 ----------
-        msg = '井大样标注完成！\n\n'
+        msg = '井大样标注完成！（只新增尺寸：视图的裁剪框、隐藏状态和已有尺寸都没有改动）\n\n'
         msg += '• 处理视图：{} 个（成功 {} 个）\n'.format(len(target_views), ok_views)
         msg += '• 标注排管（井内尺寸链）：{} 根（按视图累计）\n'.format(stats.get(_ST_BANK_OK, 0))
         msg += '• 生成尺寸：{} 道（外包总尺寸 + 尺寸链）\n'.format(made)
-        msg += '• 清除旧尺寸：{} 道\n'.format(purged)
         if dup_views:
             msg += '• 重复选择的视图（已合并）：{} 个\n'.format(dup_views)
         if stats.get(_ST_DUP):
-            msg += '• 同位置重复尺寸（已跳过）：{} 道\n'.format(stats[_ST_DUP])
+            msg += '• 同位置已有或重复的尺寸（已跳过，不重复标）：{} 道\n'.format(stats[_ST_DUP])
+        if out_total:
+            msg += '• 超出注释裁剪框、未标的尺寸：{} 道（视图没有改动；仅注释裁剪开启的视图受此限）\n'.format(out_total)
+            for nm, cnt_, gap in out_views[:10]:
+                msg += '    - {}：{} 道（{}）\n'.format(nm, cnt_, gap)
+            if len(out_views) > 10:
+                msg += '    ...（其余 {} 个视图同类）\n'.format(len(out_views) - 10)
         if dim_errs:
             uniq = []
             for m in dim_errs:
                 if m not in uniq:
                     uniq.append(m)
             msg += '• 尺寸创建失败：{} 道（Revit 拒绝）：{}\n'.format(len(dim_errs), '；'.join(uniq[:3]))
-        if hidden_total:
-            msg += '• 已隐藏与本井无关的井和排管：{} 个（视图内元素级隐藏，不改模型；「显示隐藏的图元」可恢复）'.format(hidden_total) + chr(10)
         if failed_steps:
             msg += '• 未能写入的部分（已跳过，其余照常）：\n'
             for x in failed_steps[:10]:
@@ -2124,6 +1969,12 @@ def main():
         skip_txt = _fmt_skips(stats)
         if skip_txt:
             msg += '\n跳过的构件（按视图累计）：\n' + skip_txt
+        if _BANK_ERRS:
+            uniq_b = []
+            for m in _BANK_ERRS:
+                if m not in uniq_b:
+                    uniq_b.append(m)
+            msg += '排管处理异常的原因：{}\n'.format('；'.join(uniq_b[:2]))
         bad = [n for n in notes if n[1] == 0]
         if bad:
             msg += '\n未生成尺寸的视图 {} 个：\n'.format(len(bad))
