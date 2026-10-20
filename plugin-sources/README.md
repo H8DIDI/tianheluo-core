@@ -28,4 +28,4 @@
 | [`well-depth-report`](well-depth-report/) | 井深统计报表 | 0.1.3 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.3 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-number`](well-number/) | 一键编号 | 0.2.0 | Python | didi | MIT |
-| [`well-sheets`](well-sheets/) | 一键井展开图 | 0.5.2 | Python | didi | MIT |
+| [`well-sheets`](well-sheets/) | 一键井展开图 | 0.5.3 | Python | didi | MIT |

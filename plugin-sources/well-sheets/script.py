@@ -1748,7 +1748,8 @@ def main():
                         sbox.Transform = t
                         sbox.Min = DB.XYZ(-pit_dx - offset, -pit_dy - offset, -pit_dz - offset)
                         sbox.Max = DB.XYZ(pit_dx + offset, pit_dy + offset, pit_dz + offset)
-                        if detail_type_id != DB.ElementId.InvalidElementId:
+                        # 立面用剖面（剖切线 + 剖切深度，同之前的做法）；项目里没有剖面类型时才退回详图
+                        if section_type_id == DB.ElementId.InvalidElementId and detail_type_id != DB.ElementId.InvalidElementId:
                             view_plan = DB.ViewSection.CreateDetail(doc, detail_type_id, sbox)
                         else:
                             view_plan = DB.ViewSection.CreateSection(doc, section_type_id, sbox)
@@ -1779,7 +1780,7 @@ def main():
                             sbox.Min = DB.XYZ(-pit_dy - face_out, -pit_dz - face_out, min_z_depth)
                             sbox.Max = DB.XYZ(pit_dy + face_out, pit_dz + face_out, max_z_depth)
 
-                        if detail_type_id != DB.ElementId.InvalidElementId:
+                        if section_type_id == DB.ElementId.InvalidElementId and detail_type_id != DB.ElementId.InvalidElementId:
                             v = DB.ViewSection.CreateDetail(doc, detail_type_id, sbox)
                         else:
                             v = DB.ViewSection.CreateSection(doc, section_type_id, sbox)
