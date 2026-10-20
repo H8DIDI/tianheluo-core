@@ -205,6 +205,38 @@ def wcfg_collection_name(mark, cfg=None):
             return maps[key]
     return None
 
+
+# ---- 井位置缓存（井没动就不重新生成）：Documents\KaifaTools\井大样位置缓存.json ----
+def wcfg_cache_path():
+    return _wc_os.path.join(_wc_os.path.dirname(WCFG_FILE), u"井大样位置缓存.json")
+
+
+def wcfg_cache_load():
+    """读位置缓存：{井号: {bbox, sheet_id, name, number}}。文件不存在或坏了返回空。"""
+    try:
+        with _wc_io.open(wcfg_cache_path(), 'r', encoding='utf-8-sig') as f:
+            d = _wc_json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def wcfg_cache_save(d):
+    """先把内容转成文字，转成功才写文件（避免转换失败时把旧缓存清成空文件）。"""
+    try:
+        txt = _wc_json.dumps(d, ensure_ascii=False, indent=1)
+    except Exception:
+        return
+    try:
+        p = wcfg_cache_path()
+        dd = _wc_os.path.dirname(p)
+        if not _wc_os.path.isdir(dd):
+            _wc_os.makedirs(dd)
+        with _wc_io.open(p, 'w', encoding='utf-8') as f:
+            f.write(txt)
+    except Exception:
+        pass
+
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]      # 默认「井大样_」
 WS_NUMPRE = WCFG[u"sheet_number_prefix"]    # 默认「AG-」
@@ -1042,11 +1074,46 @@ def _set_sheet_collection(doc, sheet, mark):
         pass
 
 
+def _bbox_key(elem):
+    """井的包围盒（英尺，取到 0.01 ft），用来判断井有没有动。"""
+    bb = elem.get_BoundingBox(None)
+    if bb is None:
+        return None
+    return [round(bb.Min.X, 2), round(bb.Min.Y, 2), round(bb.Min.Z, 2),
+            round(bb.Max.X, 2), round(bb.Max.Y, 2), round(bb.Max.Z, 2)]
+
+
+def _renumber_pairs(doc, pairs):
+    """替换过的图纸改回原来的图号（旧图已删除、事务已提交之后才能做）。号已被占用的跳过，不影响出图。"""
+    if not pairs:
+        return
+    t2 = DB.Transaction(doc, u"恢复原图号")
+    t2.Start()
+    try:
+        used = set(x.SheetNumber for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements())
+        for _sid, _old_no in pairs:
+            _sh = doc.GetElement(DB.ElementId(_sid))
+            if _sh is None or _old_no in used:
+                continue
+            used.discard(_sh.SheetNumber)
+            _sh.SheetNumber = _old_no
+            used.add(_old_no)
+        t2.Commit()
+    except:
+        if t2.HasStarted() and not t2.HasEnded():
+            t2.RollBack()
+
+
 def main():
     try:
         global doc, uidoc
         doc = revit.doc
         uidoc = revit.uidoc
+        # 位置缓存：本次运行读一次；未动的井（包围盒没变、图纸还在）可直接跳过
+        _pos_cache = wcfg_cache_load()
+        _only_moved = [False]
+        _skipped_unmoved = [0]
+        _renumber_later = []
         # 读取视图中用户的预选构件：选中井后直接生成；未选中时进入批量出图向导
         try:
             selected_ids = list(uidoc.Selection.GetElementIds())
@@ -1201,11 +1268,13 @@ def main():
             done_ids = set(e.Id.Value for e in valid_elems if _mark_of(e) in built_now)
             if done_ids:
                 skip_choice = forms.CommandSwitchWindow.show(
-                    ['跳过已出图的，只生成未出的（推荐）', '全部重做（替换已有图纸）'],
+                    ['跳过已出图的，只生成未出的（推荐）', '只重做移动过的（未动的跳过，最快）', '全部重做（替换已有图纸）'],
                     message='所选 {} 座里有 {} 座已经出过图。'.format(len(valid_elems), len(done_ids)))
                 if not skip_choice:
                     return
-                if '跳过' in skip_choice:
+                if '移动过' in skip_choice:
+                    _only_moved[0] = True
+                elif '跳过' in skip_choice:
                     valid_elems = [e for e in valid_elems if e.Id.Value not in done_ids]
                     if not valid_elems:
                         forms.alert('所选的井都已出过图，没有需要生成的。', title='一键井展开图')
@@ -1393,6 +1462,7 @@ def main():
                 master_view = None
 
             # ---- 预扫描（只做一次）：建立「井编号 -> 该井既有井大样图纸」索引，见 _scan_existing_sheets ----
+            _pt_mark('setup_scan')
             stale_sheets = _scan_existing_sheets(doc)
 
             # 游离视图索引：视图名形如 北_AG-<井号>-<4位随机码>。图纸被删、视图却留着时，这些视图不在上面的图纸索引里，
@@ -1481,6 +1551,14 @@ def main():
                     # 「重新生成即替换」：按预扫描索引清掉这口井既有的井大样图纸，
                     # 连同落在该图纸上的平面/东南西北剖面视图一起删除，再由下面重建。
                     # 出图之前先删掉这口井以前出过的视图（包括已经没有图纸的游离视图），再建新的。
+                    # 只重做移动过的：井包围盒没变、缓存里记的图纸还在，就跳过（不重算、不新建视图）
+                    if _only_moved[0]:
+                        _ent = _pos_cache.get(base_name)
+                        if _ent is not None and _ent.get('bbox') == _bbox_key(elem):
+                            _sh = doc.GetElement(DB.ElementId(int(_ent.get('sheet_id', -1))))
+                            if _sh is not None and (_sh.Name or u'') == _ent.get('name'):
+                                _skipped_unmoved[0] += 1
+                                continue
                     for _oid in old_views.pop(base_name, []):
                         try:
                             _ov = doc.GetElement(_oid)
@@ -1520,9 +1598,16 @@ def main():
                     # 图名：按配置里的图名模板（如 BTP-IF1 TELcon-T-001 Detail Drawing）；没有模板沿用「井大样_」前缀
                     sheet.Name = wcfg_sheet_name(base_name, WCFG) or (WS_PREFIX + base_name)
                     # 图号：接着现有的最大数字图号往后排（0001、0002…），不再用 AG-井号-随机码
-                    sheet.SheetNumber = _reuse_num.pop(base_name, None) or _new_sheet_number()
+                    # 旧图号不能在删除旧图的同一事务里立即给新图（Revit 会报「图纸编号已在使用中」）：
+                    # 先用新号，事务提交后再改回旧号（见 _renumber_pairs）
+                    _old_no = _reuse_num.pop(base_name, None)
+                    sheet.SheetNumber = _new_sheet_number()
+                    if _old_no:
+                        _renumber_later.append((sheet.Id.Value, _old_no))
                     # 图纸集合：按井号系列放进对应的图纸集合（11KV/275KV/ELV/LV/TELCO），便于按集合导出 PDF
                     _set_sheet_collection(doc, sheet, base_name)
+                    _pos_cache[base_name] = {'bbox': _bbox_key(elem), 'sheet_id': int(sheet.Id.Value),
+                                             'name': sheet.Name, 'number': sheet.SheetNumber}
                     for param_name in ["专业", "所属专业"]:
                         try:
                             sp = sheet.LookupParameter(param_name)
@@ -1912,7 +1997,10 @@ def main():
                         "创建图纸过程崩溃，具体原因:\n" + str(inner_e) +
                         "\n\n" + traceback.format_exc(),
                         title="底层API报错")
+            _pt_mark('commit')
             t.Commit()
+            wcfg_cache_save(_pos_cache)
+            _renumber_pairs(doc, _renumber_later)
             pb.close()
         except Exception as trans_e:
             pb.close()

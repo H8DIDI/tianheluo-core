@@ -195,6 +195,38 @@ def wcfg_collection_name(mark, cfg=None):
             return maps[key]
     return None
 
+
+# ---- 井位置缓存（井没动就不重新生成）：Documents\KaifaTools\井大样位置缓存.json ----
+def wcfg_cache_path():
+    return _wc_os.path.join(_wc_os.path.dirname(WCFG_FILE), u"井大样位置缓存.json")
+
+
+def wcfg_cache_load():
+    """读位置缓存：{井号: {bbox, sheet_id, name, number}}。文件不存在或坏了返回空。"""
+    try:
+        with _wc_io.open(wcfg_cache_path(), 'r', encoding='utf-8-sig') as f:
+            d = _wc_json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def wcfg_cache_save(d):
+    """先把内容转成文字，转成功才写文件（避免转换失败时把旧缓存清成空文件）。"""
+    try:
+        txt = _wc_json.dumps(d, ensure_ascii=False, indent=1)
+    except Exception:
+        return
+    try:
+        p = wcfg_cache_path()
+        dd = _wc_os.path.dirname(p)
+        if not _wc_os.path.isdir(dd):
+            _wc_os.makedirs(dd)
+        with _wc_io.open(p, 'w', encoding='utf-8') as f:
+            f.write(txt)
+    except Exception:
+        pass
+
 WCFG = wcfg_load()
 SHEET_PREFIX_NAME = WCFG[u"sheet_name_prefix"]
 DEFAULT_PREFIX = WCFG[u"sheet_number_prefix"]

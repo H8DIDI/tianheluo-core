@@ -8,10 +8,10 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"well-sheets": "0.5.1", "well-annotate": "0.3.15", "pile-cushion": "0.4.0", "pile-cleanup": "0.2.0",
-                    "quantity-export": "0.2.1", "rebar-cage": "0.2.1", "sheet-organize": "0.6.2", "export-dwg": "0.4.2",
+VERSION_OVERRIDE = {"well-sheets": "0.5.2", "well-annotate": "0.3.16", "pile-cushion": "0.4.0", "pile-cleanup": "0.2.0",
+                    "quantity-export": "0.2.1", "rebar-cage": "0.2.1", "sheet-organize": "0.6.3", "export-dwg": "0.4.3",
                     "export-nwc": "0.2.0", "well-number": "0.2.0", "well-clear-marks": "0.1.1", "elv-merge": "0.2.0",
-                    "control-points": "0.1.0", "well-depth-report": "0.1.2"}
+                    "control-points": "0.1.0", "well-depth-report": "0.1.3"}
 # 商店里显示的名字改过的插件（文件夹名不变，图标照旧从原文件夹取）
 NAME_OVERRIDE = {"elv-merge": "族类型清洗合并", "export-dwg": "一键导出图纸DWG/PDF"}
 OUT.mkdir(exist_ok=True)
