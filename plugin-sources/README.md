@@ -29,3 +29,4 @@
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.3 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-number`](well-number/) | 一键编号 | 0.2.0 | Python | didi | MIT |
 | [`well-sheets`](well-sheets/) | 一键井展开图 | 0.5.4 | Python | didi | MIT |
+| [`well-zone`](well-zone/) | 井分区标记 | 0.1.0 | Python | didi | MIT |
