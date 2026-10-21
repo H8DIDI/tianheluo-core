@@ -672,6 +672,26 @@ def _scope_items(sheets_all, well_sheets, mk_of):
         if _indoor:
             items.append((u'井大样 室内井（%d 张）' % len(_indoor), _indoor))
         items.append((u'全部井大样图纸（%d 张）' % len(well_sheets), list(well_sheets)))
+    # 按 Revit 图集（图纸集合）分组：每个图集一项，图集里的图纸按图号排好
+    _cols = {}
+    _order = []
+    for _s in sheets_all:
+        try:
+            _cid = _s.SheetCollectionId
+            if _cid is None or _cid == DB.ElementId.InvalidElementId:
+                continue
+            _ce = doc.GetElement(_cid)
+            _nm = _ce.Name if _ce is not None else None
+        except:
+            continue
+        if not _nm:
+            continue
+        if _nm not in _cols:
+            _cols[_nm] = []
+            _order.append(_nm)
+        _cols[_nm].append(_s)
+    for _nm in sorted(_order, key=lambda t: wcfg_natural_key(t)):
+        items.append((u'图集「%s」（%d 张）' % (_nm, len(_cols[_nm])), _cols[_nm]))
     items.append((u'项目里全部图纸（%d 张）' % len(sheets_all), list(sheets_all)))
     items.append((u'手动勾选图纸…', None))
     return items
