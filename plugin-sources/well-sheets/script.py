@@ -1748,8 +1748,8 @@ def main():
                         sbox.Transform = t
                         sbox.Min = DB.XYZ(-pit_dx - offset, -pit_dy - offset, -pit_dz - offset)
                         sbox.Max = DB.XYZ(pit_dx + offset, pit_dy + offset, pit_dz + offset)
-                        # 立面用剖面（剖切线 + 剖切深度，同之前的做法）；项目里没有剖面类型时才退回详图
-                        if section_type_id == DB.ElementId.InvalidElementId and detail_type_id != DB.ElementId.InvalidElementId:
+                        # 立面用详图视图（同 T-005 的做法，深度穿过井，能看到内壁与颜色）；项目里没有详图类型时才用剖面
+                        if detail_type_id != DB.ElementId.InvalidElementId:
                             view_plan = DB.ViewSection.CreateDetail(doc, detail_type_id, sbox)
                         else:
                             view_plan = DB.ViewSection.CreateSection(doc, section_type_id, sbox)
@@ -1780,7 +1780,7 @@ def main():
                             sbox.Min = DB.XYZ(-pit_dy - face_out, -pit_dz - face_out, min_z_depth)
                             sbox.Max = DB.XYZ(pit_dy + face_out, pit_dz + face_out, max_z_depth)
 
-                        if section_type_id == DB.ElementId.InvalidElementId and detail_type_id != DB.ElementId.InvalidElementId:
+                        if detail_type_id != DB.ElementId.InvalidElementId:
                             v = DB.ViewSection.CreateDetail(doc, detail_type_id, sbox)
                         else:
                             v = DB.ViewSection.CreateSection(doc, section_type_id, sbox)
@@ -1847,6 +1847,11 @@ def main():
                             # 没选平面样板时，平面套「详图」样板（项目里的标准图就是这样做的：平面也用井大样详图样板），
                             # 再没有就用勾选的第一个样板；不留成没套样板的平面
                             tid = chosen_templates.get('Detail') or (picked_template_ids[0] if picked_template_ids else None)
+                        if tid is None and template_key in ('Section', 'Detail'):
+                            # 立面（剖面/详图）没选到同类型样板时：用另一类立面样板，再没有就用勾选的第一个样板。
+                            # 之前线上版只认同类型，用户选的是「详图」样板而立面是剖面时，立面一个样板都套不上
+                            tid = chosen_templates.get('Detail' if template_key == 'Section' else 'Section') or (
+                                picked_template_ids[0] if picked_template_ids else None)
                         if tid is None:
                             continue
                         try:
@@ -1885,6 +1890,11 @@ def main():
                     except:
                         pass
                     for v in all_views:
+                        # 不显示裁剪框（详图视图自带的矩形框）；裁剪框本身仍然生效，只是不画出来
+                        try:
+                            v.CropBoxVisible = False
+                        except:
+                            pass
                         # 视图套用样板后，被样板接管的 Scale/DisplayStyle/DetailLevel 再赋值
                         # 会抛 "DisplayStyle cannot be modified."（journal 实证 line 597），
                         # 导致每口井都被判失败、最后"没有图纸生成成功"。逐项保护，让样板说话。
