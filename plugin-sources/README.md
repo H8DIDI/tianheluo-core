@@ -23,7 +23,7 @@
 | [`sheet-preview`](sheet-preview/) | 图纸快速预览 | 0.1.0 | Python | didi | MIT |
 | [`tag-check`](tag-check/) | 标注检查 | 0.2.0 | C#（源码在 `plugins/`） | didi | MIT |
 | [`view-manager`](view-manager/) | 视图管理 | 0.2.0 | Python | lewismconte (Sendit) | MIT |
-| [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.19 | Python | didi | MIT |
+| [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.20 | Python | didi | MIT |
 | [`well-clear-marks`](well-clear-marks/) | 一键清除井标记 | 0.1.1 | Python | didi | MIT |
 | [`well-depth-report`](well-depth-report/) | 井深统计报表 | 0.1.3 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.3 | C#（源码在 `plugins/`） | didi | MIT |

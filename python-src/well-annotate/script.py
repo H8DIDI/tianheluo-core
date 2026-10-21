@@ -1572,18 +1572,42 @@ def main():
             by_name = {}
             for x in all_sheets:
                 by_name[x.Name] = x
-            picked_names = forms.SelectFromList.show(
-                [x.Name for x in all_sheets],
-                title='选择要标注的井大样图纸（可多选；也可以先在项目浏览器里选中图纸再运行）',
-                button_name='开始标注',
-                multiselect=True)
-            if not picked_names:
-                return
-            if not isinstance(picked_names, (list, tuple)):
-                picked_names = [picked_names]
-            for nm_ in picked_names:
-                if nm_ in by_name and by_name[nm_] not in sheets:
-                    sheets.append(by_name[nm_])
+            # 先按图集（图纸集合）选范围；也可以选「手动勾选图纸」逐张挑
+            col_sheets = {}
+            col_order = []
+            for x in all_sheets:
+                try:
+                    cid_ = x.SheetCollectionId
+                    ce_ = doc.GetElement(cid_) if cid_ != DB.ElementId.InvalidElementId else None
+                    cn_ = ce_.Name if ce_ is not None else None
+                except:
+                    cn_ = None
+                if cn_:
+                    if cn_ not in col_sheets:
+                        col_sheets[cn_] = []
+                        col_order.append(cn_)
+                    col_sheets[cn_].append(x)
+            if col_order:
+                opts = [u'图集「{}」（{} 张）'.format(c_, len(col_sheets[c_])) for c_ in col_order]
+                opts.append(u'手动勾选图纸…')
+                pick_ = forms.CommandSwitchWindow.show(opts, message=u'选择要标注的图集')
+                if not pick_:
+                    return
+                if pick_ != opts[-1]:
+                    sheets.extend(col_sheets[col_order[opts.index(pick_)]])
+            if not sheets:
+                picked_names = forms.SelectFromList.show(
+                    [x.Name for x in all_sheets],
+                    title='选择要标注的井大样图纸（可多选；也可以先在项目浏览器里选中图纸再运行）',
+                    button_name='开始标注',
+                    multiselect=True)
+                if not picked_names:
+                    return
+                if not isinstance(picked_names, (list, tuple)):
+                    picked_names = [picked_names]
+                for nm_ in picked_names:
+                    if nm_ in by_name and by_name[nm_] not in sheets:
+                        sheets.append(by_name[nm_])
 
         # ---------- 2. 取所选图纸上的全部视图 ----------
         target_views = []
