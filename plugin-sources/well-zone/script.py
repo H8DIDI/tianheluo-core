@@ -439,6 +439,7 @@ def main_dialog(st):
     f.ClientSize = SD.Size(520, 560)
     result = {'act': 'close'}
     busy = [True]
+    ready = [False]   # 窗口真正显示之后才响应勾选：显示前 WinForms 会为已勾选的行补发「勾选变化」事件，不能当成用户点击
 
     def lab(t, x, y, w=300, bold=False):
         l = WF.Label(); l.Text = t; l.Location = SD.Point(x, y); l.Size = SD.Size(w, 20)
@@ -519,6 +520,10 @@ def main_dialog(st):
         tot = len(wells)
         un = counts.get('', 0)
         info.Text = ((st.pop('note', '') + '\n') if st.get('note') else '') + '共 {} 口井（常规模型且有标记），已分区 {} 口，未分区 {} 口。'.format(tot, tot - un, un)
+        busy[0] = not ready[0]
+
+    def on_shown(s, e):
+        ready[0] = True
         busy[0] = False
 
     def on_par(s, e):
@@ -565,7 +570,7 @@ def main_dialog(st):
         f.Close()
 
     def on_check(s, e):
-        if busy[0]:
+        if busy[0] or not ready[0] or not lv.Focused:    # 只响应用户在列表里的点击
             return
         k = e.Item.Tag
         st['show'][k] = bool(e.Item.Checked)
@@ -614,6 +619,7 @@ def main_dialog(st):
     b_apply.Click += on_apply
     b_sch.Click += on_sch
     b_close.Click += lambda s, e: f.Close()
+    f.Shown += on_shown
     refresh()
     f.ShowDialog()
     save_cfg(cfg)
