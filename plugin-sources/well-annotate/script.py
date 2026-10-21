@@ -1730,83 +1730,94 @@ def main():
         _FACE_CACHE.clear()
         _EDGE_CACHE.clear()
         del _BANK_ERRS[:]
-        # ---------- 1. 收集目标图纸 ----------
-        sheets = []
+        # ---------- 1. 选标注范围（范围列表同「一键导出图纸」：选中的图纸 / 当前图纸 / 各系列 / 各图集 / 全部 / 手动勾选）----------
+        selected = []
         try:
             sel = list(uidoc.Selection.GetElementIds())
         except:
             sel = []
-
         for eid in sel:
             e = doc.GetElement(eid)
             if e is None:
                 continue
             sh = _sheet_of(e)
             if sh is not None and _is_well_sheet(sh):
-                if sh not in sheets:
-                    sheets.append(sh)
+                if sh not in selected:
+                    selected.append(sh)
                 continue
             mk = _mark_of(e)
             if mk:
                 sh2 = _sheet_by_mark(mk)
-                if sh2 is not None and sh2 not in sheets:
-                    sheets.append(sh2)
+                if sh2 is not None and sh2 not in selected:
+                    selected.append(sh2)
+        cur_sheet = None
+        try:
+            cur = doc.ActiveView
+            if isinstance(cur, DB.ViewSheet) and _is_well_sheet(cur):
+                cur_sheet = cur
+        except:
+            pass
 
-        if not sheets:
+        all_sheets = [x for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements()
+                      if _is_well_sheet(x)]
+        all_sheets.sort(key=lambda x: x.Name or "")
+        if not all_sheets:
+            forms.alert(u'项目里没有井大样图纸（名称以「{}」开头，可在 {} 里改）。'.format(WS_PREFIX, WCFG_FILE), title='一键井大样标注')
+            return
+
+        scope = []   # (显示文字, 图纸列表 / None=手动勾选)
+        if selected:
+            scope.append((u'项目浏览器里选中的 {} 张图纸'.format(len(selected)), selected))
+        if cur_sheet is not None and cur_sheet not in selected:
+            scope.append((u'当前图纸「{} {}」'.format(cur_sheet.SheetNumber, cur_sheet.Name), [cur_sheet]))
+        for _sr in WCFG[u"series"]:
+            _ss = [x for x in all_sheets if wcfg_series_of(_sheet_mark(x) or u'', WCFG, True) is _sr]
+            if _ss:
+                scope.append((u'井大样 {}（{} 张）'.format(_sr[u"label"], len(_ss)), _ss))
+        col_sheets = {}
+        col_order = []
+        for x in all_sheets:
             try:
-                cur = doc.ActiveView
-                if isinstance(cur, DB.ViewSheet) and _is_well_sheet(cur):
-                    sheets.append(cur)
+                cid_ = x.SheetCollectionId
+                ce_ = doc.GetElement(cid_) if cid_ != DB.ElementId.InvalidElementId else None
+                cn_ = ce_.Name if ce_ is not None else None
             except:
-                pass
+                cn_ = None
+            if cn_:
+                if cn_ not in col_sheets:
+                    col_sheets[cn_] = []
+                    col_order.append(cn_)
+                col_sheets[cn_].append(x)
+        for c_ in sorted(col_order, key=lambda t: wcfg_natural_key(t)):
+            scope.append((u'图集「{}」（{} 张）'.format(c_, len(col_sheets[c_])), col_sheets[c_]))
+        scope.append((u'全部井大样图纸（{} 张）'.format(len(all_sheets)), list(all_sheets)))
+        scope.append((u'手动勾选图纸…', None))
 
-        if not sheets:
-            # 没有选中图纸、当前也不在井大样图纸上：列出全部井大样图纸，由你勾选（按图纸标注，不再逐个视图选）
-            all_sheets = [x for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements()
-                          if _is_well_sheet(x)]
-            all_sheets.sort(key=lambda x: x.Name or "")
-            if not all_sheets:
-                forms.alert(u'项目里没有井大样图纸（名称以「{}」开头，可在 {} 里改）。'.format(WS_PREFIX, WCFG_FILE), title='一键井大样标注')
-                return
+        pick_ = forms.CommandSwitchWindow.show([t for t, _l in scope], message=u'选择标注范围')
+        if not pick_:
+            return
+        sheets = []
+        chosen = [l for t, l in scope if t == pick_]
+        if chosen and chosen[0] is None:
             by_name = {}
             for x in all_sheets:
                 by_name[x.Name] = x
-            # 先按图集（图纸集合）选范围；也可以选「手动勾选图纸」逐张挑
-            col_sheets = {}
-            col_order = []
-            for x in all_sheets:
-                try:
-                    cid_ = x.SheetCollectionId
-                    ce_ = doc.GetElement(cid_) if cid_ != DB.ElementId.InvalidElementId else None
-                    cn_ = ce_.Name if ce_ is not None else None
-                except:
-                    cn_ = None
-                if cn_:
-                    if cn_ not in col_sheets:
-                        col_sheets[cn_] = []
-                        col_order.append(cn_)
-                    col_sheets[cn_].append(x)
-            if col_order:
-                opts = [u'图集「{}」（{} 张）'.format(c_, len(col_sheets[c_])) for c_ in col_order]
-                opts.append(u'手动勾选图纸…')
-                pick_ = forms.CommandSwitchWindow.show(opts, message=u'选择要标注的图集')
-                if not pick_:
-                    return
-                if pick_ != opts[-1]:
-                    sheets.extend(col_sheets[col_order[opts.index(pick_)]])
-            if not sheets:
-                picked_names = forms.SelectFromList.show(
-                    [x.Name for x in all_sheets],
-                    title='选择要标注的井大样图纸（可多选；也可以先在项目浏览器里选中图纸再运行）',
-                    button_name='开始标注',
-                    multiselect=True)
-                if not picked_names:
-                    return
-                if not isinstance(picked_names, (list, tuple)):
-                    picked_names = [picked_names]
-                for nm_ in picked_names:
-                    if nm_ in by_name and by_name[nm_] not in sheets:
-                        sheets.append(by_name[nm_])
+            picked_names = forms.SelectFromList.show(
+                [x.Name for x in all_sheets],
+                title='选择要标注的井大样图纸（可多选）',
+                button_name='开始标注',
+                multiselect=True)
+            if not picked_names:
+                return
+            if not isinstance(picked_names, (list, tuple)):
+                picked_names = [picked_names]
+            for nm_ in picked_names:
+                if nm_ in by_name and by_name[nm_] not in sheets:
+                    sheets.append(by_name[nm_])
+        elif chosen:
+            sheets = list(chosen[0])
+        if not sheets:
+            return
 
         # ---------- 2. 取所选图纸上的全部视图 ----------
         target_views = []
