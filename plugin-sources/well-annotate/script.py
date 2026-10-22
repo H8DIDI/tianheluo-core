@@ -1836,6 +1836,8 @@ def _sheet_of(e):
 
 _WELL_CAT = DB.BuiltInCategory.OST_GenericModel     # 井所在的类别（设置文件 well_category）
 _MARK_PARAM = ''                                    # 井号参数名；空 = Revit 自带的「标记」（设置文件 mark_parameter）
+_CONFIRM_RUN = True                                 # 运行前先弹确认（设置文件 confirm_before_run）
+_SKIP_ANNOTATED = True                              # 已经有尺寸的视图默认跳过（设置文件 skip_annotated_views）
 
 
 def _mark_of(e):
@@ -1983,7 +1985,8 @@ def _settings_defaults():
                 'reach_tol_mm=排管端头离井墙多远以内算接入；crop_text_mm=注释裁剪开启时尺寸离框边的最小距离；'
                 'wall_area_min_m2=算作井墙的最小面面积；span_ratio=长构件判定倍数；dim_type_name=排管链用的尺寸类型名（找不到用默认）；'
                 'total_rules=各视图标哪条总尺寸（键=视图名前缀，W=宽，H=高，空=不标）；well_category=井所在的类别（Revit 内部类别名，如 OST_GenericModel）；'
-                'mark_parameter=井号参数名（空=Revit 自带的「标记」）；bank_category=排管所在类别。'),
+                'mark_parameter=井号参数名（空=Revit 自带的「标记」）；bank_category=排管所在类别；'
+                'confirm_before_run=运行前先弹确认窗口；skip_annotated_views=已经有尺寸的视图默认跳过。'),
         'dim_margin_mm': round(_DIM_MARGIN * _MM_PER_FT, 3),
         'chain_offset_mm': _CHAIN_OFFSET_MM,
         'chain_step_mm': _CHAIN_STEP_MM,
@@ -1998,6 +2001,8 @@ def _settings_defaults():
         'well_category': 'OST_GenericModel',
         'mark_parameter': '',
         'bank_category': 'OST_StructuralFraming',
+        'confirm_before_run': _CONFIRM_RUN,
+        'skip_annotated_views': _SKIP_ANNOTATED,
     }
 
 
@@ -2005,7 +2010,7 @@ def _apply_settings():
     """读设置文件（没有就写出默认值）并覆盖脚本里的默认数值。某一项写错时只忽略那一项。返回设置文件路径。"""
     global _DIM_MARGIN, _CHAIN_OFFSET_MM, _CHAIN_OFFSET_FT, _CHAIN_STEP_MM, _CHAIN_STEP_FT, _TOTAL_GAP_MM, _TOTAL_GAP_FT
     global _PROTRUDE_FT, _REACH_TOL_FT, _CROP_TEXT_FT, _WALL_AREA_MIN_FT2, _SPAN_RATIO, _DIM_TYPE_NAME, _TOTAL_RULES
-    global _WELL_CAT, _MARK_PARAM, _BANK_CAT, _BANK_IDS
+    global _WELL_CAT, _MARK_PARAM, _BANK_CAT, _BANK_IDS, _CONFIRM_RUN, _SKIP_ANNOTATED
     d = _settings_defaults()
     try:
         if not os.path.isfile(SETTINGS_FILE):
@@ -2052,6 +2057,8 @@ def _apply_settings():
     if isinstance(tr, dict):
         _TOTAL_RULES = dict((k, (v or '')) for k, v in tr.items())
     _MARK_PARAM = (d.get('mark_parameter') or '').strip()
+    _CONFIRM_RUN = bool(d.get('confirm_before_run', True))
+    _SKIP_ANNOTATED = bool(d.get('skip_annotated_views', True))
     wc = getattr(DB.BuiltInCategory, str(d.get('well_category') or ''), None)
     if wc is not None:
         _WELL_CAT = wc
@@ -2074,6 +2081,11 @@ _CAT_CHOICES = [('OST_GenericModel', '常规模型'), ('OST_StructuralFraming', 
 
 def _settings_fields():
     f = [
+        {'kind': 'header', 'label': '防呆'},
+        {'key': 'confirm_before_run', 'label': '运行前先确认', 'kind': 'bool', 'bool_text': '标注前弹出确认窗口（说明标哪里、几个视图）',
+         'hint': '建议保持勾选，避免一点就开始跑。'},
+        {'key': 'skip_annotated_views', 'label': '已经有尺寸的视图', 'kind': 'bool', 'bool_text': '默认跳过（不再重复标注）',
+         'hint': '确认窗口里仍然可以选「全部都标」。'},
         {'kind': 'header', 'label': '尺寸线的位置（长度单位 mm）'},
         {'key': 'dim_margin_mm', 'label': '总尺寸线离井墙的最小距离', 'kind': 'num', 'min': 0, 'max': 5000,
          'hint': '没有排管链的一侧，总尺寸线离井墙多远。'},
@@ -2217,16 +2229,38 @@ def main():
         scope.append((u'手动勾选图纸…', None))
 
         set_label = u'⚙ 设置参数…'
-        while True:
-            pick_ = forms.CommandSwitchWindow.show([t for t, _l in scope] + [set_label], message=u'选择标注范围')
-            if pick_ == set_label:
-                open_settings()
-                continue
-            break
-        if not pick_:
-            return
+        # 先问「要标注哪里」：当前图纸排第一，写明「只标注」；其他范围（图集、系列、全部…）在二级列表里，不会误点
+        quick = []
+        if cur_sheet is not None:
+            quick.append((u'只标注当前图纸「{} {}」（{} 个视图）'.format(cur_sheet.SheetNumber, cur_sheet.Name, len(_views_of(cur_sheet))), [cur_sheet]))
+        if selected and not (len(selected) == 1 and cur_sheet is not None and selected[0].Id == cur_sheet.Id):
+            quick.append((u'项目浏览器里选中的 {} 张图纸'.format(len(selected)), list(selected)))
+        more_label = u'选择其他范围（系列、图集、全部、手动勾选）…'
+        pick_ = None
+        chosen = None
+        if quick:
+            while True:
+                pick_ = forms.CommandSwitchWindow.show([t for t, _l in quick] + [more_label, set_label], message=u'要标注哪里？')
+                if pick_ == set_label:
+                    open_settings()
+                    continue
+                break
+            if not pick_:
+                return
+            hit_ = [l for t, l in quick if t == pick_]
+            if hit_:
+                chosen = hit_
+        if chosen is None:
+            while True:
+                pick_ = forms.CommandSwitchWindow.show([t for t, _l in scope] + [set_label], message=u'选择标注范围')
+                if pick_ == set_label:
+                    open_settings()
+                    continue
+                break
+            if not pick_:
+                return
+            chosen = [l for t, l in scope if t == pick_]
         sheets = []
-        chosen = [l for t, l in scope if t == pick_]
         if chosen and chosen[0] is None:
             by_name = {}
             for x in all_sheets:
@@ -2279,6 +2313,53 @@ def main():
         dup_views = len(target_views) - len(uniq_views)
         target_views = uniq_views
 
+        # ---------- 防呆：运行前确认；已经有尺寸的视图默认跳过 ----------
+        annotated_ids = set()
+        try:
+            want_ids = set(int(v_.Id.Value) for v_ in target_views)
+            for dm_ in DB.FilteredElementCollector(doc).OfClass(DB.Dimension).ToElements():     # 全模型只扫一遍尺寸，按所属视图归类
+                try:
+                    ov_ = int(dm_.OwnerViewId.Value)
+                except Exception:
+                    continue
+                if ov_ in want_ids:
+                    annotated_ids.add(ov_)
+        except Exception:
+            annotated_ids = set()
+        n_all = len(target_views)
+        n_ann = len(annotated_ids)
+        skip_annotated = bool(_SKIP_ANNOTATED)
+        if len(sheets) == 1:
+            scope_txt = u'图纸「{} {}」'.format(sheets[0].SheetNumber, sheets[0].Name)
+        else:
+            scope_txt = u'{} 张图纸'.format(len(sheets))
+        MB = _SUW.MessageBox
+        if _CONFIRM_RUN:
+            if n_ann == 0:
+                ans_ = MB.Show(u'将标注：{}（共 {} 个视图，都还没有尺寸）。\n\n确定开始吗？标注期间会有进度条，可以随时取消。'.format(scope_txt, n_all),
+                               u'一键井大样标注', _SUW.MessageBoxButtons.OKCancel, _SUW.MessageBoxIcon.Question)
+                if ans_ != _SUW.DialogResult.OK:
+                    return
+            elif n_ann < n_all:
+                ans_ = MB.Show(u'将标注：{}\n共 {} 个视图，其中 {} 个已经有尺寸。\n\n'
+                               u'是：只标没有尺寸的 {} 个视图（推荐）\n'
+                               u'否：全部都标（已有尺寸的补标，同位置的不会重复）\n'
+                               u'取消：不标注'.format(scope_txt, n_all, n_ann, n_all - n_ann),
+                               u'一键井大样标注', _SUW.MessageBoxButtons.YesNoCancel, _SUW.MessageBoxIcon.Question)
+                if ans_ == _SUW.DialogResult.Cancel:
+                    return
+                skip_annotated = (ans_ == _SUW.DialogResult.Yes)
+            else:
+                ans_ = MB.Show(u'将标注：{}\n这 {} 个视图都已经有尺寸了。\n\n'
+                               u'是：仍然补标（同位置的不会重复）\n否：不标注'.format(scope_txt, n_all),
+                               u'一键井大样标注', _SUW.MessageBoxButtons.YesNo, _SUW.MessageBoxIcon.Question)
+                if ans_ != _SUW.DialogResult.Yes:
+                    return
+                skip_annotated = False
+        elif skip_annotated and n_all and n_ann >= n_all:
+            forms.alert(u'这些视图都已经有尺寸了，没有需要标注的。想重新补标，请在设置里取消「已经有尺寸的视图默认跳过」。', title='一键井大样标注')
+            return
+
         # ---------- 3. 执行 ----------
         # 只新增尺寸，不改视图：不动裁剪框，不隐藏/显示任何构件，不删除视图里已有的尺寸。
         # 每张视图先整体排（尺寸链 + 总尺寸）；某步被 Revit 判定参照失效则整体回滚，再分开排、逐根排管各自提交。
@@ -2310,8 +2391,23 @@ def main():
         failed_steps = []
         out_views = []   # 裁剪框放不下而未标的视图：(视图名, 未标道数, 缺口说明)
         out_total = 0
+        cancelled = [False]
+        done_views = [0]
+        skipped_annot = [0]
+        pb = forms.ProgressBar(title=u'正在标注…（点取消可随时停止，已标注的保留）', cancellable=True)
         try:
-            for v in target_views:
+            for _vi, v in enumerate(target_views):
+                try:
+                    pb.update_progress(_vi, len(target_views))
+                except Exception:
+                    pass
+                if pb.cancelled:
+                    cancelled[0] = True
+                    break
+                done_views[0] = _vi + 1
+                if skip_annotated and int(v.Id.Value) in annotated_ids:
+                    skipped_annot[0] += 1          # 已经有尺寸：不再重复跑
+                    continue
                 try:
                     del _DIM_ERRS[:]
                     _OUT_CROP.clear()
@@ -2397,6 +2493,10 @@ def main():
             tg.Assimilate()
         except Exception as inner:
             try:
+                pb.close()
+            except Exception:
+                pass
+            try:
                 tg.RollBack()
             except Exception:
                 pass
@@ -2404,9 +2504,18 @@ def main():
                         title='一键井大样标注')
             return
 
+        try:
+            pb.close()
+        except Exception:
+            pass
+
         # ---------- 4. 报告 ----------
         msg = '井大样标注完成！（只新增尺寸：视图的裁剪框、隐藏状态和已有尺寸都没有改动）\n\n'
+        if cancelled[0]:
+            msg = msg.replace('井大样标注完成！', '井大样标注已取消！只处理了 {} / {} 个视图，已标注的保留（Ctrl+Z 可一次撤销）。'.format(max(done_views[0] - 1, 0), len(target_views)))
         msg += '• 处理视图：{} 个（成功 {} 个）\n'.format(len(target_views), ok_views)
+        if skipped_annot[0]:
+            msg += '• 已经有尺寸而跳过的视图：{} 个（没有重复标注）' .format(skipped_annot[0]) + chr(10)
         msg += '• 标注排管（井内尺寸链）：{} 根（按视图累计）\n'.format(stats.get(_ST_BANK_OK, 0))
         msg += '• 生成尺寸：{} 道（外包总尺寸 + 尺寸链）\n'.format(made)
         if dup_views:
