@@ -1438,20 +1438,55 @@ def _resolve_mark(mark):
     return mark
 
 
+_SHEET_VIEWNAMES = [None]      # 图纸Id -> 这张图纸上各视图的名字；一次扫完全模型的视口，避免对每张图纸单独查询（图纸多时很慢）
+_SHEET_MARK_CACHE = {}
+
+
+def _load_sheet_caches():
+    """一次读出全模型的视口，按图纸归好类。之后判断「是不是井大样图纸」「井号是什么」都不再逐张图纸查询。"""
+    names = {}
+    for vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
+        try:
+            v = doc.GetElement(vp.ViewId)
+            if v is None or v.IsTemplate:
+                continue
+            names.setdefault(int(vp.SheetId.Value), []).append(v.Name or u'')
+        except:
+            continue
+    _SHEET_VIEWNAMES[0] = names
+    _SHEET_MARK_CACHE.clear()
+
+
 def _sheet_mark(sheet):
     """图纸的井号。优先取视图名里的 AG-<井号>-xxxx（井展开图生成视图时写入，与图纸名无关）；
-    取不到再按图名去掉前缀（旧命名「井大样_AA-01」）。图纸名改成「BTP-IF1 275Kv-AA-18 Detail Drawing」也能对上。"""
+    取不到再按图名去掉前缀（旧命名「井大样_AA-01」）。图纸名改成「BTP-IF1 275Kv-AA-18 Detail Drawing」也能对上。
+    结果按图纸缓存（见 _load_sheet_caches）。"""
     try:
-        for _k, _nm, _v in _views_of(sheet):
+        sid = int(sheet.Id.Value)
+    except:
+        sid = None
+    if sid is not None and sid in _SHEET_MARK_CACHE:
+        return _SHEET_MARK_CACHE[sid]
+    mark = None
+    try:
+        if _SHEET_VIEWNAMES[0] is not None and sid is not None:
+            names = _SHEET_VIEWNAMES[0].get(sid, [])
+        else:
+            names = [_nm for _k, _nm, _v in _views_of(sheet)]
+        for _nm in names:
             m = re.search(u'AG-(.+)-[0-9a-f]{4}$', _nm or u'')
             if m:
-                return _resolve_mark(m.group(1))
+                mark = _resolve_mark(m.group(1))
+                break
     except:
-        pass
-    nm = sheet.Name or u''
-    if nm.startswith(WS_PREFIX):
-        return _resolve_mark(nm[len(WS_PREFIX):])
-    return None
+        mark = None
+    if mark is None:
+        nm = sheet.Name or u''
+        if nm.startswith(WS_PREFIX):
+            mark = _resolve_mark(nm[len(WS_PREFIX):])
+    if sid is not None and _SHEET_VIEWNAMES[0] is not None:
+        _SHEET_MARK_CACHE[sid] = mark
+    return mark
 
 
 def _is_well_sheet(sheet):
@@ -1726,8 +1761,15 @@ def open_settings():
 
 
 def main():
+    pb0 = [None]
     try:
         _apply_settings()
+        # 读取图纸要几秒到十几秒（图纸多时）：弹进度窗口让你知道它在干活，也可以点取消退出
+        try:
+            pb0[0] = forms.ProgressBar(title=u'一键井大样标注：正在读取图纸，请稍候…（点取消退出）', cancellable=True)
+        except Exception:
+            pb0[0] = None
+        _load_sheet_caches()
         _FACE_CACHE.clear()
         _EDGE_CACHE.clear()
         del _BANK_ERRS[:]
@@ -1763,6 +1805,10 @@ def main():
                       if _is_well_sheet(x)]
         all_sheets.sort(key=lambda x: x.Name or "")
         if not all_sheets:
+            try:
+                pb0[0].close()
+            except Exception:
+                pass
             forms.alert(u'项目里没有井大样图纸（名称以「{}」开头，可在 {} 里改）。'.format(WS_PREFIX, WCFG_FILE), title='一键井大样标注')
             return
 
@@ -1794,6 +1840,15 @@ def main():
         scope.append((u'全部井大样图纸（{} 张）'.format(len(all_sheets)), list(all_sheets)))
         scope.append((u'手动勾选图纸…', None))
 
+        try:
+            if pb0[0] is not None:
+                _cancelled0 = bool(pb0[0].cancelled)
+                pb0[0].close()
+                pb0[0] = None
+                if _cancelled0:
+                    return
+        except Exception:
+            pass
         set_label = u'⚙ 设置参数…'
         # 先问「要标注哪里」：当前图纸排第一，写明「只标注」；其他范围（图集、系列、全部…）在二级列表里，不会误点
         quick = []
@@ -2124,8 +2179,16 @@ def main():
         forms.alert(msg, title='一键井大样标注')
 
     except System.Exception as e:
+        try:
+            pb0[0].close()
+        except Exception:
+            pass
         forms.alert('发生严重系统错误:\n' + str(e) + '\n\n' + traceback.format_exc(), title='报错追踪')
     except Exception as e:
+        try:
+            pb0[0].close()
+        except Exception:
+            pass
         forms.alert('发生严重Python错误:\n' + str(e) + '\n\n' + traceback.format_exc(), title='报错追踪')
 
 
