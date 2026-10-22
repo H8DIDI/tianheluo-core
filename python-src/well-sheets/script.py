@@ -38,6 +38,7 @@ FT_MM = 304.8
 
 # 图纸名前缀、图号前缀、井编号系列来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
 # @include _shared/well_config.py
+# @include _shared/sheet_blocks.py
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]      # 默认「井大样_」
 WS_NUMPRE = WCFG[u"sheet_number_prefix"]    # 默认「AG-」
@@ -1299,21 +1300,29 @@ def main():
             _num_next = [None]
             _reuse_num = {}
 
-            def _new_sheet_number():
-                """下一个图号：现有纯数字图号的最大值 +1，之后每次递增（只扫描一次模型）。"""
-                if _num_next[0] is None:
-                    _mx = 0
+            _num_occ = [None]
+            _num_warn = []
+            _sb_rules = sb_load()
+
+            def _new_sheet_number(mark, self_id=None):
+                """下一个图号：从这口井所在系统的号段里取下一个空号（号段见 文档/KaifaTools/井图号号段.json），
+                井号不在任何号段、或号段用完时接在所有号段之后并提示。只扫描一次模型。"""
+                if _num_occ[0] is None:
+                    _occ = set()
                     for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
                         try:
+                            if self_id is not None and _s.Id.Value == self_id:
+                                continue          # 刚新建的这张图纸，Revit 给它的默认编号不算占用
                             _sn = (_s.SheetNumber or "").strip()
                             if _sn.isdigit():
-                                _mx = max(_mx, int(_sn))
+                                _occ.add(int(_sn))
                         except:
                             pass
-                    _num_next[0] = _mx + 1
-                _n = _num_next[0]
-                _num_next[0] += 1
-                return "%04d" % _n
+                    _num_occ[0] = _occ
+                _n, _w = sb_next_number(mark or "", _sb_rules, _num_occ[0])
+                if _w and _w not in _num_warn:
+                    _num_warn.append(_w)
+                return _n
 
             pb = forms.ProgressBar(title='正在批量生成井大样图及尺寸标注... ({value}/{max_value})', cancellable=True)
             for idx, elem in enumerate(valid_elems):
@@ -1402,9 +1411,12 @@ def main():
                     # 旧图号不能在删除旧图的同一事务里立即给新图（Revit 会报「图纸编号已在使用中」）：
                     # 先用新号，事务提交后再改回旧号（见 _renumber_pairs）
                     _old_no = _reuse_num.pop(base_name, None)
-                    sheet.SheetNumber = _new_sheet_number()
                     if _old_no:
+                        # 替换旧图：先挂一个不会重复的临时号，提交后改回旧号（旧号不占用号段里的新号）
+                        sheet.SheetNumber = "TMP" + rand_suffix + str(len(_renumber_later))
                         _renumber_later.append((sheet.Id.Value, _old_no))
+                    else:
+                        sheet.SheetNumber = _new_sheet_number(base_name, sheet.Id.Value)
                     # 图纸集合：按井号系列放进对应的图纸集合（11KV/275KV/ELV/LV/TELCO），便于按集合导出 PDF
                     _set_sheet_collection(doc, sheet, base_name)
                     _pos_cache[base_name] = {'bbox': _bbox_key(elem), 'sheet_id': int(sheet.Id.Value),
@@ -1862,8 +1874,9 @@ def main():
             forms.alert(
                 '批量生成大样图完毕！\n共成功生成 {} 张图纸，替换（删除重建）旧图 {} 张，删除这些井以前出的旧视图 {} 个。\n'
                 '视图样板：{}\n'
-                '提示：套了样板的视图，其"视图范围/显示样式"由样板决定，脚本不再覆盖。{}'.format(
-                    success_count, replaced_count, old_removed, _tpl_msg, export_result),
+                '提示：套了样板的视图，其"视图范围/显示样式"由样板决定，脚本不再覆盖。{}{}'.format(
+                    success_count, replaced_count, old_removed, _tpl_msg, export_result,
+                    ('\n图号提示：' + '；'.join(_num_warn)) if _num_warn else ''),
                 title='成功')
         else:
             forms.alert('执行完成，但没有图纸生成成功。请查看上面的打印日志。', title='警告')

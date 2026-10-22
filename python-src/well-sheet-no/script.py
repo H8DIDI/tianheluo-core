@@ -1,0 +1,246 @@
+# -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+__title__ = '井图号\n重编'
+__author__ = 'didi'
+__doc__ = ('按系统号段给井大样图纸重新编图号：每个系统占一段（默认 11KV 0001–0699、275KV 0700–0999、ELV 1001–1999、TELCO 2001–2999、LV 3001–3999），'
+           '段内按井号顺序排（A 在 B 前、AA 在 BB 前、A-10-1 在 A-10 后），号连续，井号跳号不影响图号。\n'
+           '先预览「旧图号 → 新图号」和每个系统的占用情况，确认后再应用；应用前自动写出一份「旧号 → 新号」对照表（CSV），'
+           '整次可 Ctrl+Z 撤销。室内井、雨水井、MH、QBJ 等不在号段规则里的图纸不动。号段在 文档\\KaifaTools\\井图号号段.json 里改。\n'
+           '之后用「一键井展开图」新出的图，会自动从本系统号段里取下一个空号。')
+
+import io
+import os
+import time
+import traceback
+import clr
+import System
+clr.AddReference('RevitAPI')
+clr.AddReference('System.Windows.Forms')
+clr.AddReference('System.Drawing')
+from Autodesk.Revit import DB
+from pyrevit import revit, forms
+import System.Windows.Forms as WF
+import System.Drawing as SD
+
+# @include _shared/sheet_blocks.py
+
+doc = revit.doc
+uidoc = revit.uidoc
+TITLE = '井图号重编'
+MAP_DIR = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), 'KaifaTools')
+
+
+def scan_sheets():
+    """全部图纸（含占位）：[{'key': 图纸Id, 'sheet': 图纸, 'old': 图号, 'name': 图名}]。"""
+    out = []
+    for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
+        try:
+            out.append({'key': int(s.Id.Value), 'sheet': s, 'old': (s.SheetNumber or '').strip(), 'name': s.Name or ''})
+        except Exception:
+            continue
+    return out
+
+
+def make_plan(rules):
+    """先按图名认出哪些是井大样图纸，再把其他图纸占用的图号当作「已被占用」，重新算一遍。"""
+    rows = scan_sheets()
+    first = sb_plan(rows, rules)
+    skipped_keys = set(k for k, _o, _r in first['skipped'])
+    other = set(r['old'] for r in rows if r['key'] in skipped_keys)
+    plan = sb_plan(rows, rules, other)
+    plan['rows'] = dict((r['key'], r) for r in rows)
+    plan['other'] = other
+    return plan
+
+
+def export_map(plan):
+    """把「旧号 → 新号」写成 CSV（带 BOM，Excel 直接打开）。返回路径。"""
+    if not os.path.isdir(MAP_DIR):
+        os.makedirs(MAP_DIR)
+    path = os.path.join(MAP_DIR, '图号对照_{}.csv'.format(time.strftime('%Y%m%d_%H%M%S')))
+    lines = ['系统,井号,旧图号,新图号,图名']
+    for key, old, new, sysname, mark in sorted(plan['changes'], key=lambda t: t[2]):
+        lines.append('{},{},{},{},"{}"'.format(sysname, mark, old, new, plan['rows'][key]['name'].replace('"', '""')))
+    for key, old, sysname, mark in sorted(plan['same'], key=lambda t: t[1]):
+        lines.append('{},{},{},{},"{}"'.format(sysname, mark, old, old, plan['rows'][key]['name'].replace('"', '""')))
+    with io.open(path, 'w', encoding='utf-8-sig') as f:
+        f.write('\n'.join(lines) + '\n')
+    return path
+
+
+def apply_plan(plan):
+    """两步改号（先全部改成临时号，再改成新号），避免互相占号；整次一个事务组，可一次 Ctrl+Z。返回 (改了几张, 失败说明)。"""
+    changes = plan['changes']
+    if not changes:
+        return 0, ''
+    tg = DB.TransactionGroup(doc, '井图号重编')
+    tg.Start()
+    cur = [None]
+    try:
+        t1 = DB.Transaction(doc, '临时图号')
+        cur[0] = t1
+        t1.Start()
+        for key, old, new, sysname, mark in changes:
+            plan['rows'][key]['sheet'].SheetNumber = 'TMP{}'.format(key)      # 图号里不能有 { } [ ] | ; < > ? ` ~
+        t1.Commit()
+        t2 = DB.Transaction(doc, '正式图号')
+        cur[0] = t2
+        t2.Start()
+        for key, old, new, sysname, mark in changes:
+            plan['rows'][key]['sheet'].SheetNumber = new
+        t2.Commit()
+        tg.Assimilate()
+        return len(changes), ''
+    except Exception as ex:
+        try:
+            t = cur[0]
+            if t is not None and t.HasStarted() and not t.HasEnded():
+                t.RollBack()          # 先收尾内层事务，再撤回整个事务组，文档不会卡在半截
+        except Exception:
+            pass
+        try:
+            tg.RollBack()
+        except Exception:
+            pass
+        return 0, str(ex)
+
+
+def show_dialog(rules, plan):
+    """预览窗口。返回 'apply' / 'close'。"""
+    f = WF.Form()
+    f.Text = TITLE
+    f.Font = SD.Font('Microsoft YaHei UI', 9.0)
+    f.StartPosition = WF.FormStartPosition.CenterScreen
+    f.FormBorderStyle = WF.FormBorderStyle.FixedDialog
+    f.MaximizeBox = False
+    f.MinimizeBox = False
+    f.ClientSize = SD.Size(760, 600)
+    res = {'act': 'close'}
+
+    def lab(t, x, y, w, h=20, bold=False):
+        l = WF.Label()
+        l.Text = t
+        l.Location = SD.Point(x, y)
+        l.Size = SD.Size(w, h)
+        if bold:
+            l.Font = SD.Font(f.Font, SD.FontStyle.Bold)
+        f.Controls.Add(l)
+        return l
+
+    lab('各系统号段使用情况', 16, 10, 400, bold=True)
+    lines = []
+    for b in rules['blocks']:
+        u = plan['summary'].get(b['name'])
+        if u:
+            lines.append('{}：{} 张 → {}–{}（号段 {}–{}，容量 {}）'.format(
+                b['name'], u[0], sb_fmt(u[1], rules), sb_fmt(u[2], rules), sb_fmt(b['start'], rules), sb_fmt(b['end'], rules), u[3]))
+        else:
+            lines.append('{}：0 张（号段 {}–{}）'.format(b['name'], sb_fmt(b['start'], rules), sb_fmt(b['end'], rules)))
+    lab('\n'.join(lines), 16, 32, 728, 96)
+
+    n_chg, n_same, n_skip = len(plan['changes']), len(plan['same']), len(plan['skipped'])
+    lab('井大样图纸 {} 张：图号要改 {} 张，本来就对 {} 张；不在号段规则里不动 {} 张。'.format(n_chg + n_same, n_chg, n_same, n_skip),
+        16, 134, 728)
+    warn = '\n'.join(plan['warnings']) if plan['warnings'] else ''
+    if plan['skipped']:
+        over = [s for s in plan['skipped'] if '用完' in s[2]]
+        if over:
+            warn += ('\n' if warn else '') + '有 {} 张放不下（号段用完），不会被改号。'.format(len(over))
+    w = lab(warn, 16, 156, 728, 44)
+    w.ForeColor = SD.Color.FromArgb(190, 60, 20)
+
+    lv = WF.ListView()
+    lv.View = WF.View.Details
+    lv.FullRowSelect = True
+    lv.GridLines = True
+    lv.Location = SD.Point(16, 204)
+    lv.Size = SD.Size(728, 330)
+    for h, wd in (('系统', 80), ('井号', 130), ('旧图号', 100), ('新图号', 100), ('图名', 290)):
+        lv.Columns.Add(h, wd)
+    rows = []
+    for key, old, new, sysname, mark in plan['changes']:
+        rows.append((new, sysname, mark, old, new, plan['rows'][key]['name'], True))
+    for key, old, sysname, mark in plan['same']:
+        rows.append((old, sysname, mark, old, old, plan['rows'][key]['name'], False))
+    rows.sort(key=lambda r: r[0])
+    for _k, sysname, mark, old, new, name, changed in rows:
+        it = WF.ListViewItem(sysname)
+        it.SubItems.Add(mark)
+        it.SubItems.Add(old)
+        it.SubItems.Add(new)
+        it.SubItems.Add(name)
+        if changed:
+            it.ForeColor = SD.Color.FromArgb(0, 90, 170)
+        else:
+            it.ForeColor = SD.Color.FromArgb(130, 130, 130)
+        lv.Items.Add(it)
+    f.Controls.Add(lv)
+    lab('蓝色 = 图号会改；灰色 = 本来就对。应用前会先写出「旧号 → 新号」对照表。', 16, 540, 728)
+
+    b_apply = WF.Button()
+    b_apply.Text = '应用重编'
+    b_apply.Location = SD.Point(16, 564)
+    b_apply.Size = SD.Size(110, 30)
+    b_apply.Enabled = n_chg > 0
+    b_exp = WF.Button()
+    b_exp.Text = '只导出对照表'
+    b_exp.Location = SD.Point(136, 564)
+    b_exp.Size = SD.Size(110, 30)
+    b_rule = WF.Button()
+    b_rule.Text = '打开号段规则'
+    b_rule.Location = SD.Point(256, 564)
+    b_rule.Size = SD.Size(110, 30)
+    b_close = WF.Button()
+    b_close.Text = '关闭'
+    b_close.Location = SD.Point(634, 564)
+    b_close.Size = SD.Size(110, 30)
+    for b in (b_apply, b_exp, b_rule, b_close):
+        f.Controls.Add(b)
+    f.CancelButton = b_close
+
+    def on_apply(s, e):
+        msg = '将改 {} 张井大样图纸的图号（只改图号，不改图名和内容）。\n应用前会先写出对照表，整次可 Ctrl+Z 撤销。\n\n确定吗？'.format(n_chg)
+        if WF.MessageBox.Show(msg, TITLE, WF.MessageBoxButtons.OKCancel, WF.MessageBoxIcon.Question) == WF.DialogResult.OK:
+            res['act'] = 'apply'
+            f.Close()
+
+    def on_exp(s, e):
+        p = export_map(plan)
+        WF.MessageBox.Show('已导出：\n' + p, TITLE)
+
+    def on_rule(s, e):
+        try:
+            sb_load()
+            System.Diagnostics.Process.Start('notepad.exe', SB_FILE)
+        except Exception as ex:
+            WF.MessageBox.Show('打不开：{}'.format(ex), TITLE)
+
+    b_apply.Click += on_apply
+    b_exp.Click += on_exp
+    b_rule.Click += on_rule
+    b_close.Click += lambda s, e: f.Close()
+    f.ShowDialog()
+    return res['act']
+
+
+def main():
+    try:
+        rules = sb_load()
+        plan = make_plan(rules)
+        if not plan['changes'] and not plan['same']:
+            forms.alert('项目里没有可按号段编号的井大样图纸（图名里要有形如 T-022、A-098 的井号，且前缀在号段规则里）。\n号段规则：' + SB_FILE, title=TITLE)
+            return
+        if show_dialog(rules, plan) != 'apply':
+            return
+        path = export_map(plan)
+        n, err = apply_plan(plan)
+        if err:
+            forms.alert('重编失败，已整体撤回（图号没有改动）：\n{}\n\n对照表已写出：{}'.format(err, path), title=TITLE)
+        else:
+            forms.alert('已重编 {} 张图纸的图号。\n对照表：{}\n不满意可以 Ctrl+Z 撤销。'.format(n, path), title=TITLE)
+    except Exception as ex:
+        forms.alert('发生错误：\n{}\n\n{}'.format(ex, traceback.format_exc()), title=TITLE)
+
+
+if __name__ == '__main__':
+    main()
