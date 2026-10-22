@@ -14,6 +14,9 @@ from pyrevit import revit, DB, UI, forms
 # @include _shared/well_config.py
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]
+import io
+import os
+import json
 import re
 import System
 import traceback
@@ -1396,9 +1399,13 @@ def _sheet_of(e):
     return None
 
 
+_WELL_CAT = DB.BuiltInCategory.OST_GenericModel     # 井所在的类别（设置文件 well_category）
+_MARK_PARAM = ''                                    # 井号参数名；空 = Revit 自带的「标记」（设置文件 mark_parameter）
+
+
 def _mark_of(e):
     try:
-        p = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+        p = e.LookupParameter(_MARK_PARAM) if _MARK_PARAM else e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
         return p.AsString().strip() if (p and p.AsString()) else None
     except:
         return None
@@ -1411,7 +1418,7 @@ def _model_marks():
     """模型里所有带井号的常规模型构件的井号（只查一次）。"""
     if _MODEL_MARKS[0] is None:
         s = set()
-        for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().ToElements():
+        for e in DB.FilteredElementCollector(doc).OfCategory(_WELL_CAT).WhereElementIsNotElementType().ToElements():
             mk = _mark_of(e)
             if mk:
                 s.add(mk)
@@ -1526,8 +1533,106 @@ def _axes_ok(elems, fr):
     return cnt[fr['h']] >= 2 and cnt[fr['v']] >= 2
 
 
+# ============================================================
+# 设置文件：所有可调的数值、名称都在 文档/KaifaTools/井大样标注设置.json 里（第一次运行自动写出默认值）。
+# 换项目、换电脑：把这个文件复制过去即可复现；删掉文件恢复默认。长度类数值单位是 mm。
+# ============================================================
+SETTINGS_FILE = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
+                             'KaifaTools', '井大样标注设置.json')
+
+
+def _settings_defaults():
+    return {
+        '说明': ('井大样标注的可调设置。长度单位 mm。dim_margin_mm=总尺寸线离井墙的最小距离；chain_offset_mm=第一道排管链离井墙；'
+                'chain_step_mm=相邻两道链的间距；total_gap_mm=总尺寸线离最外一道链的净距；protrude_mm=排管伸出井墙多少以内仍算接入这口井；'
+                'reach_tol_mm=排管端头离井墙多远以内算接入；crop_text_mm=注释裁剪开启时尺寸离框边的最小距离；'
+                'wall_area_min_m2=算作井墙的最小面面积；span_ratio=长构件判定倍数；dim_type_name=排管链用的尺寸类型名（找不到用默认）；'
+                'total_rules=各视图标哪条总尺寸（键=视图名前缀，W=宽，H=高，空=不标）；well_category=井所在的类别（Revit 内部类别名，如 OST_GenericModel）；'
+                'mark_parameter=井号参数名（空=Revit 自带的「标记」）；bank_category=排管所在类别。'),
+        'dim_margin_mm': round(_DIM_MARGIN * _MM_PER_FT, 3),
+        'chain_offset_mm': _CHAIN_OFFSET_MM,
+        'chain_step_mm': _CHAIN_STEP_MM,
+        'total_gap_mm': _TOTAL_GAP_MM,
+        'protrude_mm': round(_PROTRUDE_FT * _MM_PER_FT, 3),
+        'reach_tol_mm': round(_REACH_TOL_FT * _MM_PER_FT, 3),
+        'crop_text_mm': round(_CROP_TEXT_FT * _MM_PER_FT, 3),
+        'wall_area_min_m2': round(_WALL_AREA_MIN_FT2 / 10.7639, 5),
+        'span_ratio': _SPAN_RATIO,
+        'dim_type_name': _DIM_TYPE_NAME,
+        'total_rules': dict(_TOTAL_RULES),
+        'well_category': 'OST_GenericModel',
+        'mark_parameter': '',
+        'bank_category': 'OST_StructuralFraming',
+    }
+
+
+def _apply_settings():
+    """读设置文件（没有就写出默认值）并覆盖脚本里的默认数值。某一项写错时只忽略那一项。返回设置文件路径。"""
+    global _DIM_MARGIN, _CHAIN_OFFSET_MM, _CHAIN_OFFSET_FT, _CHAIN_STEP_MM, _CHAIN_STEP_FT, _TOTAL_GAP_MM, _TOTAL_GAP_FT
+    global _PROTRUDE_FT, _REACH_TOL_FT, _CROP_TEXT_FT, _WALL_AREA_MIN_FT2, _SPAN_RATIO, _DIM_TYPE_NAME, _TOTAL_RULES
+    global _WELL_CAT, _MARK_PARAM, _BANK_CAT, _BANK_IDS
+    d = _settings_defaults()
+    try:
+        if not os.path.isfile(SETTINGS_FILE):
+            dd = os.path.dirname(SETTINGS_FILE)
+            if not os.path.isdir(dd):
+                os.makedirs(dd)
+            txt = json.dumps(d, ensure_ascii=False, indent=1)
+            if not isinstance(txt, type('')):
+                txt = txt.decode('utf-8')
+            with io.open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+                f.write(txt)
+        else:
+            with io.open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                user = json.load(f)
+            if isinstance(user, dict):
+                for k, v in user.items():
+                    if k in d and k != '说明':
+                        d[k] = v
+    except Exception:
+        pass
+
+    def num(key, default):
+        try:
+            return float(d[key])
+        except Exception:
+            return default
+    _DIM_MARGIN = num('dim_margin_mm', _DIM_MARGIN * _MM_PER_FT) / _MM_PER_FT
+    _CHAIN_OFFSET_MM = num('chain_offset_mm', _CHAIN_OFFSET_MM)
+    _CHAIN_OFFSET_FT = mm_to_ft(_CHAIN_OFFSET_MM)
+    _CHAIN_STEP_MM = num('chain_step_mm', _CHAIN_STEP_MM)
+    _CHAIN_STEP_FT = mm_to_ft(_CHAIN_STEP_MM)
+    _TOTAL_GAP_MM = num('total_gap_mm', _TOTAL_GAP_MM)
+    _TOTAL_GAP_FT = mm_to_ft(_TOTAL_GAP_MM)
+    _PROTRUDE_FT = num('protrude_mm', _PROTRUDE_FT * _MM_PER_FT) / _MM_PER_FT
+    _REACH_TOL_FT = num('reach_tol_mm', _REACH_TOL_FT * _MM_PER_FT) / _MM_PER_FT
+    _CROP_TEXT_FT = num('crop_text_mm', _CROP_TEXT_FT * _MM_PER_FT) / _MM_PER_FT
+    _WALL_AREA_MIN_FT2 = num('wall_area_min_m2', _WALL_AREA_MIN_FT2 / 10.7639) * 10.7639
+    _SPAN_RATIO = num('span_ratio', _SPAN_RATIO)
+    if d.get('dim_type_name'):
+        if d['dim_type_name'] != _DIM_TYPE_NAME:
+            _DIM_TYPE_ID[0] = None
+        _DIM_TYPE_NAME = d['dim_type_name']
+    tr = d.get('total_rules')
+    if isinstance(tr, dict):
+        _TOTAL_RULES = dict((k, (v or '')) for k, v in tr.items())
+    _MARK_PARAM = (d.get('mark_parameter') or '').strip()
+    wc = getattr(DB.BuiltInCategory, str(d.get('well_category') or ''), None)
+    if wc is not None:
+        _WELL_CAT = wc
+    bc = getattr(DB.BuiltInCategory, str(d.get('bank_category') or ''), None)
+    if bc is not None:
+        _BANK_CAT = bc
+        _BANK_IDS = _ints([_BANK_CAT])
+        for i in _BANK_IDS:
+            if i not in _PIPE_IDS:
+                _PIPE_IDS.append(i)
+    return SETTINGS_FILE
+
+
 def main():
     try:
+        _apply_settings()
         _FACE_CACHE.clear()
         _EDGE_CACHE.clear()
         del _BANK_ERRS[:]
@@ -1817,6 +1922,7 @@ def main():
                 msg += '    - {}\n'.format(nm)
             if len(bad) > 10:
                 msg += '    ...（其余 {} 个同类）\n'.format(len(bad) - 10)
+        msg += '\n设置文件：' + SETTINGS_FILE + '（偏移、间距、尺寸类型、各视图标什么、井类别等都能改）'
         forms.alert(msg, title='一键井大样标注')
 
     except System.Exception as e:

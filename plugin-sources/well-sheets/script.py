@@ -252,8 +252,12 @@ SB_FILE = _sb_os.path.join(
 SB_DEFAULTS = {
     u"说明": (u"井大样图号号段。blocks 里每一项是一个系统：start/end=图号范围（含），prefixes=归这个系统的井号前缀（按这个顺序排，"
             u"如 A 排在 B 前面）。只有井号形如 前缀-数字（如 T-022、A-098-1）的图纸才会按号段编号；"
-            u"室内井、雨水井、MH、QBJ 等不在 prefixes 里的图纸不动。digits=图号位数。"),
+            u"室内井、雨水井、MH、QBJ 等不在 prefixes 里的图纸不动。digits=图号位数。"
+            u"mark_regex=从图名里认井号的正则，必须有三个括号：前缀、数字、可选的后缀数字（如 T-022、A-098-1）；换项目的井号写法不同，改这里。"
+            u"not_drawn_markers=井号前面紧挨着这些文字的，一律当作不编号的井（如「室内-T-01」）。"),
     u"digits": 4,
+    u"mark_regex": u"(?<![A-Za-z])([A-Za-z]{1,2})-(\\d+)(?:-(\\d+))?",
+    u"not_drawn_markers": [u"室内-"],
     u"blocks": [
         {u"name": u"11KV", u"start": 1, u"end": 699, u"prefixes": [u"A", u"B"]},
         {u"name": u"275KV", u"start": 700, u"end": 999, u"prefixes": [u"AA", u"BB"]},
@@ -283,25 +287,48 @@ def sb_load():
             cfg = _sb_json.load(f)
         if isinstance(cfg, dict) and cfg.get(u"blocks"):
             cfg.setdefault(u"digits", 4)
+            for _k in (u"mark_regex", u"not_drawn_markers"):
+                cfg.setdefault(_k, SB_DEFAULTS[_k])
             return cfg
     except Exception:
         pass
     return SB_DEFAULTS
 
 
-def sb_parse_mark(text):
-    """从图名/井号里取井号，返回 (前缀, 数字, 后缀或None, 井号原文)；取不到返回 None。取最后一个匹配（图名里井号在后面）。"""
+_SB_RE_CACHE = {}
+
+
+def _sb_regex(rules):
+    pat = (rules or {}).get(u"mark_regex") or SB_DEFAULTS[u"mark_regex"]
+    r = _SB_RE_CACHE.get(pat)
+    if r is None:
+        try:
+            r = _sb_re.compile(pat)
+            if r.groups < 2:
+                raise ValueError(u"mark_regex 至少要有前缀、数字两个括号")
+        except Exception:
+            r = _sb_re.compile(SB_DEFAULTS[u"mark_regex"])
+        _SB_RE_CACHE[pat] = r
+    return r
+
+
+def sb_parse_mark(text, rules=None):
+    """从图名/井号里取井号，返回 (前缀, 数字, 后缀或0, 井号原文)；取不到返回 None。取最后一个匹配（图名里井号在后面）。
+    井号前面紧挨着 not_drawn_markers 里的文字（默认「室内-」）时，前缀变成「文字+前缀」，不属于任何号段。"""
     text = text or u""
     last = None
-    for m in _SB_MARK_RE.finditer(text):
+    for m in _sb_regex(rules).finditer(text):
         last = m
     if last is None:
         return None
-    pre, num, suf = last.group(1), last.group(2), last.group(3)
+    g = last.groups()
+    pre, num = g[0], g[1]
+    suf = g[2] if len(g) > 2 else None
     mark = u"%s-%s" % (pre, num) + (u"-%s" % suf if suf else u"")
-    if text[max(0, last.start() - 3):last.start()] == u"室内-":     # 室内-T-01：室内井不是任何号段的井
-        pre = u"室内-" + pre
-        mark = u"室内-" + mark
+    markers = (rules or SB_DEFAULTS).get(u"not_drawn_markers", SB_DEFAULTS[u"not_drawn_markers"]) or []
+    for mk in markers:
+        if mk and text[max(0, last.start() - len(mk)):last.start()] == mk:
+            return (mk + pre, int(num), int(suf) if suf else 0, mk + mark)
     return (pre, int(num), int(suf) if suf else 0, mark)
 
 
@@ -337,7 +364,7 @@ def sb_plan(rows, rules, other_numbers=None):
     groups = {}
     skipped = []
     for r in rows:
-        parsed = sb_parse_mark(r.get("name"))
+        parsed = sb_parse_mark(r.get("name"), rules)
         blk = sb_block_of(parsed[0], rules) if parsed else None
         if blk is None:
             skipped.append((r["key"], r.get("old"), u"井号不在号段规则里（室内井、雨水井等），不动" if parsed else u"图名里认不出井号，不动"))
@@ -376,7 +403,7 @@ def sb_plan(rows, rules, other_numbers=None):
 def sb_next_number(mark, rules, occupied):
     """新图纸的图号：取这口井所在号段里「已用最大号 + 1」（没有就取号段起点），并记入 occupied（已占用的整数集合）。
     返回 (图号文字, 提示)；提示为空表示正常。井号不在任何号段、或号段满了时，图号接在所有号段之后，并返回提示。"""
-    parsed = sb_parse_mark(mark)
+    parsed = sb_parse_mark(mark, rules)
     blk = sb_block_of(parsed[0], rules) if parsed else None
     last_end = max(b[u"end"] for b in rules[u"blocks"])
     if blk is not None:

@@ -32,6 +32,11 @@ GEN = DB.BuiltInCategory.OST_GenericModel
 CFG_PATH = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
                         'KaifaTools', '井分区配置.json')
 UNASSIGNED = '未分区'
+FILTER_PREFIX = '井分区_'
+SCHED_PREFIX = '井分区明细表_'
+GROUP_NAME = '井分区'
+MARK_PARAM = ''
+DEFAULT_PARAM = '分区'
 PALETTE = [(230, 57, 70), (42, 157, 143), (69, 123, 157), (244, 162, 97), (131, 56, 236),
            (6, 214, 160), (255, 190, 11), (251, 86, 7), (58, 134, 255), (141, 153, 174)]
 BAD_CHARS = set('{}[]|;<>?`~\\:"')
@@ -41,16 +46,63 @@ BAD_CHARS = set('{}[]|;<>?`~\\:"')
 # 配置（颜色、上次用的参数）
 # ============================================================
 
+def default_cfg():
+    return {
+        '说明': ('井分区标记的设置。well_category=井所在的类别（Revit 内部类别名，如 OST_GenericModel）；mark_parameter=井号参数名（空=Revit 自带的「标记」，'
+                '只有这个参数有值的才算井）；default_param_name=新建参数时默认的参数名；unassigned_label=窗口里「没有分区」那一行的名字；'
+                'filter_prefix=视图过滤器名字的前缀；schedule_prefix=明细表名字的前缀；param_group_name=新建参数时用的共享参数组名；'
+                'palette=新分区自动取色的调色板（RGB）；colors=每个分区的颜色（程序维护，也可以手改）。'),
+        'well_category': 'OST_GenericModel',
+        'mark_parameter': '',
+        'default_param_name': '分区',
+        'unassigned_label': '未分区',
+        'filter_prefix': '井分区_',
+        'schedule_prefix': '井分区明细表_',
+        'param_group_name': '井分区',
+        'palette': [list(c) for c in PALETTE],
+        'colors': {},
+        'param': '',
+    }
+
+
 def load_cfg():
+    """读设置文件并补全缺的项；文件不存在就写出一份默认的（方便你直接打开改）。"""
+    c = default_cfg()
+    existed = os.path.isfile(CFG_PATH)
     try:
         with io.open(CFG_PATH, 'r', encoding='utf-8') as f:
-            c = json.load(f)
-        if isinstance(c, dict):
-            c.setdefault('colors', {})
-            return c
+            u = json.load(f)
+        if isinstance(u, dict):
+            for k, v in u.items():
+                if k != '说明':
+                    c[k] = v
     except Exception:
         pass
-    return {'colors': {}, 'param': ''}
+    if not isinstance(c.get('colors'), dict):
+        c['colors'] = {}
+    if not existed:
+        save_cfg(c)
+    return c
+
+
+def apply_cfg(c):
+    """把设置应用到脚本里的名称、类别、调色板。某项写错就沿用默认。"""
+    global GEN, UNASSIGNED, PALETTE, FILTER_PREFIX, SCHED_PREFIX, GROUP_NAME, MARK_PARAM, DEFAULT_PARAM
+    cat = getattr(DB.BuiltInCategory, str(c.get('well_category') or ''), None)
+    if cat is not None:
+        GEN = cat
+    MARK_PARAM = (c.get('mark_parameter') or '').strip()
+    UNASSIGNED = c.get('unassigned_label') or UNASSIGNED
+    FILTER_PREFIX = c.get('filter_prefix') or FILTER_PREFIX
+    SCHED_PREFIX = c.get('schedule_prefix') or SCHED_PREFIX
+    GROUP_NAME = c.get('param_group_name') or GROUP_NAME
+    DEFAULT_PARAM = c.get('default_param_name') or DEFAULT_PARAM
+    try:
+        pal = [tuple(int(x) for x in p3[:3]) for p3 in c.get('palette') or []]
+        if pal:
+            PALETTE = pal
+    except Exception:
+        pass
 
 
 def save_cfg(c):
@@ -134,9 +186,9 @@ def create_param(name):
     tmp = os.path.join(tempfile.gettempdir(), 'thl_well_zone_sp.txt')
     guid = str(uuid.uuid4())
     text = ('# This is a Revit shared parameter file.\n# Do not edit manually.\n'
-            '*META\tVERSION\tMINVERSION\nMETA\t2\t1\n*GROUP\tID\tNAME\nGROUP\t1\t井分区\n'
+            '*META\tVERSION\tMINVERSION\nMETA\t2\t1\n*GROUP\tID\tNAME\nGROUP\t1\t{}\n'
             '*PARAM\tGUID\tNAME\tDATATYPE\tDATACATEGORY\tGROUP\tVISIBLE\tDESCRIPTION\tUSERMODIFIABLE\tHIDEWHENNOVALUE\n'
-            'PARAM\t{}\t{}\tTEXT\t\t1\t1\t\t1\t0\n').format(guid, name)
+            'PARAM\t{}\t{}\tTEXT\t\t1\t1\t\t1\t0\n').format(GROUP_NAME, guid, name)
     with io.open(tmp, 'w', encoding='utf-16', newline='\n') as f:       # 共享参数文件必须 UTF-16 + LF
         f.write(text)
     t = DB.Transaction(doc, '新建分区参数')
@@ -144,7 +196,7 @@ def create_param(name):
     try:
         app.SharedParametersFilename = tmp
         sp = app.OpenSharedParameterFile()
-        d = sp.Groups.get_Item('井分区').Definitions.get_Item(name)
+        d = sp.Groups.get_Item(GROUP_NAME).Definitions.get_Item(name)
         cats = app.Create.NewCategorySet()
         cats.Insert(doc.Settings.Categories.get_Item(GEN))
         doc.ParameterBindings.Insert(d, app.Create.NewInstanceBinding(cats), DB.GroupTypeId.Data)
@@ -166,10 +218,19 @@ def create_param(name):
 
 def _mark(e):
     try:
-        p = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+        p = e.LookupParameter(MARK_PARAM) if MARK_PARAM else e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
         return (p.AsString() or '').strip() if p else ''
     except Exception:
         return ''
+
+
+def mark_pid():
+    """井号参数的 ElementId：设置里没指定就是 Revit 自带的「标记」。"""
+    if MARK_PARAM:
+        pid = param_id(MARK_PARAM)
+        if pid is not None:
+            return pid
+    return DB.ElementId(DB.BuiltInParameter.ALL_MODEL_MARK)
 
 
 def all_wells():
@@ -240,7 +301,7 @@ def _safe_name(s):
 
 
 def filter_name(pname, value):
-    return '井分区_{}_{}'.format(_safe_name(pname), _safe_name(value or UNASSIGNED))
+    return '{}{}_{}'.format(FILTER_PREFIX, _safe_name(pname), _safe_name(value or UNASSIGNED))
 
 
 def existing_filters():
@@ -253,7 +314,7 @@ def ensure_filter(pname, value, flts):
     if nm in flts:
         return flts[nm]
     pid = param_id(pname)
-    mark_id = DB.ElementId(DB.BuiltInParameter.ALL_MODEL_MARK)
+    mark_id = mark_pid()
     has_mark = DB.ElementParameterFilter(DB.ParameterFilterRuleFactory.CreateHasValueParameterRule(mark_id))
     if value:
         rule_f = DB.ElementParameterFilter(DB.ParameterFilterRuleFactory.CreateEqualsRule(pid, value))
@@ -339,7 +400,7 @@ def apply_view(pname, zones, cfg, only=None):
 # ============================================================
 
 def make_schedule(pname):
-    sch_name = '井分区明细表_{}'.format(_safe_name(pname))
+    sch_name = '{}{}'.format(SCHED_PREFIX, _safe_name(pname))
     names = set(v.Name for v in DB.FilteredElementCollector(doc).OfClass(DB.ViewSchedule).ToElements())
     nm, k = sch_name, 1
     while nm in names:
@@ -352,13 +413,13 @@ def make_schedule(pname):
         sch.Name = nm
         d = sch.Definition
         want_zone = param_id(pname)
-        mark_pid = DB.ElementId(DB.BuiltInParameter.ALL_MODEL_MARK)
+        mark_pid_ = mark_pid()
         fam_pid = DB.ElementId(DB.BuiltInParameter.ELEM_FAMILY_AND_TYPE_PARAM)
         pick = {}
         for sf in d.GetSchedulableFields():
             try:
                 pid = sf.ParameterId
-                if pid == mark_pid and 'mark' not in pick:
+                if pid == mark_pid_ and 'mark' not in pick:
                     pick['mark'] = sf
                 elif pid == fam_pid and 'fam' not in pick:
                     pick['fam'] = sf
@@ -458,6 +519,8 @@ def main_dialog(st):
     f.Controls.Add(cb_par)
     b_new = WF.Button(); b_new.Text = '新建参数…'; b_new.Location = SD.Point(326, 34); b_new.Size = SD.Size(110, 28)
     f.Controls.Add(b_new)
+    b_cfg = WF.Button(); b_cfg.Text = '设置…'; b_cfg.Location = SD.Point(442, 34); b_cfg.Size = SD.Size(62, 28)
+    f.Controls.Add(b_cfg)
 
     lab('分区名（要写入这批井的值）', 16, 72, bold=True)
     cb_val = WF.ComboBox(); cb_val.DropDownStyle = WF.ComboBoxStyle.DropDown
@@ -534,7 +597,7 @@ def main_dialog(st):
             refresh()
 
     def on_new(s, e):
-        nm = ask_text('新建分区参数', '参数名（如：分区、施工批次）', '分区')
+        nm = ask_text('新建分区参数', '参数名（如：分区、施工批次）', DEFAULT_PARAM)
         if not nm:
             return
         if not valid_name(nm):
@@ -603,7 +666,7 @@ def main_dialog(st):
             zones[it.Tag] = bool(it.Checked)
         msg = apply_view(st['param'], zones, cfg)
         save_cfg(cfg)
-        info.Text = msg or '已在当前视图按分区着色（视图过滤器，名称以「井分区_」开头；删掉这些过滤器即可还原）。'
+        info.Text = msg or '已在当前视图按分区着色（视图过滤器，名称以「' + FILTER_PREFIX + '」开头；删掉这些过滤器即可还原）。'
 
     def on_sch(s, e):
         if not st['param']:
@@ -613,6 +676,14 @@ def main_dialog(st):
 
     cb_par.SelectedIndexChanged += on_par
     b_new.Click += on_new
+    def on_cfg(s, e):
+        try:
+            save_cfg(cfg)
+            System.Diagnostics.Process.Start('notepad.exe', CFG_PATH)
+            info.Text = '已打开设置文件。改完保存，关闭本窗口后重新打开插件生效。'
+        except Exception as ex:
+            info.Text = '打不开设置文件：{}'.format(ex)
+    b_cfg.Click += on_cfg
     b_pick.Click += on_pick
     lv.ItemChecked += on_check
     b_color.Click += on_color
@@ -650,7 +721,9 @@ def pick_and_write(st):
 
 def main():
     try:
-        st = {'cfg': load_cfg(), 'param': '', 'value': '', 'show': {}}
+        _cfg = load_cfg()
+        apply_cfg(_cfg)
+        st = {'cfg': _cfg, 'param': '', 'value': '', 'show': {}}
         note = ''
         guard = 0
         while guard < 200:
