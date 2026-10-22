@@ -483,7 +483,27 @@ def make_plan(rules):
     plan = sb_plan(rows, rules, other)
     plan['rows'] = dict((r['key'], r) for r in rows)
     plan['other'] = other
+    plan['blocked'] = _check_ownership(plan)
     return plan
+
+
+def _check_ownership(plan):
+    """协同（工作共享）模型里，要改号的图纸若被别人占用，整批改号会半路失败。返回 True = 有人占用，不能应用；
+    同时在 plan['warnings'] 里写明是谁占着哪几张。"""
+    if not doc.IsWorkshared:
+        return False
+    owned = {}
+    for ch in plan['changes']:
+        sh = plan['rows'][ch[0]]['sheet']
+        try:
+            if DB.WorksharingUtils.GetCheckoutStatus(doc, sh.Id) == DB.CheckoutStatus.OwnedByOtherUser:
+                who = DB.WorksharingUtils.GetWorksharingTooltipInfo(doc, sh.Id).Owner
+                owned.setdefault(who, []).append(ch[4])
+        except Exception:
+            continue
+    for who, marks in owned.items():
+        plan['warnings'].append('{} 占用着 {} 张要改号的图纸（如 {}），现在不能重编。请让对方同步并释放后再来。'.format(who, len(marks), marks[0]))
+    return bool(owned)
 
 
 def export_map(plan):
@@ -780,14 +800,16 @@ def show_dialog(rules, plan):
     lab('\n'.join(lines), 16, 32, 728, 96)
 
     n_chg, n_same, n_skip = len(plan['changes']), len(plan['same']), len(plan['skipped'])
-    lab('井大样图纸 {} 张：图号要改 {} 张，本来就对 {} 张；不在号段规则里不动 {} 张。'.format(n_chg + n_same, n_chg, n_same, n_skip),
-        16, 134, 728)
+    import re as _re_
+    n_suffix = len([1 for c in plan['changes'] if _re_.search(r'\s\(\d+\)\s*$', c[1] or '')])
+    lab('井大样图纸 {} 张：图号要改 {} 张（其中 {} 张带「(1)」后缀，是撞号造成的，重编后会消失），本来就对 {} 张；不在号段规则里不动 {} 张。'.format(n_chg + n_same, n_chg, n_suffix, n_same, n_skip),
+        16, 134, 728, 34)
     warn = '\n'.join(plan['warnings']) if plan['warnings'] else ''
     if plan['skipped']:
         over = [s for s in plan['skipped'] if '用完' in s[2]]
         if over:
             warn += ('\n' if warn else '') + '有 {} 张放不下（号段用完），不会被改号。'.format(len(over))
-    w = lab(warn, 16, 156, 728, 44)
+    w = lab(warn, 16, 170, 728, 32)
     w.ForeColor = SD.Color.FromArgb(190, 60, 20)
 
     lv = WF.ListView()
@@ -822,7 +844,7 @@ def show_dialog(rules, plan):
     b_apply.Text = '应用重编'
     b_apply.Location = SD.Point(16, 564)
     b_apply.Size = SD.Size(110, 30)
-    b_apply.Enabled = n_chg > 0
+    b_apply.Enabled = n_chg > 0 and not plan.get('blocked')
     b_exp = WF.Button()
     b_exp.Text = '只导出对照表'
     b_exp.Location = SD.Point(136, 564)
