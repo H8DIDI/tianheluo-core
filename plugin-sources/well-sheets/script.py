@@ -312,6 +312,20 @@ def _sb_regex(rules):
     return r
 
 
+def sb_save(cfg):
+    """把号段规则写回设置文件（图形化设置窗口用）。"""
+    d = _sb_os.path.dirname(SB_FILE)
+    if not _sb_os.path.isdir(d):
+        _sb_os.makedirs(d)
+    out = dict(cfg)
+    out.setdefault(u"说明", SB_DEFAULTS[u"说明"])
+    txt = _sb_json.dumps(out, ensure_ascii=False, indent=1)
+    if not isinstance(txt, type(u"")):
+        txt = txt.decode("utf-8")
+    with _sb_io.open(SB_FILE, "w", encoding="utf-8") as f:
+        f.write(txt)
+
+
 def sb_parse_mark(text, rules=None):
     """从图名/井号里取井号，返回 (前缀, 数字, 后缀或0, 井号原文)；取不到返回 None。取最后一个匹配（图名里井号在后面）。
     井号前面紧挨着 not_drawn_markers 里的文字（默认「室内-」）时，前缀变成「文字+前缀」，不属于任何号段。"""

@@ -25,6 +25,8 @@ from pyrevit import revit, forms
 import System.Windows.Forms as WF
 import System.Drawing as SD
 
+# @include _shared/settings_ui.py
+
 doc = revit.doc
 uidoc = revit.uidoc
 TITLE = '井分区标记'
@@ -39,6 +41,7 @@ MARK_PARAM = ''
 DEFAULT_PARAM = '分区'
 PALETTE = [(230, 57, 70), (42, 157, 143), (69, 123, 157), (244, 162, 97), (131, 56, 236),
            (6, 214, 160), (255, 190, 11), (251, 86, 7), (58, 134, 255), (141, 153, 174)]
+FACTORY_PALETTE = list(PALETTE)
 BAD_CHARS = set('{}[]|;<>?`~\\:"')
 
 
@@ -59,7 +62,7 @@ def default_cfg():
         'filter_prefix': '井分区_',
         'schedule_prefix': '井分区明细表_',
         'param_group_name': '井分区',
-        'palette': [list(c) for c in PALETTE],
+        'palette': [list(c) for c in FACTORY_PALETTE],
         'colors': {},
         'param': '',
     }
@@ -117,6 +120,30 @@ def save_cfg(c):
             f.write(txt)
     except Exception:
         pass
+
+
+_CAT_CHOICES = [('OST_GenericModel', '常规模型'), ('OST_StructuralFraming', '结构框架'), ('OST_ElectricalEquipment', '电气设备'),
+                ('OST_MechanicalEquipment', '机械设备'), ('OST_PipeFitting', '管件'), ('OST_Conduit', '线管')]
+
+
+def zone_fields():
+    return [
+        {'kind': 'header', 'label': '什么算「井」'},
+        {'key': 'well_category', 'label': '井所在的类别', 'kind': 'combo', 'choices': _CAT_CHOICES,
+         'hint': '可以直接填 Revit 内部类别名，如 OST_GenericModel。'},
+        {'key': 'mark_parameter', 'label': '井号参数名', 'kind': 'text',
+         'hint': '留空 = Revit 自带的「标记」。只有这个参数有值的构件才算井。'},
+        {'kind': 'header', 'label': '名称'},
+        {'key': 'default_param_name', 'label': '新建参数时默认的参数名', 'kind': 'text', 'required': True},
+        {'key': 'unassigned_label', 'label': '「没有分区」那一行的名字', 'kind': 'text', 'required': True},
+        {'key': 'filter_prefix', 'label': '视图过滤器名称前缀', 'kind': 'text', 'required': True,
+         'hint': '每个分区在当前视图里建一个过滤器，名字以此开头。要还原视图，删掉这些过滤器。'},
+        {'key': 'schedule_prefix', 'label': '明细表名称前缀', 'kind': 'text', 'required': True},
+        {'key': 'param_group_name', 'label': '新建参数用的共享参数组名', 'kind': 'text', 'required': True},
+        {'kind': 'header', 'label': '颜色'},
+        {'key': 'palette', 'label': '新分区自动取色的调色板', 'kind': 'palette',
+         'hint': '每个颜色写 R,G,B（0–255），多个颜色用分号隔开，如 230,57,70; 42,157,143。已有分区的颜色不受影响。'},
+    ]
 
 
 def color_of(cfg, pname, value):
@@ -677,12 +704,21 @@ def main_dialog(st):
     cb_par.SelectedIndexChanged += on_par
     b_new.Click += on_new
     def on_cfg(s, e):
-        try:
-            save_cfg(cfg)
-            System.Diagnostics.Process.Start('notepad.exe', CFG_PATH)
-            info.Text = '已打开设置文件。改完保存，关闭本窗口后重新打开插件生效。'
-        except Exception as ex:
-            info.Text = '打不开设置文件：{}'.format(ex)
+        keys = [f_['key'] for f_ in zone_fields() if f_.get('key')]
+        defs = default_cfg()
+        res = su_fields_dialog('井分区标记 设置',
+                               '改完点保存立即生效。「恢复默认」只改窗口里的值，点保存才生效。',
+                               zone_fields(), dict((k, cfg.get(k)) for k in keys), dict((k, defs[k]) for k in keys),
+                               extra_buttons=[('用记事本打开文件', lambda: (save_cfg(cfg), su_open_file(CFG_PATH)))])
+        if res is None:
+            return
+        cfg.update(res)
+        save_cfg(cfg)
+        apply_cfg(cfg)
+        wells[:] = all_wells()
+        params[:] = list_params()
+        refresh()
+        info.Text = '设置已保存并生效。' + info.Text
     b_cfg.Click += on_cfg
     b_pick.Click += on_pick
     lv.ItemChecked += on_check

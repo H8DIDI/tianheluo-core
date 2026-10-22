@@ -12,6 +12,7 @@ from pyrevit import revit, DB, UI, forms
 
 # 图纸名前缀来自项目配置（文档\KaifaTools\井大样配置.json），默认「井大样_」
 # @include _shared/well_config.py
+# @include _shared/settings_ui.py
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]
 import io
@@ -1630,6 +1631,88 @@ def _apply_settings():
     return SETTINGS_FILE
 
 
+_FACTORY = _settings_defaults()       # 出厂默认值（在读设置文件之前取，供「恢复默认」用）
+
+_VIEW_CHOICES = [('WH', '宽和高都标'), ('W', '只标宽'), ('H', '只标高'), ('', '不标总尺寸')]
+_CAT_CHOICES = [('OST_GenericModel', '常规模型'), ('OST_StructuralFraming', '结构框架'), ('OST_ElectricalEquipment', '电气设备'),
+                ('OST_MechanicalEquipment', '机械设备'), ('OST_PipeFitting', '管件'), ('OST_Conduit', '线管')]
+
+
+def _settings_fields():
+    f = [
+        {'kind': 'header', 'label': '尺寸线的位置（长度单位 mm）'},
+        {'key': 'dim_margin_mm', 'label': '总尺寸线离井墙的最小距离', 'kind': 'num', 'min': 0, 'max': 5000,
+         'hint': '没有排管链的一侧，总尺寸线离井墙多远。'},
+        {'key': 'chain_offset_mm', 'label': '第一道排管链离井墙', 'kind': 'num', 'min': 0, 'max': 5000,
+         'hint': '井内壁到排管的尺寸链，第一道放在离井墙多远的地方。'},
+        {'key': 'chain_step_mm', 'label': '相邻两道尺寸链的间距', 'kind': 'num', 'min': 50, 'max': 5000,
+         'hint': '同一侧有多道链时，每道往外排的间距。要大于一行尺寸文字的高度。'},
+        {'key': 'total_gap_mm', 'label': '总尺寸线离最外一道链的净距', 'kind': 'num', 'min': 0, 'max': 5000,
+         'hint': '该侧有排管链时，总尺寸线放在最外一道链外面多远。'},
+        {'key': 'crop_text_mm', 'label': '尺寸离注释裁剪框边的最小距离', 'kind': 'num', 'min': 0, 'max': 2000,
+         'hint': '只在视图的「注释裁剪」开启时用，超出的尺寸照常标，只在报告里列出。'},
+        {'kind': 'header', 'label': '排管怎么算接入这口井（mm）'},
+        {'key': 'protrude_mm', 'label': '排管伸出井墙多少以内仍然标', 'kind': 'num', 'min': 0, 'max': 3000,
+         'hint': '排管截面稍伸出井墙也算这口井的，照常标尺寸链。'},
+        {'key': 'reach_tol_mm', 'label': '排管端头离井墙多远以内算接入', 'kind': 'num', 'min': 0, 'max': 3000,
+         'hint': '排管端面离井内壁差几厘米，也算接到这口井。'},
+        {'kind': 'header', 'label': '识别井墙'},
+        {'key': 'wall_area_min_m2', 'label': '算作井墙的最小面面积 (m²)', 'kind': 'num', 'min': 0, 'max': 100,
+         'hint': '小于这个面积的碎面、倒角不当作井墙。'},
+        {'key': 'span_ratio', 'label': '长构件判定倍数', 'kind': 'num', 'min': 1, 'max': 20,
+         'hint': '构件在视图里的尺寸超过视图框的这个倍数，当作横穿的长构件剔除。'},
+        {'kind': 'header', 'label': '各视图标哪条总尺寸'},
+    ]
+    for name in ('平面', '南', '北', '西', '东'):
+        f.append({'key': 'total_rules.' + name, 'label': name + ' 视图', 'kind': 'choice', 'choices': _VIEW_CHOICES})
+    f += [
+        {'kind': 'header', 'label': '名称和类别（换项目时可能要改）'},
+        {'key': 'dim_type_name', 'label': '排管链用的尺寸类型名', 'kind': 'text',
+         'hint': '找不到这个类型时用项目默认的尺寸类型。'},
+        {'key': 'well_category', 'label': '井所在的类别', 'kind': 'combo', 'choices': _CAT_CHOICES,
+         'hint': '可以直接填 Revit 内部类别名，如 OST_GenericModel。'},
+        {'key': 'mark_parameter', 'label': '井号参数名', 'kind': 'text',
+         'hint': '留空 = Revit 自带的「标记」。井号存在别的参数里时填那个参数名。'},
+        {'key': 'bank_category', 'label': '排管所在的类别', 'kind': 'combo', 'choices': _CAT_CHOICES,
+         'hint': '本项目用「结构框架」族承载排管。'},
+    ]
+    return f
+
+
+def _flat_settings(d):
+    out = dict(d)
+    for k, v in (d.get('total_rules') or {}).items():
+        out['total_rules.' + k] = v
+    return out
+
+
+def open_settings():
+    """图形化设置窗口。保存后写回设置文件并立即生效。返回是否保存了。"""
+    _apply_settings()                  # 先读文件，窗口里显示当前值
+    cur = _settings_defaults()
+    res = su_fields_dialog('一键井大样标注 设置',
+                           '这里的数值只影响尺寸放在哪里、哪些排管算这口井的。改完点保存；「恢复默认」只改窗口里的值，点保存才生效。',
+                           _settings_fields(), _flat_settings(cur), _flat_settings(_FACTORY),
+                           extra_buttons=[('用记事本打开文件', lambda: su_open_file(SETTINGS_FILE))])
+    if res is None:
+        return False
+    out = dict(cur)
+    rules = {}
+    for k, v in res.items():
+        if k.startswith('total_rules.'):
+            rules[k.split('.', 1)[1]] = v
+        else:
+            out[k] = v
+    out['total_rules'] = rules
+    txt = json.dumps(out, ensure_ascii=False, indent=1)
+    if not isinstance(txt, type('')):
+        txt = txt.decode('utf-8')
+    with io.open(SETTINGS_FILE, 'w', encoding='utf-8') as fh:
+        fh.write(txt)
+    _apply_settings()
+    return True
+
+
 def main():
     try:
         _apply_settings()
@@ -1699,7 +1782,13 @@ def main():
         scope.append((u'全部井大样图纸（{} 张）'.format(len(all_sheets)), list(all_sheets)))
         scope.append((u'手动勾选图纸…', None))
 
-        pick_ = forms.CommandSwitchWindow.show([t for t, _l in scope], message=u'选择标注范围')
+        set_label = u'⚙ 设置参数…'
+        while True:
+            pick_ = forms.CommandSwitchWindow.show([t for t, _l in scope] + [set_label], message=u'选择标注范围')
+            if pick_ == set_label:
+                open_settings()
+                continue
+            break
         if not pick_:
             return
         sheets = []
