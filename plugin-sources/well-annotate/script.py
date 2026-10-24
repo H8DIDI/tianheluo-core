@@ -810,7 +810,7 @@ def crop_world_range(view):
         return None
 
 
-def collect_target_elems(view, stats=None):
+def collect_target_elems(view, stats=None, relax_span=False):
     """收集视图内应计入包围盒的可见模型构件（排除注释、CAD 底图、管道类、剖面框）。
     只取与裁剪框相交的构件（框外的构件不参与定位，否则会把外包框拉到很远）；
     跨度保险按视图的水平轴、竖向轴判断（不能直接用世界 X/Z，否则东/西立面会误判）。
@@ -858,7 +858,7 @@ def collect_target_elems(view, stats=None):
             if w <= 0 and hh <= 0:
                 _bump(stats, _SKIP_ZERO)
                 continue
-            if crop_h > 0 and crop_v > 0:
+            if crop_h > 0 and crop_v > 0 and not relax_span:
                 if w > crop_h * _SPAN_RATIO or hh > crop_v * _SPAN_RATIO:
                     _bump(stats, _SKIP_SPAN)
                     continue
@@ -2467,6 +2467,10 @@ def main():
                     del _DIM_ERRS[:]
                     _OUT_CROP.clear()
                     elems = _main_well(v, collect_target_elems(v, stats), mark_of_view.get(str(v.Id)))
+                    if not elems:
+                        # 井族的包围盒比裁剪框大太多（如斜排管把井体撑大）时会被当成「长构件」剔掉，
+                        # 导致整张视图没有构件；这种情况放宽跨度判断再找一次本井
+                        elems = _main_well(v, collect_target_elems(v, None, True), mark_of_view.get(str(v.Id)))
                     if not elems:
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
