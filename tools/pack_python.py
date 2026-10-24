@@ -8,7 +8,7 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"well-sheets": "0.5.9", "well-annotate": "0.3.31", "well-zone": "0.1.3", "well-sheet-no": "0.1.5", "well-sheet-fit": "0.1.0", "pile-cushion": "0.4.0", "pile-cleanup": "0.2.0",
+VERSION_OVERRIDE = {"well-sheets": "0.5.9", "well-annotate": "0.3.31", "well-zone": "0.1.3", "well-sheet-no": "0.1.5", "well-sheet-fit": "0.1.0", "well-spec-table": "0.1.0", "pile-cushion": "0.4.0", "pile-cleanup": "0.2.0",
                     "quantity-export": "0.2.1", "rebar-cage": "0.2.1", "sheet-organize": "0.6.4", "export-dwg": "0.4.5",
                     "export-nwc": "0.2.0", "well-number": "0.2.0", "well-clear-marks": "0.1.1", "elv-merge": "0.2.0",
                     "control-points": "0.1.0", "well-depth-report": "0.1.4"}
@@ -26,6 +26,7 @@ PLUGINS = {
     "井分区标记":         ("well-zone",       "数据处理", "区"),
     "井图号重编":         ("well-sheet-no",   "出图打印", "号"),
     "井图比例排版":       ("well-sheet-fit",  "出图打印", "比"),
+    "井规格表":           ("well-spec-table", "出图打印", "规"),
     "一键清除井标记":     ("well-clear-marks","数据处理", "除"),
     "强电井清洗合并":     ("elv-merge",       "数据处理", "并"),
     "一键框选提量导出Excel": ("quantity-export", "数据处理", "量"),
