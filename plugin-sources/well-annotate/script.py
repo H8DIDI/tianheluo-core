@@ -469,6 +469,7 @@ _DIM_MARGIN = 1.0
 
 # 跨度保险倍数：构件在视图平面上的尺寸超过整个视图框的这个倍数时，判为横穿的长构件并剔除
 _SPAN_RATIO = 2.0
+_TRACE_EXT_FT = 0.3        # 引出线伸出尺寸线之外的长度（英尺）
 
 # 严格轴向判据（法线分量阈值，0.995 约等于偏角 5.7°）；越接近 1 越严格，只取严格平行于轴的面
 _AXIAL_TOL = 0.995
@@ -1298,6 +1299,59 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
     return d
 
 
+def _invisible_style_id():
+    """「<不可见线>」线样式：画引出线用，不在图上显示，但可以当尺寸参照。找不到返回 None（用默认线样式）。"""
+    try:
+        for g in DB.FilteredElementCollector(doc).OfClass(DB.GraphicsStyle):
+            nm = g.Name or ''
+            if nm in ('<不可见线>', '<Invisible lines>') and g.GraphicsStyleType == DB.GraphicsStyleType.Projection:
+                return g
+    except:
+        pass
+    return None
+
+
+def _trace_ref(view, pa, pb, style=None):
+    """在视图里画一条引出线（详图线），返回 (线元素, 线参照)。排管的边在某些视图里 Revit 不认作尺寸参照时，
+    改在排管边缘位置画线，再从线标到井内壁（线是视图自己的图元，参照一定有效）。"""
+    dc = doc.Create.NewDetailCurve(view, DB.Line.CreateBound(_on_plane(view, pa), _on_plane(view, pb)))
+    try:
+        if style is not None:
+            dc.LineStyle = style
+    except:
+        pass
+    return dc, dc.GeometryCurve.Reference
+
+
+def _trace_chain(view, wall_lo, wall_hi, a_lo, a_hi, mk_line, p1, p2, ledger, style):
+    """用两条引出线做排管链：井内壁 → 引出线 → 引出线 → 井内壁。mk_line(坐标) 返回该坐标处引出线的两端点。
+    失败时把画出的线删掉。返回 0/1。"""
+    made = []
+    try:
+        refs = [wall_lo[1]]
+        last = wall_lo[0]
+        for c in (a_lo, a_hi):
+            if c - last < _GAP_MIN_FT or wall_hi[0] - c < _GAP_MIN_FT:
+                continue
+            pa, pb = mk_line(c)
+            dc, r = _trace_ref(view, pa, pb, style)
+            made.append(dc)
+            refs.append(r)
+            last = c
+        refs.append(wall_hi[1])
+        if len(refs) < 3:
+            for dc in made:
+                _drop_dim(view, dc)
+            return 0
+        if _try_dim(view, refs, p1, p2, ledger, dim_type=True):
+            return 1
+    except:
+        pass
+    for dc in made:
+        _drop_dim(view, dc)
+    return 0
+
+
 def _chain_dim(view, refs, p1, p2, ledger):
     """排管链：一条多段尺寸。返回生成数 0/1。"""
     return 1 if _try_dim(view, refs, p1, p2, ledger, dim_type=True) else 0
@@ -1328,11 +1382,14 @@ def _bb_span(bb, axis):
 
 
 def _collect_edges(bank, run, m, third, axis_dir=None):
-    """排管所有与 third 轴平行的短直边：[(沿走向坐标, 沿测量轴坐标, 引用), ...]。"""
+    """排管所有与 third 轴平行的短直边：[(沿走向坐标, 沿测量轴坐标, 引用, 沿中心线投影, 方向键), ...]。
+    axis_dir 给出时（斜排管）：端面是斜的，边既不一定平行于 third 轴，改取「垂直于测量轴 m、且落在垂直于中心线的端面内」的直边，
+    这类边仍是线性尺寸的有效参照（垂直于尺寸方向）。"""
     opt = DB.Options()
     opt.ComputeReferences = True
     opt.DetailLevel = DB.ViewDetailLevel.Fine
     cand = []
+    mvec = _unit(m, 1)
 
     def _walk(ge, tr):
         for obj in ge:
@@ -1349,8 +1406,18 @@ def _collect_edges(bank, run, m, third, axis_dir=None):
                         p0 = tr.OfPoint(c.GetEndPoint(0))
                         p1 = tr.OfPoint(c.GetEndPoint(1))
                         ln = p0.DistanceTo(p1)
-                        if ln <= 0.01 or abs(_coord(p1, third) - _coord(p0, third)) / ln < 0.99:
+                        if ln <= 0.01:
                             continue
+                        dv = (p1 - p0).Normalize()
+                        if axis_dir is None:
+                            if abs(_coord(p1, third) - _coord(p0, third)) / ln < 0.99:
+                                continue
+                            dkey = None
+                        else:
+                            if abs(dv.DotProduct(mvec)) > 0.02 or abs(dv.DotProduct(axis_dir)) > 0.2:
+                                continue
+                            sg = 1.0 if (dv.X > 1e-6 or (abs(dv.X) <= 1e-6 and (dv.Y > 1e-6 or (abs(dv.Y) <= 1e-6 and dv.Z > 0)))) else -1.0
+                            dkey = (round(dv.X * sg, 1), round(dv.Y * sg, 1), round(dv.Z * sg, 1))
                         rc = (_coord(p0, run) + _coord(p1, run)) / 2.0
                         mv = (_coord(p0, m) + _coord(p1, m)) / 2.0
                         if axis_dir is not None:
@@ -1358,7 +1425,7 @@ def _collect_edges(bank, run, m, third, axis_dir=None):
                             sv = mid.DotProduct(axis_dir)
                         else:
                             sv = rc
-                        cand.append((rc, mv, e.Reference, sv))
+                        cand.append((rc, mv, e.Reference, sv, dkey))
                     except:
                         continue
 
@@ -1413,16 +1480,29 @@ def _end_edges(bank, run, m, near):
         u, p0, p1 = axis
         end = p0 if abs(_coord(p0, run) - near) <= abs(_coord(p1, run) - near) else p1
         s_end = end.DotProduct(u)
-        cand = [(abs(c[3] - s_end), c[1], c[2]) for c in cand]
+        near_c = [(c[1], c[2], c[4]) for c in cand if abs(c[3] - s_end) <= 0.15]
+        # 端面上可能有几组不同方向的边：按方向分组，取在测量轴上跨度最大的一组（上下两条边必须互相平行）
+        groups = {}
+        for c in near_c:
+            groups.setdefault(c[2], []).append(c)
+        best = None
+        for g in groups.values():
+            lo_ = min(g, key=lambda c: c[0])
+            hi_ = max(g, key=lambda c: c[0])
+            if best is None or hi_[0] - lo_[0] > best[1][0] - best[0][0]:
+                best = (lo_, hi_)
+        if best is None:
+            return None
+        lo, hi = best
     else:
-        cand = [(abs(c[0] - near), c[1], c[2]) for c in cand]
-    best = min(c[0] for c in cand)
-    near_c = [c for c in cand if c[0] <= best + 0.15]
-    lo = min(near_c, key=lambda c: c[1])
-    hi = max(near_c, key=lambda c: c[1])
-    if hi[1] - lo[1] < 0.01:
+        dist = [(abs(c[0] - near), c[1], c[2]) for c in cand]
+        nearest = min(c[0] for c in dist)
+        near_c = [(c[1], c[2]) for c in dist if c[0] <= nearest + 0.15]
+        lo = min(near_c, key=lambda c: c[0])
+        hi = max(near_c, key=lambda c: c[0])
+    if hi[0] - lo[0] < 0.01:
         return None
-    return lo[1], lo[2], hi[1], hi[2]
+    return lo[0], lo[1], hi[0], hi[1]
 
 
 def _bb_mid(bb, axis):
@@ -1743,6 +1823,17 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                 he = _end_edges(bank, run, h, (d0 + d1) / 2.0 if run == d else (wL if abs(_bb_mid(bb, run) - wL) < abs(_bb_mid(bb, run) - wR) else wR))
             if want_v and run != v:
                 ve = _end_edges(bank, run, v, (d0 + d1) / 2.0 if run == d else (wL if abs(_bb_mid(bb, run) - wL) < abs(_bb_mid(bb, run) - wR) else wR))
+            # 备用参照：排管的轴向侧面。端面边在某些视图里 Revit 不认（斜排管的边不垂直于视图），建尺寸失败时改用侧面
+            h_alt = v_alt = None
+            try:
+                _haf = hf if len(hf) >= 2 else _axial_all(bank)[h]
+                if len(_haf) >= 2:
+                    h_alt = (_haf[0][0], _haf[0][1]['ref'], _haf[-1][0], _haf[-1][1]['ref'])
+                _vaf = vf if len(vf) >= 2 else _axial_all(bank)[v]
+                if len(_vaf) >= 2:
+                    v_alt = (_vaf[0][0], _vaf[0][1]['ref'], _vaf[-1][0], _vaf[-1][1]['ref'])
+            except:
+                h_alt = v_alt = None
             if he:
                 hb_lo, hb_lo_r, hb_hi, hb_hi_r = he
             elif len(hf) >= 2 or len(_axial_all(bank)[h]) >= 2:
@@ -1775,10 +1866,12 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                 if vb_lo is None:
                     vb_lo, vb_hi = _rng_of((bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), v)
             # 水平链：截面水平宽在井内壁之间，且竖向范围与井相交
-            ok_h = (want_h and hb_lo >= wL - _PROTRUDE_FT and hb_hi <= wR + _PROTRUDE_FT
+            # 斜着进井的排管，端面角点会伸到井壁外较远，放宽伸出量
+            prot = 1.5 if _is_oblique(_bank_axis(bank)) else _PROTRUDE_FT
+            ok_h = (want_h and hb_lo >= wL - prot and hb_hi <= wR + prot
                     and vb_lo < wT + _REACH_TOL_FT and vb_hi > wB - _REACH_TOL_FT)
             # 竖向链：截面竖向范围在井内壁之间，且水平范围与井相交
-            ok_v = (want_v and vb_lo >= wB - _PROTRUDE_FT and vb_hi <= wT + _PROTRUDE_FT
+            ok_v = (want_v and vb_lo >= wB - prot and vb_hi <= wT + prot
                     and hb_lo < wR + _REACH_TOL_FT and hb_hi > wL - _REACH_TOL_FT)
             if not (ok_h or ok_v) or not _overlap(bb, (box[0] - 0.3, box[1] + 0.3, box[2] - 0.3, box[3] + 0.3, box[4] - 0.3, box[5] + 0.3)):
                 _bump(stats, _SKIP_BANK_OUT)
@@ -1799,7 +1892,19 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                     refs = _chain_refs((wL, wl['ref']), (wR, wr['ref']),
                                        [(hb_lo, hb_lo_r), (hb_hi, hb_hi_r)])
                     if len(refs) >= 3:
-                        n_ch += _chain_dim(view, refs, PT(wL, vs), PT(wR, vs), ledger)
+                        got = _chain_dim(view, refs, PT(wL, vs), PT(wR, vs), ledger)
+                        if not got and he and h_alt:
+                            refs = _chain_refs((wL, wl['ref']), (wR, wr['ref']), [(h_alt[0], h_alt[1]), (h_alt[2], h_alt[3])])
+                            if len(refs) >= 3:
+                                got = _chain_dim(view, refs, PT(wL, vs), PT(wR, vs), ledger)
+                        if not got:
+                            # 最后手段：在排管边缘画引出线，从线标到井内壁
+                            _wy = wB if side == 'B' else wT
+                            _ye = vs - _TRACE_EXT_FT if side == 'B' else vs + _TRACE_EXT_FT
+                            got = _trace_chain(view, (wL, wl['ref']), (wR, wr['ref']), hb_lo, hb_hi,
+                                               lambda c, _wy=_wy, _ye=_ye: (PT(c, _wy), PT(c, _ye)),
+                                               PT(wL, vs), PT(wR, vs), ledger, _invisible_style_id())
+                        n_ch += got
             if ok_v:
                 side = _pick_side(hb_lo, hb_hi, wL, wR, h_mid, 'L', 'R', _bb_mid(bb, h))
                 if side is None:
@@ -1815,7 +1920,18 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                     refs = _chain_refs((wB, wb['ref']), (wT, wt['ref']),
                                        [(vb_lo, vb_lo_r), (vb_hi, vb_hi_r)])
                     if len(refs) >= 3:
-                        n_ch += _chain_dim(view, refs, PT(hs, wB), PT(hs, wT), ledger)
+                        got = _chain_dim(view, refs, PT(hs, wB), PT(hs, wT), ledger)
+                        if not got and ve and v_alt:
+                            refs = _chain_refs((wB, wb['ref']), (wT, wt['ref']), [(v_alt[0], v_alt[1]), (v_alt[2], v_alt[3])])
+                            if len(refs) >= 3:
+                                got = _chain_dim(view, refs, PT(hs, wB), PT(hs, wT), ledger)
+                        if not got:
+                            _wx = wL if side == 'L' else wR
+                            _xe = hs - _TRACE_EXT_FT if side == 'L' else hs + _TRACE_EXT_FT
+                            got = _trace_chain(view, (wB, wb['ref']), (wT, wt['ref']), vb_lo, vb_hi,
+                                               lambda c, _wx=_wx, _xe=_xe: (PT(_wx, c), PT(_xe, c)),
+                                               PT(hs, wB), PT(hs, wT), ledger, _invisible_style_id())
+                        n_ch += got
             if n_ch:
                 made += n_ch
                 _bump(stats, _ST_BANK_OK)
