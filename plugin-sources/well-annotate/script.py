@@ -605,6 +605,7 @@ _SKIP_WALL_FB = '没有识别到井内壁（用了外壁）'
 _SKIP_BANK_OUT = '排管不在井内（未标注）'
 _SKIP_BANK_DIR = '排管方向不水平/不垂直（未标注）'
 _SKIP_BANK_THROUGH = '排管穿过井（两侧都伸出井外，未标注）'
+_SKIP_BANK_PASS = '排管不止于本井（从旁边或穿井而过、别的系统或电缆沟，未标注）'
 _SKIP_BANK_ERR = '排管处理异常（未标注）'
 _SKIP_HIDDEN = '不可见'
 _SKIP_NOBB = '没有包围盒'
@@ -615,6 +616,7 @@ _SKIP_ERR = '读取异常'
 _REPORT_SKIPS = [
     (_SKIP_WALL_FB, '面'),
     (_SKIP_BANK_OUT, '根'),
+    (_SKIP_BANK_PASS, '根'),
     (_SKIP_BANK_DIR, '根'),
     (_SKIP_BANK_THROUGH, '根'),
     (_SKIP_BANK_ERR, '根'),
@@ -1459,6 +1461,20 @@ def _is_oblique(axis):
     return max(abs(u.X), abs(u.Y), abs(u.Z)) < 0.999
 
 
+def _bank_ends_at_well(bank, box, tol_ft=1.0):
+    """排管是否「止于这口井」：中心线恰有一个端点落在井的外包框（外扩 tol_ft）里。
+    两个端点都在框外（排管从井旁边或穿井而过、是别的井的管、或是电缆沟等）不标；取不到中心线的照常标。"""
+    axis = _bank_axis(bank)
+    if axis is None or box is None:
+        return True
+    ins = 0
+    for p in (axis[1], axis[2]):
+        if (box[0] - tol_ft <= p.X <= box[1] + tol_ft and box[2] - tol_ft <= p.Y <= box[3] + tol_ft
+                and box[4] - tol_ft <= p.Z <= box[5] + tol_ft):
+            ins += 1
+    return ins >= 1
+
+
 def _end_edges(bank, run, m, near):
     """排管靠近井的那一端的端面短边（与排管走向垂直、且垂直于测量轴 m 的直边）。
     标准图用的就是这类线性参照：有坡度的排管也稳定，重新生成后不会失效。
@@ -1796,6 +1812,9 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
             bb = bank.get_BoundingBox(None)
             if bb is None:
                 _bump(stats, _SKIP_BANK_DIR)
+                continue
+            if not _bank_ends_at_well(bank, box):
+                _bump(stats, _SKIP_BANK_PASS)
                 continue
             dh = _bb_span(bb, h)
             dv = _bb_span(bb, v)
