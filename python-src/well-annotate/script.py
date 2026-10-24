@@ -893,7 +893,7 @@ def _bb_span(bb, axis):
     return abs(hi - lo)
 
 
-def _collect_edges(bank, run, m, third):
+def _collect_edges(bank, run, m, third, axis_dir=None):
     """排管所有与 third 轴平行的短直边：[(沿走向坐标, 沿测量轴坐标, 引用), ...]。"""
     opt = DB.Options()
     opt.ComputeReferences = True
@@ -919,7 +919,12 @@ def _collect_edges(bank, run, m, third):
                             continue
                         rc = (_coord(p0, run) + _coord(p1, run)) / 2.0
                         mv = (_coord(p0, m) + _coord(p1, m)) / 2.0
-                        cand.append((rc, mv, e.Reference))
+                        if axis_dir is not None:
+                            mid = DB.XYZ((p0.X + p1.X) / 2.0, (p0.Y + p1.Y) / 2.0, (p0.Z + p1.Z) / 2.0)
+                            sv = mid.DotProduct(axis_dir)
+                        else:
+                            sv = rc
+                        cand.append((rc, mv, e.Reference, sv))
                     except:
                         continue
 
@@ -930,20 +935,53 @@ def _collect_edges(bank, run, m, third):
     return cand
 
 
+def _bank_axis(bank):
+    """排管中心线（直线）：返回 (单位方向, 端点0, 端点1)；取不到或不是直线返回 None。"""
+    try:
+        c = bank.Location.Curve
+        if not isinstance(c, DB.Line):
+            return None
+        p0, p1 = c.GetEndPoint(0), c.GetEndPoint(1)
+        d = p1 - p0
+        if d.GetLength() < 1e-6:
+            return None
+        return d.Normalize(), p0, p1
+    except:
+        return None
+
+
+def _is_oblique(axis):
+    """排管走向既不平行于世界轴、也不是水平/垂直（带坡度或斜着走）。"""
+    if axis is None:
+        return False
+    u = axis[0]
+    return max(abs(u.X), abs(u.Y), abs(u.Z)) < 0.999
+
+
 def _end_edges(bank, run, m, near):
     """排管靠近井的那一端的端面短边（与排管走向垂直、且垂直于测量轴 m 的直边）。
     标准图用的就是这类线性参照：有坡度的排管也稳定，重新生成后不会失效。
-    返回 (小侧值, 小侧引用, 大侧值, 大侧引用)，找不到返回 None。run 为排管走向轴，near 为靠近的坐标。"""
+    返回 (小侧值, 小侧引用, 大侧值, 大侧引用)，找不到返回 None。run 为排管走向轴，near 为靠近的坐标。
+    排管带坡度或斜着走时，端面是斜的（上下边的走向坐标不同），改用沿排管中心线方向的投影判断哪些边在同一端面上。"""
     third = [a for a in ('X', 'Y', 'Z') if a not in (run, m)][0]
-    ekey = (str(bank.Id), run, m)
+    axis = _bank_axis(bank)
+    obl = _is_oblique(axis)
+    ekey = (str(bank.Id), run, m, obl)
     if ekey in _EDGE_CACHE:
         cand = _EDGE_CACHE[ekey]
     else:
-        cand = _collect_edges(bank, run, m, third)
+        cand = _collect_edges(bank, run, m, third, axis[0] if obl else None)
         _EDGE_CACHE[ekey] = cand
     if not cand or len(cand) < 2:
         return None
-    cand = [(abs(c[0] - near), c[1], c[2]) for c in cand]
+    if obl:
+        # 靠近井的那一端：中心线两个端点里，走向坐标离 near 更近的一个
+        u, p0, p1 = axis
+        end = p0 if abs(_coord(p0, run) - near) <= abs(_coord(p1, run) - near) else p1
+        s_end = end.DotProduct(u)
+        cand = [(abs(c[3] - s_end), c[1], c[2]) for c in cand]
+    else:
+        cand = [(abs(c[0] - near), c[1], c[2]) for c in cand]
     best = min(c[0] for c in cand)
     near_c = [c for c in cand if c[0] <= best + 0.15]
     lo = min(near_c, key=lambda c: c[1])

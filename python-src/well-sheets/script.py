@@ -680,7 +680,7 @@ def _scan_existing_sheets(doc):
         for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
             try:
                 _nm = _s.Name or ""
-                # 图名以「井大样_」开头，或图名按模板改过（如 BTP-IF1 TELcon-T-001 Detail Drawing）
+                # 图名以「井大样_」开头，或图名按模板改过（如 BTP-IF1 Telco-T-001 Detail Drawing）
                 # 但图上视图名带 AG-井号-xxxx 的，都算井大样图（否则重新生成时旧图删不掉，会重复）
                 _is_prefix = _nm.startswith(WS_PREFIX)
                 _suffix = _nm[len(WS_PREFIX):] if _is_prefix else None
@@ -1405,7 +1405,7 @@ def main():
 
                     rand_suffix = System.Guid.NewGuid().ToString()[:4]
 
-                    # 图名：按配置里的图名模板（如 BTP-IF1 TELcon-T-001 Detail Drawing）；没有模板沿用「井大样_」前缀
+                    # 图名：按配置里的图名模板（如 BTP-IF1 Telco-T-001 Detail Drawing）；没有模板沿用「井大样_」前缀
                     sheet.Name = wcfg_sheet_name(base_name, WCFG) or (WS_PREFIX + base_name)
                     # 图号：接着现有的最大数字图号往后排（0001、0002…），不再用 AG-井号-随机码
                     # 旧图号不能在删除旧图的同一事务里立即给新图（Revit 会报「图纸编号已在使用中」）：

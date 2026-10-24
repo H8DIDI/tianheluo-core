@@ -69,7 +69,7 @@ WCFG_DEFAULTS = {
         u"B": u"BTP-IF1 11Kv-{井号} Detail Drawing",
         u"E": u"BTP-IF1 ELV-{井号} Detail Drawing",
         u"L": u"BTP-IF1 Lv-{井号} Detail Drawing",
-        u"T": u"BTP-IF1 TELcon-{井号} Detail Drawing",
+        u"T": u"BTP-IF1 Telco-{井号} Detail Drawing",
     },
     u"logo": {u"enabled": True, u"file": u"frame_logo.jpg", u"x0": 736.54, u"y0": 141.10, u"w": 91.49,
               u"说明": u"导出 DWG 后补插的图框 logo：x0/y0 = logo 左下角在 Layout1 里的坐标，w = 宽度（按 A1 横向图框标定）。换图框要改；enabled=false 不补 logo。"},

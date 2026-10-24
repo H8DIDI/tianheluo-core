@@ -691,7 +691,7 @@ def edit_rules(rules):
 
     lab('试一试', 14, 478, 150, bold=True)
     t_try = WF.TextBox()
-    t_try.Text = 'BTP-IF1 TELcon-T-022 Detail Drawing'
+    t_try.Text = 'BTP-IF1 Telco-T-022 Detail Drawing'
     t_try.Location = SD.Point(14, 502)
     t_try.Size = SD.Size(520, 24)
     f.Controls.Add(t_try)
