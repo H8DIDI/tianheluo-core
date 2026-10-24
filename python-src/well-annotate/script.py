@@ -906,6 +906,9 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
     return d
 
 
+_TRACE_CREATED = []     # 本次新画的引出线（旋转井标注结束后清掉没被任何尺寸用到的）
+
+
 def _invisible_style_id():
     """「<不可见线>」线样式：画引出线用，不在图上显示，但可以当尺寸参照。找不到返回 None（用默认线样式）。"""
     try:
@@ -922,9 +925,14 @@ def _trace_ref(view, pa, pb, style=None):
     """在视图里画一条引出线（详图线），返回 (线元素, 线参照)。排管的边在某些视图里 Revit 不认作尺寸参照时，
     改在排管边缘位置画线，再从线标到井内壁（线是视图自己的图元，参照一定有效）。"""
     dc = doc.Create.NewDetailCurve(view, DB.Line.CreateBound(_on_plane(view, pa), _on_plane(view, pb)))
+    _TRACE_CREATED.append(dc.Id)
     try:
         if style is not None:
             dc.LineStyle = style
+    except:
+        pass
+    try:
+        doc.Regenerate()          # 新画的线先重生成，取到的参照才稳定有效（否则提交时可能报「参照无效」）
     except:
         pass
     return dc, dc.GeometryCurve.Reference
@@ -1573,6 +1581,409 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
         for _ in fb_sides:
             _bump(stats, _SKIP_WALL_FB)
     return made, None
+
+
+# ============================================================
+# 旋转井：井体转了一个不是 90° 倍数的角度（如 TELCO 井旋转 171°），墙面与视图轴不平行
+# 平面：沿井自己的两个方向标「对齐尺寸」（井内壁净尺寸）；排管用接触点处画的引出线定位
+# 立面：竖向用水平面（不受旋转影响），水平方向用井内腔的投影位置画引出线定位
+# ============================================================
+
+
+def _rot_info(elems):
+    """识别旋转井的局部坐标：返回 dict，找不到返回 None。
+    a、b 为井自己的两个水平方向（单位向量，b = a 逆时针转 90°）；u = p·a、w = p·b 是局部坐标。
+    uL/uR（沿 a 的两侧内壁）、wB/wT（沿 b 的两侧内壁）、zB/zT（底、顶内表面）各带面引用；
+    uo0/uo1、wo0/wo1 为外壁坐标，zo0/zo1 为外底/外顶。"""
+    import math
+    faces = []
+    for e in elems:
+        try:
+            for f in _extract_faces(e):
+                a_ = f.get('area')
+                if a_ is None or a_ < _WALL_AREA_MIN_FT2:
+                    continue
+                faces.append(f)
+        except:
+            continue
+    hs = [f for f in faces if abs(f['norm'].Z) < 0.05]
+    if len(hs) < 4:
+        return None
+    sx = sy = 0.0
+    for f in hs:
+        th = math.atan2(f['norm'].Y, f['norm'].X)
+        sx += f['area'] * math.cos(4 * th)
+        sy += f['area'] * math.sin(4 * th)
+    th = math.atan2(sy, sx) / 4.0
+    a = DB.XYZ(math.cos(th), math.sin(th), 0.0)
+    b = DB.XYZ(-math.sin(th), math.cos(th), 0.0)
+    fam_a = []     # (u, 朝向符号, 面)
+    fam_b = []
+    zs = []
+    for f in faces:
+        n = f['norm']
+        o = f['orig']
+        if abs(n.Z) >= 0.95:
+            zs.append((o.Z, 1.0 if n.Z > 0 else -1.0, f))
+        elif abs(n.Z) < 0.05:
+            ua = n.DotProduct(a)
+            ub = n.DotProduct(b)
+            if abs(ua) >= 0.98:
+                fam_a.append((o.DotProduct(a), 1.0 if ua > 0 else -1.0, f))
+            elif abs(ub) >= 0.98:
+                fam_b.append((o.DotProduct(b), 1.0 if ub > 0 else -1.0, f))
+    if len(fam_a) < 2 or len(fam_b) < 2 or len(zs) < 2:
+        return None
+
+    def _inner(items):
+        lo = min(c for c, _s, _f in items)
+        hi = max(c for c, _s, _f in items)
+        third = (hi - lo) / 3.0
+        near_lo = [t for t in items if t[1] > 0 and t[0] <= lo + third]   # 朝 +方向的面 = 低侧内壁
+        near_hi = [t for t in items if t[1] < 0 and t[0] >= hi - third]
+        if not near_lo or not near_hi:
+            return None
+        l = max(near_lo, key=lambda t: t[0])
+        r = min(near_hi, key=lambda t: t[0])
+        return l, r, lo, hi
+
+    ia = _inner(fam_a)
+    ib = _inner(fam_b)
+    iz = _inner(zs)
+    if ia is None or ib is None or iz is None:
+        return None
+    return {
+        'a': a, 'b': b, 'theta': th,
+        'uL': ia[0][0], 'uL_f': ia[0][2], 'uR': ia[1][0], 'uR_f': ia[1][2], 'uo0': ia[2], 'uo1': ia[3],
+        'wB': ib[0][0], 'wB_f': ib[0][2], 'wT': ib[1][0], 'wT_f': ib[1][2], 'wo0': ib[2], 'wo1': ib[3],
+        'zB': iz[0][0], 'zB_f': iz[0][2], 'zT': iz[1][0], 'zT_f': iz[1][2], 'zo0': iz[2], 'zo1': iz[3],
+    }
+
+
+def _rot_pt(info, u, w, z):
+    """井局部坐标 (u, w, z) → 世界点。"""
+    a = info['a']
+    b = info['b']
+    return DB.XYZ(a.X * u + b.X * w, a.Y * u + b.Y * w, z)
+
+
+def _bank_contacts(bank, info):
+    """排管在井口的两个「接触点」：排管两侧面与端面平面的交点（水平投影，世界 XY）。
+    返回 (端点, 单位方向, [P1, P2])；取不到返回 None。端点取中心线落在井内腔范围里（外扩 1 ft）的那一端。"""
+    axis = _bank_axis(bank)
+    if axis is None:
+        return None
+    u, p0, p1 = axis
+    uh = DB.XYZ(u.X, u.Y, 0.0)
+    ln = uh.GetLength()
+    if ln < 1e-6:
+        return None
+    uh = uh.Normalize()
+    a = info['a']
+    b = info['b']
+
+    def _in(p):
+        uu = p.DotProduct(a)
+        ww = p.DotProduct(b)
+        return (info['uo0'] - 1.0 <= uu <= info['uo1'] + 1.0 and info['wo0'] - 1.0 <= ww <= info['wo1'] + 1.0
+                and info['zo0'] - 1.0 <= p.Z <= info['zo1'] + 1.0)
+    ins = [p for p in (p0, p1) if _in(p)]
+    if not ins:
+        return None
+    if len(ins) == 2:
+        # 两端都在：取离井中心更近的……保守起见取靠近井壁的一端（离中心远的）
+        cu = (info['uL'] + info['uR']) / 2.0
+        cw = (info['wB'] + info['wT']) / 2.0
+        ins.sort(key=lambda p: -((p.DotProduct(a) - cu) ** 2 + (p.DotProduct(b) - cw) ** 2))
+    e = ins[0]
+    # 侧面：法线水平、垂直于排管方向的平面，取沿法线方向两个最外的坐标
+    nrm = DB.XYZ(-uh.Y, uh.X, 0.0)
+    cs = []
+    try:
+        for f in _extract_faces(bank):
+            n = f['norm']
+            if abs(n.Z) > 0.2:
+                continue
+            if abs(n.DotProduct(nrm)) < 0.98:
+                continue
+            cs.append(f['orig'].DotProduct(nrm))
+    except:
+        cs = []
+    if len(cs) < 2:
+        return None
+    c1, c2 = min(cs), max(cs)
+    if c2 - c1 < 0.05:
+        return None
+    # 端面平面：uh·p = uh·e；两侧面：nrm·p = c
+    d0 = uh.DotProduct(e)
+    pts = []
+    for c in (c1, c2):
+        pts.append(DB.XYZ(uh.X * d0 + nrm.X * c, uh.Y * d0 + nrm.Y * c, e.Z))
+    return e, uh, pts
+
+
+def _rot_z_extent(bank, e):
+    """排管在接触端的竖向范围：返回 (低, 低引用, 高, 高引用)；取不到返回 None。"""
+    try:
+        z = _axial_all(bank, _DIM_AXIAL_TOL)['Z']
+        if len(z) >= 2:
+            return z[0][0], z[0][1]['ref'], z[-1][0], z[-1][1]['ref']
+    except:
+        pass
+    try:
+        r = _end_edges(bank, 'X' if abs(e.X) >= abs(e.Y) else 'Y', 'Z', e.X if abs(e.X) >= abs(e.Y) else e.Y)
+        if r:
+            return r
+    except:
+        pass
+    return None
+
+
+def make_rotated_dims(view, elems, ledger=None, stats=None):
+    """旋转井的标注，返回 (生成数, 原因)。结束后删掉没被任何尺寸用到的引出线。"""
+    del _TRACE_CREATED[:]
+    try:
+        return _make_rotated_dims(view, elems, ledger, stats)
+    finally:
+        _prune_unused_traces(view)
+
+
+def _prune_unused_traces(view):
+    """删除本次新画、但没有被任何尺寸引用的引出线（尺寸因「已有」或失败没生成时，线就是多余的）。"""
+    try:
+        if not _TRACE_CREATED:
+            return
+        used = set()
+        for dm in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension).ToElements():
+            try:
+                for r in dm.References:
+                    used.add(int(r.ElementId.Value))
+            except:
+                continue
+        for cid in list(_TRACE_CREATED):
+            try:
+                if int(cid.Value) not in used:
+                    doc.Delete(cid)
+            except:
+                pass
+    finally:
+        del _TRACE_CREATED[:]
+
+
+def _make_rotated_dims(view, elems, ledger=None, stats=None):
+    info = _rot_info(elems)
+    if info is None:
+        return 0, '旋转井的内壁无法识别'
+    fr = _frame(view)
+    plan = fr['plan']
+    a = info['a']
+    b = info['b']
+    style = _invisible_style_id()
+    made = 0
+    zmid = (info['zB'] + info['zT']) / 2.0
+    rng = crop_world_range(view)
+    box_all = union_box(view, elems)
+    banks = _find_banks(rng, fr, stats) if rng else []
+    live = []
+    for bk in banks:
+        if not _bank_ends_at_well(bk, box_all):
+            _bump(stats, _SKIP_BANK_PASS)
+            continue
+        c = _bank_contacts(bk, info)
+        if c is None:
+            _bump(stats, _SKIP_BANK_DIR)
+            continue
+        live.append((bk, c))
+    reach = {'L': 0.0, 'R': 0.0, 'B': 0.0, 'T': 0.0}    # 各侧最外一道链线离外壁的距离
+    lines_cache = {}
+
+    def _tline(key, pa, pb):
+        """按键缓存的引出线参照。"""
+        if key in lines_cache:
+            return lines_cache[key]
+        try:
+            _dc, r = _trace_ref(view, pa, pb, style)
+        except:
+            r = None
+        lines_cache[key] = r
+        return r
+
+    if plan:
+        uL, uR, wB, wT = info['uL'], info['uR'], info['wB'], info['wT']
+        uo0, uo1, wo0, wo1 = info['uo0'], info['uo1'], info['wo0'], info['wo1']
+        cnt = {'L': 0, 'R': 0, 'B': 0, 'T': 0}
+
+        def _layer(side):
+            k = cnt[side]
+            cnt[side] += 1
+            off = _CHAIN_OFFSET_FT + k * _CHAIN_STEP_FT
+            reach[side] = max(reach[side], off)
+            return off
+
+        for bk, (e, uh, pts) in live:
+            try:
+                qs = [(p.DotProduct(a), p.DotProduct(b)) for p in pts]
+                along_a = abs(uh.DotProduct(a)) >= abs(uh.DotProduct(b))
+                eu, ew = e.DotProduct(a), e.DotProduct(b)
+                if along_a:
+                    # 排管沿 a 进井：测它在 b 方向的位置，链放在 a 的低/高侧
+                    side = 'L' if abs(eu - uL) <= abs(eu - uR) else 'R'
+                    off = _layer(side)
+                    ub = (uo0 - off) if side == 'L' else (uo1 + off)
+                    refs = [info['wB_f']['ref']]
+                    ws = sorted(q[1] for q in qs)
+                    keep = [w_ for w_ in ws if wB + _GAP_MIN_FT < w_ < wT - _GAP_MIN_FT]
+                    for w_ in keep:
+                        # 引出线沿 a 方向（垂直于测量方向 b），从井外壁画到链线之外 0.3 ft
+                        r = _tline(('w', round(w_, 3), side),
+                                   _rot_pt(info, (uo0 if side == 'L' else uo1), w_, zmid),
+                                   _rot_pt(info, ub - _TRACE_EXT_FT if side == 'L' else ub + _TRACE_EXT_FT, w_, zmid))
+                        if r is None:
+                            raise ValueError('引出线失败')
+                        refs.append(r)
+                    refs.append(info['wT_f']['ref'])
+                    if len(refs) >= 3:
+                        if _try_dim(view, refs, _rot_pt(info, ub, wB, zmid), _rot_pt(info, ub, wT, zmid), ledger, dim_type=True):
+                            made += 1
+                else:
+                    side = 'B' if abs(ew - wB) <= abs(ew - wT) else 'T'
+                    off = _layer(side)
+                    wb = (wo0 - off) if side == 'B' else (wo1 + off)
+                    refs = [info['uL_f']['ref']]
+                    us = sorted(q[0] for q in qs)
+                    keep = [u_ for u_ in us if uL + _GAP_MIN_FT < u_ < uR - _GAP_MIN_FT]
+                    for u_ in keep:
+                        r = _tline(('u', round(u_, 3), side),
+                                   _rot_pt(info, u_, (wo0 if side == 'B' else wo1), zmid),
+                                   _rot_pt(info, u_, wb - _TRACE_EXT_FT if side == 'B' else wb + _TRACE_EXT_FT, zmid))
+                        if r is None:
+                            raise ValueError('引出线失败')
+                        refs.append(r)
+                    refs.append(info['uR_f']['ref'])
+                    if len(refs) >= 3:
+                        if _try_dim(view, refs, _rot_pt(info, uL, wb, zmid), _rot_pt(info, uR, wb, zmid), ledger, dim_type=True):
+                            made += 1
+            except:
+                _bump(stats, _SKIP_BANK_ERR)
+                continue
+        # 总尺寸：沿 a 的宽（下方）、沿 b 的高（左侧），放在最外一道链线之外
+        try:
+            gB = max(_DIM_MARGIN, reach['B'] + _TOTAL_GAP_FT)
+            if _try_dim(view, [info['uL_f']['ref'], info['uR_f']['ref']],
+                        _rot_pt(info, uL, wo0 - gB, zmid), _rot_pt(info, uR, wo0 - gB, zmid), ledger, dim_type=True):
+                made += 1
+            gL = max(_DIM_MARGIN, reach['L'] + _TOTAL_GAP_FT)
+            if _try_dim(view, [info['wB_f']['ref'], info['wT_f']['ref']],
+                        _rot_pt(info, uo0 - gL, wB, zmid), _rot_pt(info, uo0 - gL, wT, zmid), ledger, dim_type=True):
+                made += 1
+        except:
+            _bump(stats, _SKIP_BANK_ERR)
+        if made:
+            _bump(stats, _ST_BANK_OK, len(live))
+        return made, (None if made else '未生成尺寸')
+
+    # ---------- 立面 ----------
+    h, d = fr['h'], fr['d']
+
+    def _hv(p):
+        return _coord(p, h)
+
+    # 井内腔四个内角的水平投影，取最左/最右
+    corners = [_rot_pt(info, u_, w_, zmid) for u_ in (info['uL'], info['uR']) for w_ in (info['wB'], info['wT'])]
+    hl = min(_hv(p) for p in corners)
+    hr = max(_hv(p) for p in corners)
+    outer = [_rot_pt(info, u_, w_, zmid) for u_ in (info['uo0'], info['uo1']) for w_ in (info['wo0'], info['wo1'])]
+    hol = min(_hv(p) for p in outer)
+    hor = max(_hv(p) for p in outer)
+    dmid = sum(_coord(p, d) for p in corners) / 4.0
+    zB, zT = info['zB'], info['zT']
+    zo0 = info['zo0']
+    hmid = (hl + hr) / 2.0
+    cntv = {'L': 0, 'R': 0, 'B': 0, 'T': 0}
+
+    def _layer2(side):
+        k = cntv[side]
+        cntv[side] += 1
+        off = _CHAIN_OFFSET_FT + k * _CHAIN_STEP_FT
+        reach[side] = max(reach[side], off)
+        return off
+
+    def PT(hv, vv):
+        return _mk(fr, hv, vv, dmid)
+
+    def _vline(hv):
+        return _tline(('h', round(hv, 3)), PT(hv, zB - 0.2), PT(hv, zT + 0.2))
+
+    # 竖向链：排管接触端的上下边到井内底/内顶
+    dvec = _unit(d, 1)
+    for bk, (e, uh, pts) in live:
+        try:
+            zx = _rot_z_extent(bk, e)
+            if zx is None:
+                _bump(stats, _SKIP_BANK_DIR)
+                continue
+            lo, lo_r, hi, hi_r = zx
+            eh = _hv(e)
+            side = 'L' if eh < hmid else 'R'
+            off = _layer2(side)
+            hs = (hol - off) if side == 'L' else (hor + off)
+            refs = [info['zB_f']['ref']]
+            if lo > zB + _GAP_MIN_FT:
+                refs.append(lo_r)
+            if hi < zT - _GAP_MIN_FT:
+                refs.append(hi_r)
+            refs.append(info['zT_f']['ref'])
+            n0 = made
+            if len(refs) >= 3:
+                dup0 = ledger.dup if ledger is not None else 0
+                if _try_dim(view, refs, PT(hs, zB), PT(hs, zT), ledger, dim_type=True):
+                    made += 1
+                elif not (ledger is not None and ledger.dup > dup0):
+                    # 排管的面做参照被 Revit 拒绝（带坡度的排管常见）：在排管上下边的高度画水平引出线再标
+                    wall_h = hol if side == 'L' else hor
+                    ext = hs - _TRACE_EXT_FT if side == 'L' else hs + _TRACE_EXT_FT
+                    refs3 = [info['zB_f']['ref']]
+                    for zc in (lo, hi):
+                        if zB + _GAP_MIN_FT < zc < zT - _GAP_MIN_FT:
+                            r3 = _tline(('z', round(zc, 3), side), PT(wall_h, zc), PT(ext, zc))
+                            if r3 is not None:
+                                refs3.append(r3)
+                    refs3.append(info['zT_f']['ref'])
+                    if len(refs3) >= 3 and _try_dim(view, refs3, PT(hs, zB), PT(hs, zT), ledger, dim_type=True):
+                        made += 1
+            # 水平链：排管正对视线（走向有较大的视线分量）时，量它在水平方向的位置
+            if abs(uh.DotProduct(dvec)) >= 0.5:
+                hs_ = sorted(_hv(p) for p in pts)
+                keep = [x for x in hs_ if hl + _GAP_MIN_FT < x < hr - _GAP_MIN_FT]
+                sideh = 'B' if (lo + hi) / 2.0 < (zB + zT) / 2.0 else 'T'
+                offh = _layer2(sideh)
+                vs = (zo0 - offh) if sideh == 'B' else (info['zo1'] + offh)
+                refs2 = [_vline(hl)]
+                for x in keep:
+                    refs2.append(_vline(x))
+                refs2.append(_vline(hr))
+                if len(refs2) >= 3:
+                    if _try_dim(view, refs2, PT(hl, vs), PT(hr, vs), ledger, dim_type=True):
+                        made += 1
+            if made > n0:
+                _bump(stats, _ST_BANK_OK)
+        except:
+            _bump(stats, _SKIP_BANK_ERR)
+            continue
+    # 总尺寸（按视图名规则）：宽在下方、高在左侧
+    try:
+        rule = _total_rule(view)
+        if 'W' in rule:
+            g = max(_DIM_MARGIN, reach['B'] + _TOTAL_GAP_FT)
+            if _try_dim(view, [_vline(hl), _vline(hr)], PT(hl, zo0 - g), PT(hr, zo0 - g), ledger, dim_type=True):
+                made += 1
+        if 'H' in rule:
+            g = max(_DIM_MARGIN, reach['L'] + _TOTAL_GAP_FT)
+            if _try_dim(view, [info['zB_f']['ref'], info['zT_f']['ref']], PT(hol - g, zB), PT(hol - g, zT), ledger, dim_type=True):
+                made += 1
+    except:
+        _bump(stats, _SKIP_BANK_ERR)
+    return made, (None if made else '未生成尺寸')
 
 
 # ============================================================
@@ -2257,7 +2668,23 @@ def main():
                         notes.append(('{}（无可用构件）'.format(v.Name), 0))
                         continue
                     if not _axes_ok(elems, _frame(v)):
-                        notes.append(('{}（井体旋转、墙面不与视图轴平行，暂不标）'.format(v.Name), 0))
+                        # 井体旋转（墙面不与视图轴平行）：走旋转井的标注
+                        rres = {'n': 0, 'why': None}
+                        rled = _fresh_ledger(v)
+
+                        def _rot(v=v, elems=elems, rres=rres, rled=rled):
+                            rres['n'], rres['why'] = make_rotated_dims(v, elems, rled, stats)
+                        if not _step("旋转井标注", _rot):
+                            failed_steps.append('{}：旋转井标注（Revit 判定参照失效）'.format(v.Name))
+                            continue
+                        _bump(stats, _ST_DUP, rled.dup)
+                        dim_errs.extend(_DIM_ERRS)
+                        made += rres['n']
+                        if rres['n']:
+                            ok_views += 1
+                            notes.append(('{}（旋转井）'.format(v.Name), rres['n']))
+                        else:
+                            notes.append(('{}（旋转井：{}）'.format(v.Name, rres['why'] or '未生成尺寸'), 0))
                         continue
                     # 标注框：水平范围用可见墙面（TELCO 族的包围盒比井身大一倍，用包围盒会把内壁认偏），竖向仍用整个井
                     box = _clip_box(union_box(v, elems), crop_world_range(v))
