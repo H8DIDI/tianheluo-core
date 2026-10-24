@@ -595,6 +595,7 @@ class _SpotLedger(object):
 
     def __init__(self):
         self.segs = []
+        self.sigs = set()      # 已有尺寸的「标了哪些构件、沿哪个轴」签名：同一根排管的同方向尺寸不再重复标
         self.dup = 0
 
 
@@ -651,10 +652,42 @@ def _existing_dim_segs(view):
     return segs
 
 
+def _axis_of(vx, vy, vz):
+    """向量最接近的世界轴 'X'/'Y'/'Z'。"""
+    a = (abs(vx), abs(vy), abs(vz))
+    return 'XYZ'[a.index(max(a))]
+
+
+def _dim_sig(refs, vec):
+    """一条尺寸的签名：(参照所属构件 id 集合, 尺寸方向轴)。"""
+    try:
+        return (frozenset(int(r.ElementId.Value) for r in refs), _axis_of(vec[0], vec[1], vec[2]))
+    except:
+        return None
+
+
+def _existing_dim_sigs(view):
+    out = set()
+    try:
+        dims = list(DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension).ToElements())
+    except:
+        return out
+    for dm in dims:
+        try:
+            d = dm.Curve.Direction
+            sg = _dim_sig(list(dm.References), (d.X, d.Y, d.Z))
+            if sg is not None and len(sg[0]) >= 2:
+                out.add(sg)
+        except:
+            continue
+    return out
+
+
 def _fresh_ledger(view):
     """新的同位置判重表，已含视图里原有的尺寸（原有尺寸一律不删、不改）。"""
     led = _SpotLedger()
     led.segs.extend(_existing_dim_segs(view))
+    led.sigs = _existing_dim_sigs(view)
     return led
 
 
@@ -818,6 +851,10 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
     if ledger is not None and _has_same_line(ledger, p1, p2):
         ledger.dup += 1
         return None
+    sig = _dim_sig(refs, (p2.X - p1.X, p2.Y - p1.Y, p2.Z - p1.Z)) if ledger is not None else None
+    if sig is not None and len(sig[0]) >= 2 and sig in ledger.sigs:
+        ledger.dup += 1          # 视图里已经有标这根排管（同方向）的尺寸，只是位置不同：不再叠标
+        return None
     # 超出注释裁剪框的尺寸照常标注（不改视图、不挡），只记下缺口供报告；需要显示时往外拉或放大裁剪框
     gap = _crop_gap(view, p1, p2) if _annot_crop_on(view) else None
     if gap is not None:
@@ -864,6 +901,8 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
                     return None
     if ledger is not None:
         ledger.segs.append((p1, p2))
+        if sig is not None:
+            ledger.sigs.add(sig)
     return d
 
 
@@ -1476,13 +1515,15 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                         _note_reach(extents, v + '+', off)
                     refs = _chain_refs((wL, wl['ref']), (wR, wr['ref']),
                                        [(hb_lo, hb_lo_r), (hb_hi, hb_hi_r)])
+                    dup0 = ledger.dup if ledger is not None else 0
+                    got = 0
                     if len(refs) >= 3:
                         got = _chain_dim(view, refs, PT(wL, vs), PT(wR, vs), ledger)
-                        if not got and he and h_alt:
+                        if not got and he and h_alt and not (ledger is not None and ledger.dup > dup0):
                             refs = _chain_refs((wL, wl['ref']), (wR, wr['ref']), [(h_alt[0], h_alt[1]), (h_alt[2], h_alt[3])])
                             if len(refs) >= 3:
                                 got = _chain_dim(view, refs, PT(wL, vs), PT(wR, vs), ledger)
-                        if not got:
+                        if not got and not (ledger is not None and ledger.dup > dup0):
                             # 最后手段：在排管边缘画引出线，从线标到井内壁
                             _wy = wB if side == 'B' else wT
                             _ye = vs - _TRACE_EXT_FT if side == 'B' else vs + _TRACE_EXT_FT
@@ -1504,13 +1545,15 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
                         _note_reach(extents, h + '+', off)
                     refs = _chain_refs((wB, wb['ref']), (wT, wt['ref']),
                                        [(vb_lo, vb_lo_r), (vb_hi, vb_hi_r)])
+                    dup0 = ledger.dup if ledger is not None else 0
+                    got = 0
                     if len(refs) >= 3:
                         got = _chain_dim(view, refs, PT(hs, wB), PT(hs, wT), ledger)
-                        if not got and ve and v_alt:
+                        if not got and ve and v_alt and not (ledger is not None and ledger.dup > dup0):
                             refs = _chain_refs((wB, wb['ref']), (wT, wt['ref']), [(v_alt[0], v_alt[1]), (v_alt[2], v_alt[3])])
                             if len(refs) >= 3:
                                 got = _chain_dim(view, refs, PT(hs, wB), PT(hs, wT), ledger)
-                        if not got:
+                        if not got and not (ledger is not None and ledger.dup > dup0):
                             _wx = wL if side == 'L' else wR
                             _xe = hs - _TRACE_EXT_FT if side == 'L' else hs + _TRACE_EXT_FT
                             got = _trace_chain(view, (wB, wb['ref']), (wT, wt['ref']), vb_lo, vb_hi,
