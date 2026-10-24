@@ -58,7 +58,7 @@ _SB_MARK_RE = _sb_re.compile(u"(?<![A-Za-z])([A-Za-z]{1,2})-(\\d+)(?:-(\\d+))?")
 def sb_load():
     """读号段规则；没有文件就写一份默认的。读不懂时用默认值。"""
     try:
-        if not _sb_os.path.isfile(SB_FILE):
+        if (not _sb_os.path.isfile(SB_FILE)) or _sb_os.path.getsize(SB_FILE) == 0:      # 没有文件、或文件是空的（写坏了）：重写一份默认的
             d = _sb_os.path.dirname(SB_FILE)
             if not _sb_os.path.isdir(d):
                 _sb_os.makedirs(d)
