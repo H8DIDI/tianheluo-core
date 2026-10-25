@@ -1340,6 +1340,7 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
     return d
 
 
+_ROT_FORCE_TRACE = [False]   # 旋转井标注第一次失败后重试时置真：竖向链全部改用引出线，不再用排管的面做参照
 _TRACE_CREATED = []     # 本次新画的引出线（旋转井标注结束后清掉没被任何尺寸用到的）
 
 
@@ -2370,9 +2371,15 @@ def _make_rotated_dims(view, elems, ledger=None, stats=None):
             n0 = made
             if len(refs) >= 3:
                 dup0 = ledger.dup if ledger is not None else 0
-                if _try_dim(view, refs, PT(hs, zB), PT(hs, zT), ledger, dim_type=True):
-                    made += 1
-                elif not (ledger is not None and ledger.dup > dup0):
+                # 带一点点坡度的排管，它的「近似水平」面 Revit 创建时认、提交时才判无效（整步回滚）：这种直接用引出线
+                _ax = _bank_axis(bk)
+                _sloped = _ax is not None and abs(_ax[0].Z) > 0.0003
+                first_ok = False
+                if not (_sloped or _ROT_FORCE_TRACE[0]):
+                    first_ok = bool(_try_dim(view, refs, PT(hs, zB), PT(hs, zT), ledger, dim_type=True))
+                    if first_ok:
+                        made += 1
+                if not first_ok and not (ledger is not None and ledger.dup > dup0):
                     # 排管的面做参照被 Revit 拒绝（带坡度的排管常见）：在排管上下边的高度画水平引出线再标
                     wall_h = hol if side == 'L' else hor
                     ext = hs - _TRACE_EXT_FT if side == 'L' else hs + _TRACE_EXT_FT
@@ -3108,8 +3115,18 @@ def main():
 
                         def _rot(v=v, elems=elems, rres=rres, rled=rled):
                             rres['n'], rres['why'] = make_rotated_dims(v, elems, rled, stats)
-                        if not _step("旋转井标注", _rot):
-                            failed_steps.append('{}：旋转井标注（Revit 判定参照失效）'.format(v.Name))
+                        ok_rot = _step("旋转井标注", _rot)
+                        if not ok_rot:
+                            # 提交时 Revit 判某条尺寸的参照无效，整步回滚了：改成全部用引出线再试一次
+                            _ROT_FORCE_TRACE[0] = True
+                            try:
+                                rres['n'], rres['why'] = 0, None
+                                rled = _fresh_ledger(v)
+                                ok_rot = _step("旋转井标注（引出线）", _rot)
+                            finally:
+                                _ROT_FORCE_TRACE[0] = False
+                        if not ok_rot:
+                            failed_steps.append('{}：旋转井标注（Revit 判定参照失效，引出线重试也失败）'.format(v.Name))
                             continue
                         _bump(stats, _ST_DUP, rled.dup)
                         dim_errs.extend(_DIM_ERRS)
@@ -3117,6 +3134,8 @@ def main():
                         if rres['n']:
                             ok_views += 1
                             notes.append(('{}（旋转井）'.format(v.Name), rres['n']))
+                        elif rled.dup:
+                            notes.append(('{}（旋转井：已有尺寸，没有重复标）'.format(v.Name), -1))
                         else:
                             notes.append(('{}（旋转井：{}）'.format(v.Name, rres['why'] or '未生成尺寸'), 0))
                         continue
@@ -3184,6 +3203,8 @@ def main():
                     if n + cn:
                         ok_views += 1
                         notes.append(('{}'.format(v.Name), n + cn))
+                    elif led.dup:
+                        notes.append(('{}（已有尺寸，没有重复标）'.format(v.Name), -1))
                     else:
                         if res['why'] and res['why'] != '视图内无排管（结构框架）':
                             why = res['why']
@@ -3249,6 +3270,9 @@ def main():
                 if m not in uniq_b:
                     uniq_b.append(m)
             msg += '排管处理异常的原因：{}\n'.format('；'.join(uniq_b[:2]))
+        had = [n for n in notes if n[1] < 0]
+        if had:
+            msg += '\n已经有尺寸、没有重复标的视图 {} 个（不是失败）。\n'.format(len(had))
         bad = [n for n in notes if n[1] == 0]
         if bad:
             msg += '\n未生成尺寸的视图 {} 个：\n'.format(len(bad))
