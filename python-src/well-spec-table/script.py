@@ -34,7 +34,7 @@ DEFAULTS = {
             'x_mm/y_mm=表左上角在图纸上的位置（mm，原点在图纸左下角附近）；name_prefix=明细表名字前缀；sheet_filter=只处理图名包含这段文字的图纸（空=全部井大样图纸）；'
             'view_tag=视图名里的井大样标记，用来从视图名取井号；show_title=表上方是否显示明细表标题；rebuild=已有规格表的图纸是否删掉重做（改了字段后用）；'
             'group_param=给每张规格明细表写「分组」用的项目参数名（第一次运行自动新建，绑到「明细表」类别）；folder_name=项目浏览器里文件夹的名字；'
-            'group_by_zone=true 时文件夹名是「文件夹名·分区」（每个分区一个文件夹），false 时全部放进同一个文件夹；zone_field=取分区用的井参数名。'),
+            'col_width_mm=指定列的宽度（mm，写参数名: 宽度，没写的列自动）；group_by_zone=true 时文件夹名是「文件夹名·分区」（每个分区一个文件夹），false 时全部放进同一个文件夹；zone_field=取分区用的井参数名。'),
     'fields': ['族与类型', '标记', '分区', '相对标高的偏移', '井底标高', '井内深度'],
     'key_field': '标记',
     'category': 'OST_GenericModel',
@@ -49,6 +49,7 @@ DEFAULTS = {
     'folder_name': '井规格表',
     'group_by_zone': True,
     'zone_field': '分区',
+    'col_width_mm': {'族与类型': 95.0},
 }
 
 
@@ -293,6 +294,24 @@ def _group_value(cfg, sample):
     return '{}·{}'.format(folder, zone or '未分区')
 
 
+def _apply_widths(vs, cfg):
+    """按设置加宽指定的列（默认「族与类型」95 mm，族名很长，不加宽会被挤成好几行）。已有的规格表重新运行也会调整。"""
+    widths = cfg.get('col_width_mm') or {}
+    if not widths:
+        return
+    try:
+        df = vs.Definition
+        for i in range(df.GetFieldCount()):
+            f = df.GetField(i)
+            w = widths.get(f.GetName())
+            if w:
+                nw = float(w) / FT
+                if abs(f.GridColumnWidth - nw) > 1e-6:
+                    f.GridColumnWidth = nw
+    except Exception:
+        pass
+
+
 def _set_group(vs, cfg, sample):
     """给规格明细表写分组参数（项目浏览器按它成文件夹）。"""
     name = cfg.get('group_param') or ''
@@ -380,6 +399,7 @@ def build_schedule(sheet, mark, cfg, existing, sample=None):
             status = 'rebuilt'
         elif on_sheet:
             _set_group(vs, cfg, sample)
+            _apply_widths(vs, cfg)
             return 'skip', []
         else:
             status = 'placed'
@@ -418,6 +438,7 @@ def build_schedule(sheet, mark, cfg, existing, sample=None):
     pt = DB.XYZ(float(cfg.get('x_mm', 30.0)) / FT, float(cfg.get('y_mm', 565.0)) / FT, 0)
     DB.ScheduleSheetInstance.Create(doc, sheet.Id, vs.Id, pt)
     _set_group(vs, cfg, sample)
+    _apply_widths(vs, cfg)
     return status, missing
 
 
