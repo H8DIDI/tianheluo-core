@@ -266,8 +266,10 @@ CFG_FILE = os.path.join(System.Environment.GetFolderPath(System.Environment.Spec
 DEFAULTS = {
     '说明': ('井规格表的设置。fields=表里要显示的参数名（模型里的实际参数名，顺序就是列顺序）；key_field=用来把表限定到这口井的参数（默认「标记」，值是井号）；'
             'x_mm/y_mm=表左上角在图纸上的位置（mm，原点在图纸左下角附近）；name_prefix=明细表名字前缀；sheet_filter=只处理图名包含这段文字的图纸（空=全部井大样图纸）；'
-            'view_tag=视图名里的井大样标记，用来从视图名取井号；show_title=表上方是否显示明细表标题；rebuild=已有规格表的图纸是否删掉重做（改了字段后用）。'),
-    'fields': ['标记', '分区', '相对标高的偏移', '井盖面标高', '井底标高', '井内深度', '井整体高度'],
+            'view_tag=视图名里的井大样标记，用来从视图名取井号；show_title=表上方是否显示明细表标题；rebuild=已有规格表的图纸是否删掉重做（改了字段后用）；'
+            'group_param=给每张规格明细表写「分组」用的项目参数名（第一次运行自动新建，绑到「明细表」类别）；folder_name=项目浏览器里文件夹的名字；'
+            'group_by_zone=true 时文件夹名是「文件夹名·分区」（每个分区一个文件夹），false 时全部放进同一个文件夹；zone_field=取分区用的井参数名。'),
+    'fields': ['族与类型', '标记', '分区', '相对标高的偏移', '井底标高', '井内深度'],
     'key_field': '标记',
     'category': 'OST_GenericModel',
     'x_mm': 30.0,
@@ -277,6 +279,10 @@ DEFAULTS = {
     'view_tag': '_AG-',
     'show_title': False,
     'rebuild': False,
+    'group_param': '井规格分组',
+    'folder_name': '井规格表',
+    'group_by_zone': True,
+    'zone_field': '分区',
 }
 
 
@@ -331,6 +337,11 @@ def settings_fields():
          'hint': '默认 30：图框左边内侧。'},
         {'key': 'y_mm', 'label': '左上角 Y', 'kind': 'num', 'min': 0, 'max': 3000,
          'hint': '默认 565：图框上边内侧。表向下长。位置和视图重叠时，改这里，或用「井图比例排版」缩小可用区域。'},
+        {'kind': 'header', 'label': '项目浏览器里收纳成文件夹'},
+        {'key': 'folder_name', 'label': '文件夹名字', 'kind': 'text',
+         'hint': '明细表在项目浏览器的「明细表/数量」里按这个名字收进文件夹，点开才展开。需要先在浏览器组织里按「{}」成组（运行结束会提示具体步骤，只做一次）。'.format('井规格分组')},
+        {'key': 'group_by_zone', 'label': '每个分区一个文件夹', 'kind': 'bool', 'bool_text': '分区文件夹（井规格表·B栋北侧 这样）；不勾 = 全部放一个文件夹'},
+        {'key': 'group_param', 'label': '分组用的项目参数名', 'kind': 'text', 'hint': '默认「井规格分组」，第一次运行自动新建。'},
         {'kind': 'header', 'label': '其他'},
         {'key': 'name_prefix', 'label': '明细表名字前缀', 'kind': 'text', 'hint': '明细表叫「前缀 + 井号」，例如 井规格_T-003。'},
         {'key': 'rebuild', 'label': '已有规格表的图纸：删掉重做', 'kind': 'bool', 'bool_text': '重做（改了字段或位置后用；默认跳过）'},
@@ -432,6 +443,121 @@ def placed_instances(sheet):
 
 
 # ============================================================
+# 项目浏览器分组（收纳成文件夹）
+# ============================================================
+
+GROUP_NAME = '天河落'
+
+
+def _param_element_id(name):
+    for p in DB.FilteredElementCollector(doc).OfClass(DB.ParameterElement).ToElements():
+        try:
+            if p.GetDefinition().Name == name:
+                return p.Id
+        except Exception:
+            continue
+    return None
+
+
+def _bound_to_schedules(name):
+    it = doc.ParameterBindings.ForwardIterator()
+    sch = int(DB.BuiltInCategory.OST_Schedules)
+    while it.MoveNext():
+        try:
+            if it.Key.Name != name:
+                continue
+            for c in it.Current.Categories:
+                if int(c.Id.Value) == sch:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_group_param(cfg):
+    """确保有「分组」项目参数（文字，绑到「明细表」类别）。没有就新建（共享参数，写临时共享参数文件，用完还原用户原来的路径）。
+    返回 True 表示本次新建了。"""
+    name = cfg.get('group_param') or ''
+    if not name or _bound_to_schedules(name):
+        return False
+    import tempfile
+    import uuid
+    app = doc.Application
+    old = app.SharedParametersFilename
+    tmp = os.path.join(tempfile.gettempdir(), 'thl_well_spec_sp.txt')
+    guid = str(uuid.uuid4())
+    text = ('# This is a Revit shared parameter file.\n# Do not edit manually.\n'
+            '*META\tVERSION\tMINVERSION\nMETA\t2\t1\n*GROUP\tID\tNAME\nGROUP\t1\t{}\n'
+            '*PARAM\tGUID\tNAME\tDATATYPE\tDATACATEGORY\tGROUP\tVISIBLE\tDESCRIPTION\tUSERMODIFIABLE\tHIDEWHENNOVALUE\n'
+            'PARAM\t{}\t{}\tTEXT\t\t1\t1\t\t1\t0\n').format(GROUP_NAME, guid, name)
+    with io.open(tmp, 'w', encoding='utf-16', newline='\n') as f:       # 共享参数文件必须 UTF-16 + LF
+        f.write(text)
+    t = DB.Transaction(doc, '新建井规格分组参数')
+    t.Start()
+    try:
+        app.SharedParametersFilename = tmp
+        sp = app.OpenSharedParameterFile()
+        d = sp.Groups.get_Item(GROUP_NAME).Definitions.get_Item(name)
+        cats = app.Create.NewCategorySet()
+        cats.Insert(doc.Settings.Categories.get_Item(DB.BuiltInCategory.OST_Schedules))
+        doc.ParameterBindings.Insert(d, app.Create.NewInstanceBinding(cats), DB.GroupTypeId.Data)
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+    finally:
+        try:
+            app.SharedParametersFilename = old
+        except Exception:
+            pass
+    return True
+
+
+def _group_value(cfg, sample):
+    folder = cfg.get('folder_name') or '井规格表'
+    if not cfg.get('group_by_zone'):
+        return folder
+    zone = ''
+    try:
+        p = sample.LookupParameter(cfg.get('zone_field') or '分区') if sample is not None else None
+        zone = (p.AsString() or '').strip() if p is not None else ''
+    except Exception:
+        zone = ''
+    return '{}·{}'.format(folder, zone or '未分区')
+
+
+def _set_group(vs, cfg, sample):
+    """给规格明细表写分组参数（项目浏览器按它成文件夹）。"""
+    name = cfg.get('group_param') or ''
+    if not name:
+        return
+    try:
+        p = vs.LookupParameter(name)
+        if p is not None and not p.IsReadOnly:
+            v = _group_value(cfg, sample)
+            if p.AsString() != v:
+                p.Set(v)
+    except Exception:
+        pass
+
+
+def folder_ready(cfg, vs):
+    """项目浏览器的「明细表/数量」是否已经按分组参数成文件夹（用一张规格表看它被归到了哪个文件夹）。"""
+    try:
+        pid = _param_element_id(cfg.get('group_param') or '')
+        if pid is None or vs is None:
+            return False
+        bo = DB.BrowserOrganization.GetCurrentBrowserOrganizationForSchedules(doc)
+        for f in bo.GetFolderItems(vs.Id):
+            if int(f.ElementId.Value) == int(pid.Value):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# ============================================================
 # 建表
 # ============================================================
 
@@ -480,10 +606,14 @@ def build_schedule(sheet, mark, cfg, existing, sample=None):
         if cfg.get('rebuild'):
             for i in on_sheet:
                 doc.Delete(i.Id)
-            doc.Delete(vs.Id)
+            try:
+                doc.Delete(vs.Id)
+            except Exception:
+                raise ValueError('明细表「{}」正处于打开状态，先关掉它再重做'.format(name))
             vs = None
             status = 'rebuilt'
         elif on_sheet:
+            _set_group(vs, cfg, sample)
             return 'skip', []
         else:
             status = 'placed'
@@ -521,6 +651,7 @@ def build_schedule(sheet, mark, cfg, existing, sample=None):
         existing[name] = vs
     pt = DB.XYZ(float(cfg.get('x_mm', 30.0)) / FT, float(cfg.get('y_mm', 565.0)) / FT, 0)
     DB.ScheduleSheetInstance.Create(doc, sheet.Id, vs.Id, pt)
+    _set_group(vs, cfg, sample)
     return status, missing
 
 
@@ -621,6 +752,12 @@ def main():
         ans = WF.MessageBox.Show(txt, TITLE, WF.MessageBoxButtons.OKCancel, WF.MessageBoxIcon.Question)
         if ans != WF.DialogResult.OK:
             return
+        try:
+            ensure_group_param(cfg)
+        except Exception as ex_g:
+            forms.alert('新建分组参数失败，规格表照做，但不会收进文件夹：\n{}'.format(ex_g), title=TITLE)
+            cfg = dict(cfg)
+            cfg['group_param'] = ''
         pb = forms.ProgressBar(title='正在放井规格表…（点取消可随时停止，已做的保留）', cancellable=True)
 
         def prog(i, n):
@@ -641,6 +778,14 @@ def main():
             msg += '\n模型里没有这些字段（已忽略）：{}。'.format('、'.join(sorted(miss_f)))
         if fails:
             msg += '\n{} 张失败（已还原）：{}'.format(len(fails), '；'.join('{} {}'.format(a, b[:40]) for a, b in fails[:5]))
+        if cfg.get('group_param'):
+            try:
+                any_vs = list(existing_schedules(cfg).values())
+                if any_vs and not folder_ready(cfg, any_vs[0]):
+                    msg += ('\n\n还差一步才会收进文件夹（只做一次）：项目浏览器里右键「明细表/数量」→「浏览器组织」→「新建」→ 起个名字 → '
+                            '「成组条件」选「{}」→ 确定 → 选中刚建的组织 → 确定。之后规格表都按「{}…」收进文件夹，点开才展开。').format(cfg.get('group_param'), cfg.get('folder_name'))
+            except Exception:
+                pass
         msg += '\n不满意可以 Ctrl+Z 撤销。'
         forms.alert(msg, title=TITLE)
     except Exception as ex:
