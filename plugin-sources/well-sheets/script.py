@@ -2199,16 +2199,27 @@ def main():
                     spacing_x = R_SPACING_X
                     spacing_y = R_SPACING_Y
 
-                    DB.Viewport.Create(doc, sheet.Id, view_plan.Id,
-                                       DB.XYZ(tb_center_x, tb_center_y, 0))
-                    DB.Viewport.Create(doc, sheet.Id, view_front.Id,
-                                       DB.XYZ(tb_center_x, tb_center_y - spacing_y, 0))
-                    DB.Viewport.Create(doc, sheet.Id, view_back.Id,
-                                       DB.XYZ(tb_center_x, tb_center_y + spacing_y, 0))
-                    DB.Viewport.Create(doc, sheet.Id, view_left.Id,
-                                       DB.XYZ(tb_center_x - spacing_x, tb_center_y, 0))
-                    DB.Viewport.Create(doc, sheet.Id, view_right.Id,
-                                       DB.XYZ(tb_center_x + spacing_x, tb_center_y, 0))
+                    _vps_new = [
+                        (DB.Viewport.Create(doc, sheet.Id, view_plan.Id, DB.XYZ(tb_center_x, tb_center_y, 0)), view_plan, (tb_center_x, tb_center_y)),
+                        (DB.Viewport.Create(doc, sheet.Id, view_front.Id, DB.XYZ(tb_center_x, tb_center_y - spacing_y, 0)), view_front, (tb_center_x, tb_center_y - spacing_y)),
+                        (DB.Viewport.Create(doc, sheet.Id, view_back.Id, DB.XYZ(tb_center_x, tb_center_y + spacing_y, 0)), view_back, (tb_center_x, tb_center_y + spacing_y)),
+                        (DB.Viewport.Create(doc, sheet.Id, view_left.Id, DB.XYZ(tb_center_x - spacing_x, tb_center_y, 0)), view_left, (tb_center_x - spacing_x, tb_center_y)),
+                        (DB.Viewport.Create(doc, sheet.Id, view_right.Id, DB.XYZ(tb_center_x + spacing_x, tb_center_y, 0)), view_right, (tb_center_x + spacing_x, tb_center_y))]
+                    # Viewport.Create 把「视口外框」的中心放到指定点；视图里有远处的相机图标等注释时，外框被撑得很大，
+                    # 视图本身（裁剪框）就偏到图纸外面去了。所以建完后按「裁剪框中心」重新对准目标点。
+                    try:
+                        doc.Regenerate()
+                        for _vp, _vw, _tg in _vps_new:
+                            _cb = _vw.CropBox
+                            _T = _vp.GetProjectionToSheetTransform()
+                            _sc = float(_vw.Scale)
+                            _ccx = _T.Origin.X + (_cb.Min.X + _cb.Max.X) / 2.0 / _sc
+                            _ccy = _T.Origin.Y + (_cb.Min.Y + _cb.Max.Y) / 2.0 / _sc
+                            if abs(_ccx - _tg[0]) > 0.003 or abs(_ccy - _tg[1]) > 0.003:      # 偏差超过约 1 mm 才挪
+                                _bc = _vp.GetBoxCenter()
+                                _vp.SetBoxCenter(DB.XYZ(_bc.X + (_tg[0] - _ccx), _bc.Y + (_tg[1] - _ccy), 0))
+                    except Exception:
+                        pass
 
                     success_count += 1
                     generated_sheet_ids.append(sheet.Id)

@@ -434,9 +434,66 @@ def solve(boxes, olds, cfg):
 # Revit：读、预览、应用
 # ============================================================
 
-def _box_mm(vp):
+def _crop_rect_mm(vp):
+    """视图裁剪框在图纸上的矩形 [x0, y0, x1, y1]（mm）。视图坐标 / 比例 + 视口变换的平移 = 图纸坐标。"""
+    v = doc.GetElement(vp.ViewId)
+    cb = v.CropBox
+    T = vp.GetProjectionToSheetTransform()
+    sc = float(v.Scale)
+    xs = [T.Origin.X + cb.Min.X / sc, T.Origin.X + cb.Max.X / sc]
+    ys = [T.Origin.Y + cb.Min.Y / sc, T.Origin.Y + cb.Max.Y / sc]
+    return [min(xs) * FT, min(ys) * FT, max(xs) * FT, max(ys) * FT]
+
+
+def _content_rect_mm(vp):
+    """视口里真正有用的内容矩形（mm）= 裁剪框 ∪ 视图里的尺寸、文字、标记。
+    不用 Revit 给的视口外框：视图里若有远处的相机图标之类，外框会被撑到几米，视图被挤出图纸。"""
+    v = doc.GetElement(vp.ViewId)
+    rect = _crop_rect_mm(vp)
+    T = vp.GetProjectionToSheetTransform()
+    sc = float(v.Scale)
+    o = v.Origin
+    r = v.RightDirection
+    u = v.UpDirection
+    for cls in (DB.Dimension, DB.TextNote, DB.IndependentTag):
+        try:
+            col = DB.FilteredElementCollector(doc, v.Id).OfClass(cls).ToElements()
+        except Exception:
+            continue
+        for e in col:
+            try:
+                bb = e.get_BoundingBox(v)
+                if bb is None:
+                    continue
+                for x in (bb.Min.X, bb.Max.X):
+                    for y in (bb.Min.Y, bb.Max.Y):
+                        for z in (bb.Min.Z, bb.Max.Z):
+                            dx, dy, dz = x - o.X, y - o.Y, z - o.Z
+                            vx = dx * r.X + dy * r.Y + dz * r.Z
+                            vy = dx * u.X + dy * u.Y + dz * u.Z
+                            sx = (T.Origin.X + vx / sc) * FT
+                            sy = (T.Origin.Y + vy / sc) * FT
+                            rect = [min(rect[0], sx), min(rect[1], sy), max(rect[2], sx), max(rect[3], sy)]
+            except Exception:
+                continue
+    return rect
+
+
+def _box_info(vp):
+    """返回 (有效框 mm, 偏移 mm)。有效框 = 视口里真正有用的内容（裁剪框 + 尺寸文字标记）；
+    偏移 = 有效框中心 − 视口外框中心，设位置时要减掉它（Revit 的 SetBoxCenter 认的是外框中心）。"""
     ol = vp.GetBoxOutline()
-    return [ol.MinimumPoint.X * FT, ol.MinimumPoint.Y * FT, ol.MaximumPoint.X * FT, ol.MaximumPoint.Y * FT]
+    box = [ol.MinimumPoint.X * FT, ol.MinimumPoint.Y * FT, ol.MaximumPoint.X * FT, ol.MaximumPoint.Y * FT]
+    try:
+        eff = _content_rect_mm(vp)
+    except Exception:
+        eff = box
+    off = ((eff[0] + eff[2]) / 2.0 - (box[0] + box[2]) / 2.0, (eff[1] + eff[3]) / 2.0 - (box[1] + box[3]) / 2.0)
+    return eff, off
+
+
+def _box_mm(vp):
+    return _box_info(vp)[0]
 
 
 def collect_sheets(cfg):
@@ -531,13 +588,14 @@ def apply_plan(rows, cfg, progress=None):
                                 v.Scale = r['new']
                         doc.Regenerate()
                         sizes = {}
+                        offs = {}
                         for k in KINDS:
-                            bx = _box_mm(r['vps'][k][0])
+                            bx, offs[k] = _box_info(r['vps'][k][0])
                             sizes[k] = (bx[2] - bx[0], bx[3] - bx[1])
                         centers, gw, gh, fits = place(sizes, r['prm'], cfg, dict((k, r['olds'][k] / float(r['new'])) for k in KINDS))
                         for k in KINDS:
                             cx, cy = centers[k]
-                            r['vps'][k][0].SetBoxCenter(DB.XYZ(cx / FT, cy / FT, 0))
+                            r['vps'][k][0].SetBoxCenter(DB.XYZ((cx - offs[k][0]) / FT, (cy - offs[k][1]) / FT, 0))
                         done += 1
                     except Exception as ex:
                         fails.append((r['sheet'].SheetNumber, str(ex)))
