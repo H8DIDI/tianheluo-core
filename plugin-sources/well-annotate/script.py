@@ -1032,6 +1032,7 @@ class _SpotLedger(object):
     def __init__(self):
         self.segs = []
         self.sigs = set()      # 已有尺寸的「标了哪些构件、沿哪个轴」签名：同一根排管的同方向尺寸不再重复标
+        self.refsigs = set()   # 已有尺寸的参照面（稳定表示）集合：参照的面完全相同的尺寸不再重复标（线位置不同也算）
         self.dup = 0
 
 
@@ -1119,11 +1120,36 @@ def _existing_dim_sigs(view):
     return out
 
 
+def _ref_key(refs):
+    """一组参照的稳定表示集合（尺寸标了哪几个面）。取不到返回 None。"""
+    try:
+        return frozenset(r.ConvertToStableRepresentation(doc) for r in refs)
+    except:
+        return None
+
+
+def _existing_ref_sigs(view):
+    out = set()
+    try:
+        dims = list(DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension).ToElements())
+    except:
+        return out
+    for dm in dims:
+        try:
+            k = _ref_key(list(dm.References))
+            if k is not None and len(k) >= 2:
+                out.add(k)
+        except:
+            continue
+    return out
+
+
 def _fresh_ledger(view):
     """新的同位置判重表，已含视图里原有的尺寸（原有尺寸一律不删、不改）。"""
     led = _SpotLedger()
     led.segs.extend(_existing_dim_segs(view))
     led.sigs = _existing_dim_sigs(view)
+    led.refsigs = _existing_ref_sigs(view)
     return led
 
 
@@ -1291,6 +1317,10 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
     if sig is not None and len(sig[0]) >= 2 and sig in ledger.sigs:
         ledger.dup += 1          # 视图里已经有标这根排管（同方向）的尺寸，只是位置不同：不再叠标
         return None
+    rk = _ref_key(refs) if ledger is not None else None
+    if rk is not None and len(rk) >= 2 and rk in ledger.refsigs:
+        ledger.dup += 1          # 同样的几个面已经有尺寸了（可能位置不同）：不再叠标
+        return None
     # 超出注释裁剪框的尺寸照常标注（不改视图、不挡），只记下缺口供报告；需要显示时往外拉或放大裁剪框
     gap = _crop_gap(view, p1, p2) if _annot_crop_on(view) else None
     if gap is not None:
@@ -1339,6 +1369,8 @@ def _try_dim(view, refs, world_p1, world_p2, ledger=None, dim_type=False):
         ledger.segs.append((p1, p2))
         if sig is not None:
             ledger.sigs.add(sig)
+        if rk is not None:
+            ledger.refsigs.add(rk)
     return d
 
 
