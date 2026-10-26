@@ -268,7 +268,7 @@ DEFAULTS = {
             'x_mm/y_mm=表左上角在图纸上的位置（mm，原点在图纸左下角附近）；name_prefix=明细表名字前缀；sheet_filter=只处理图名包含这段文字的图纸（空=全部井大样图纸）；'
             'view_tag=视图名里的井大样标记，用来从视图名取井号；show_title=表上方是否显示明细表标题；rebuild=已有规格表的图纸是否删掉重做（改了字段后用）；'
             'group_param=给每张规格明细表写「分组」用的项目参数名（第一次运行自动新建，绑到「明细表」类别）；folder_name=项目浏览器里文件夹的名字；'
-            'col_width_mm=指定列的宽度（mm，写参数名: 宽度，没写的列自动）；group_by_zone=true 时文件夹名是「文件夹名·分区」（每个分区一个文件夹），false 时全部放进同一个文件夹；zone_field=取分区用的井参数名。'),
+            'bilingual=true 时列标题写成「中文 换行 英文」，英文取自 headings_en（参数名: 英文，没写的列只显示中文）；align_center=true 时表里的文字（标题和内容）居中；col_width_mm=指定列的宽度（mm，写参数名: 宽度，没写的列自动）；group_by_zone=true 时文件夹名是「文件夹名·分区」（每个分区一个文件夹），false 时全部放进同一个文件夹；zone_field=取分区用的井参数名。'),
     'fields': ['族与类型', '标记', '分区', '相对标高的偏移', '井底标高', '井内深度'],
     'key_field': '标记',
     'category': 'OST_GenericModel',
@@ -283,7 +283,15 @@ DEFAULTS = {
     'folder_name': '井规格表',
     'group_by_zone': True,
     'zone_field': '分区',
-    'col_width_mm': {'族与类型': 95.0},
+    'col_width_mm': {'族与类型': 95.0, '相对标高的偏移': 42.0, '井底标高': 36.0, '井内深度': 30.0, '井盖面标高': 32.0, '井整体高度': 32.0},
+    'bilingual': True,
+    'headings_en': {
+        '族与类型': 'Family and Type', '标记': 'Mark', '分区': 'Zone', '相对标高的偏移': 'Offset from Level',
+        '井底标高': 'Well Bottom Level', '井内深度': 'Inner Depth', '井盖面标高': 'Cover Level', '井整体高度': 'Overall Height',
+        '井盖面标高': 'Cover Level', '井形态分类': 'Well Type', '开洞总数': 'Openings', '北面开洞': 'North Opening',
+        '南面开洞': 'South Opening', '东面开洞': 'East Opening', '西面开洞': 'West Opening',
+    },
+    'align_center': True,
 }
 
 
@@ -546,6 +554,27 @@ def _apply_widths(vs, cfg):
         pass
 
 
+def _apply_format(vs, cfg):
+    """列标题中英文（中文在上、英文在下）、文字居中。已有的规格表重新运行也会套用。"""
+    try:
+        df = vs.Definition
+        en = cfg.get('headings_en') or {}
+        for i in range(df.GetFieldCount()):
+            f = df.GetField(i)
+            nm = f.GetName()
+            if cfg.get('bilingual'):
+                e = en.get(nm)
+                head = (nm + chr(10) + e) if e else nm
+            else:
+                head = nm
+            if f.ColumnHeading != head:
+                f.ColumnHeading = head
+            if cfg.get('align_center') and f.HorizontalAlignment != DB.ScheduleHorizontalAlignment.Center:
+                f.HorizontalAlignment = DB.ScheduleHorizontalAlignment.Center
+    except Exception:
+        pass
+
+
 def _set_group(vs, cfg, sample):
     """给规格明细表写分组参数（项目浏览器按它成文件夹）。"""
     name = cfg.get('group_param') or ''
@@ -634,6 +663,7 @@ def build_schedule(sheet, mark, cfg, existing, sample=None):
         elif on_sheet:
             _set_group(vs, cfg, sample)
             _apply_widths(vs, cfg)
+            _apply_format(vs, cfg)
             return 'skip', []
         else:
             status = 'placed'
@@ -673,6 +703,7 @@ def build_schedule(sheet, mark, cfg, existing, sample=None):
     DB.ScheduleSheetInstance.Create(doc, sheet.Id, vs.Id, pt)
     _set_group(vs, cfg, sample)
     _apply_widths(vs, cfg)
+    _apply_format(vs, cfg)
     return status, missing
 
 
