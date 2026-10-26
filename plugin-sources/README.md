@@ -27,6 +27,7 @@
 | [`well-clear-marks`](well-clear-marks/) | 一键清除井标记 | 0.1.1 | Python | didi | MIT |
 | [`well-depth-report`](well-depth-report/) | 井深统计报表 | 0.1.4 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.3 | C#（源码在 `plugins/`） | didi | MIT |
+| [`well-family-guard`](well-family-guard/) | 井族体检 | 0.1.0 | Python | didi | MIT |
 | [`well-number`](well-number/) | 一键编号 | 0.2.0 | Python | didi | MIT |
 | [`well-param-sync`](well-param-sync/) | 井参数同步 | 0.1.0 | Python | didi | MIT |
 | [`well-sheet-fit`](well-sheet-fit/) | 井图比例排版 | 0.1.1 | Python | didi | MIT |
