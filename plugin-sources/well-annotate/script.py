@@ -2059,14 +2059,16 @@ def _vfaces(elem):
                             continue
                         lo = [1e18, 1e18, 1e18]
                         hi = [-1e18, -1e18, -1e18]
+                        pts = []
                         for lp in f.GetEdgesAsCurveLoops():
                             for c in lp:
                                 for k in (0, 1):
                                     p = tr.OfPoint(c.GetEndPoint(k))
+                                    pts.append(p)
                                     for i, val in enumerate((p.X, p.Y, p.Z)):
                                         lo[i] = min(lo[i], val)
                                         hi[i] = max(hi[i], val)
-                        out.append({'ref': f.Reference, 'norm': n, 'orig': tr.OfPoint(f.Origin), 'lo': lo, 'hi': hi})
+                        out.append({'ref': f.Reference, 'norm': n, 'orig': tr.OfPoint(f.Origin), 'lo': lo, 'hi': hi, 'pts': pts})
                     except:
                         continue
 
@@ -2075,50 +2077,78 @@ def _vfaces(elem):
     return out
 
 
-def _axis_ix(axis):
-    return {'X': 0, 'Y': 1, 'Z': 2}[axis]
+def _dot2(p, v):
+    return p.X * v.X + p.Y * v.Y
 
 
-def _cover_edge(faces, axis, other, lo_wall, hi_wall, want_low):
-    """某一侧最靠墙的井盖外沿面。faces 为井盖那一层的竖直面；axis 为量距方向，other 为另一水平轴。
+def _span_on(f, ov):
+    """面在 ov 方向（水平单位向量）上的范围 (最小, 最大)。"""
+    cs = [_dot2(p, ov) for p in f['pts']]
+    return (min(cs), max(cs)) if cs else (0.0, 0.0)
+
+
+def _cover_edge(faces, av, ov, lo_wall, hi_wall, want_low):
+    """某一侧最靠墙的井盖外沿面。faces 为井盖那一层的竖直面；av 为量距方向（水平单位向量），ov 为与之垂直的水平方向；
+    lo_wall/hi_wall 为两侧内壁沿 av 的坐标。
     井盖外面常套一圈井脖子（外沿比井盖再外一点）：与某个反向面重合的外沿才是井盖本身（井脖子的内孔就是井盖轮廓），
-    有这样的面优先用，没有就取最靠墙的外沿。返回 (坐标, 面, other 方向的范围) 或 None。"""
-    ai = _axis_ix(axis)
-    oi = _axis_ix(other)
+    有这样的面优先用，没有就取最靠墙的外沿。返回 (坐标, 面, ov 方向的范围) 或 None。"""
     cand = []
     for f in faces:
-        nn = _coord(f['norm'], axis)
+        nn = _dot2(f['norm'], av)
         if abs(nn) < _AXIAL_TOL:
             continue
-        c = _coord(f['orig'], axis)
+        c = _dot2(f['orig'], av)
         if not (lo_wall + _COVER_GAP_MIN_FT < c < hi_wall - _COVER_GAP_MIN_FT):
             continue
-        # 朝向墙一侧的面（低侧取朝 -轴 的面，高侧取朝 +轴 的面）；井盖偏在井的一边时也不会漏
+        # 朝向墙一侧的面（低侧取朝 -av 的面，高侧取朝 +av 的面）；井盖偏在井的一边时也不会漏
         if (want_low and nn < 0) or ((not want_low) and nn > 0):
             cand.append((c, f))
     if not cand:
         return None
 
     def _paired(c, f):
+        rf = _span_on(f, ov)
         for g in faces:
             if g is f:
                 continue
-            if _coord(g['norm'], axis) * _coord(f['norm'], axis) >= 0 or abs(_coord(g['norm'], axis)) < _AXIAL_TOL:
+            ng = _dot2(g['norm'], av)
+            if ng * _dot2(f['norm'], av) >= 0 or abs(ng) < _AXIAL_TOL:
                 continue
-            if abs(_coord(g['orig'], axis) - c) > 0.004:
+            if abs(_dot2(g['orig'], av) - c) > 0.004:
                 continue
-            if min(g['hi'][oi], f['hi'][oi]) - max(g['lo'][oi], f['lo'][oi]) > 0.05:
+            rg = _span_on(g, ov)
+            if min(rg[1], rf[1]) - max(rg[0], rf[0]) > 0.05:
                 return True
         return False
 
     paired = [(c, f) for c, f in cand if _paired(c, f)]
     pool = paired or cand
-    # 坐标相同（两个井盖并排）时取 other 方向最靠前的那个，上下两侧的尺寸才会落在同一个井盖上
+    # 坐标相同（两个井盖并排）时取 ov 方向最靠前的那个，两侧的尺寸才会落在同一个井盖上
     if want_low:
-        pick = min(pool, key=lambda t: (round(t[0], 3), t[1]['lo'][oi]))
+        pick = min(pool, key=lambda t: (round(t[0], 3), _span_on(t[1], ov)[0]))
     else:
-        pick = max(pool, key=lambda t: (round(t[0], 3), -t[1]['lo'][oi]))
-    return pick[0], pick[1], (pick[1]['lo'][oi], pick[1]['hi'][oi])
+        pick = max(pool, key=lambda t: (round(t[0], 3), -_span_on(t[1], ov)[0]))
+    return pick[0], pick[1], _span_on(pick[1], ov)
+
+
+def _cover_layer(elems):
+    """井最高处的竖直面（井盖那一层）。找不到返回空列表。"""
+    ztop = None
+    for e in elems:
+        try:
+            bb = e.get_BoundingBox(None)
+            if bb is not None:
+                ztop = bb.Max.Z if ztop is None else max(ztop, bb.Max.Z)
+        except:
+            continue
+    if ztop is None:
+        return []
+    out = []
+    for e in elems:
+        for f in _vfaces(e):
+            if f['hi'][2] >= ztop - _COVER_TOP_TOL_FT:
+                out.append(f)
+    return out
 
 
 def make_cover_dims(view, elems, box, ledger=None, stats=None, vertical=True):
@@ -2131,58 +2161,92 @@ def make_cover_dims(view, elems, box, ledger=None, stats=None, vertical=True):
     walls, _fb = _inner_walls(elems, box, fr, None)
     if any(x is None for x in walls.values()):
         return 0
-    ztop = None
-    for e in elems:
-        try:
-            bb = e.get_BoundingBox(None)
-            if bb is not None:
-                ztop = bb.Max.Z if ztop is None else max(ztop, bb.Max.Z)
-        except:
-            continue
-    if ztop is None:
-        return 0
-    faces = []
-    for e in elems:
-        for f in _vfaces(e):
-            if f['hi'][2] >= ztop - _COVER_TOP_TOL_FT:
-                faces.append(f)
+    faces = _cover_layer(elems)
     if not faces:
         _bump(stats, _SKIP_COVER)
         return 0
     d0, d1 = _rng_of(box, d)
     dep = (d0 + d1) / 2.0
     wL, wR, wB, wT = walls['L'][0], walls['R'][0], walls['B'][0], walls['T'][0]
+    unit = {'X': DB.XYZ(1, 0, 0), 'Y': DB.XYZ(0, 1, 0)}
+    hv, vv_ = unit[h], unit[v]
     made = 0
     found = 0
-
-    def _go(side, wall_ref, c, face, rng, horizontal):
-        """horizontal=True：沿 h 方向的尺寸，线放在井盖面在 v 方向范围的中间；否则沿 v 方向。"""
-        mid = (rng[0] + rng[1]) / 2.0
-        if horizontal:
-            w = wL if side == 'L' else wR
-            a, b = (w, c) if side == 'L' else (c, w)
-            refs = [wall_ref, face['ref']] if side == 'L' else [face['ref'], wall_ref]
-            return 1 if _try_dim(view, refs, _mk(fr, a, mid, dep), _mk(fr, b, mid, dep), ledger, dim_type=True) else 0
-        w = wB if side == 'B' else wT
-        a, b = (w, c) if side == 'B' else (c, w)
-        refs = [wall_ref, face['ref']] if side == 'B' else [face['ref'], wall_ref]
-        return 1 if _try_dim(view, refs, _mk(fr, mid, a, dep), _mk(fr, mid, b, dep), ledger, dim_type=True) else 0
-
     for side, want_low in (('L', True), ('R', False)):
         if walls[side][2]:
             continue
-        hit = _cover_edge(faces, h, v, wL, wR, want_low)
-        if hit is not None:
-            found += 1
-            made += _go(side, walls[side][1]['ref'], hit[0], hit[1], hit[2], True)
+        hit = _cover_edge(faces, hv, vv_, wL, wR, want_low)
+        if hit is None:
+            continue
+        found += 1
+        c, face, rng = hit
+        mid = (rng[0] + rng[1]) / 2.0
+        wref = walls[side][1]['ref']
+        if side == 'L':
+            refs, a_, b_ = [wref, face['ref']], wL, c
+        else:
+            refs, a_, b_ = [face['ref'], wref], c, wR
+        if _try_dim(view, refs, _mk(fr, a_, mid, dep), _mk(fr, b_, mid, dep), ledger, dim_type=True):
+            made += 1
     if vertical:
         for side, want_low in (('B', True), ('T', False)):
             if walls[side][2]:
                 continue
-            hit = _cover_edge(faces, v, h, wB, wT, want_low)
-            if hit is not None:
-                found += 1
-                made += _go(side, walls[side][1]['ref'], hit[0], hit[1], hit[2], False)
+            hit = _cover_edge(faces, vv_, hv, wB, wT, want_low)
+            if hit is None:
+                continue
+            found += 1
+            c, face, rng = hit
+            mid = (rng[0] + rng[1]) / 2.0
+            wref = walls[side][1]['ref']
+            if side == 'B':
+                refs, a_, b_ = [wref, face['ref']], wB, c
+            else:
+                refs, a_, b_ = [face['ref'], wref], c, wT
+            if _try_dim(view, refs, _mk(fr, mid, a_, dep), _mk(fr, mid, b_, dep), ledger, dim_type=True):
+                made += 1
+    if not found:
+        _bump(stats, _SKIP_COVER)
+    return made
+
+
+def make_cover_dims_rot(view, elems, ledger=None, stats=None, vertical=True):
+    """旋转井（墙面不与视图轴平行）的井盖到内壁尺寸：沿井自己的两个方向标对齐尺寸，井盖外沿和内壁都取井族自带的面。"""
+    fr = _frame(view)
+    if not fr['plan']:
+        return 0
+    info = _rot_info(elems)
+    if info is None:
+        return 0
+    faces = _cover_layer(elems)
+    if not faces:
+        _bump(stats, _SKIP_COVER)
+        return 0
+    a = info['a']
+    b = info['b']
+    z = (info['zB'] + info['zT']) / 2.0
+    uL, uR, wB, wT = info['uL'], info['uR'], info['wB'], info['wT']
+    made = 0
+    found = 0
+    jobs = [(True, a, b, uL, uR, info['uL_f'], True), (False, a, b, uL, uR, info['uR_f'], True)]
+    if vertical:
+        jobs += [(True, b, a, wB, wT, info['wB_f'], False), (False, b, a, wB, wT, info['wT_f'], False)]
+    for want_low, av, ov, lo_w, hi_w, wface, along_a in jobs:
+        hit = _cover_edge(faces, av, ov, lo_w, hi_w, want_low)
+        if hit is None:
+            continue
+        found += 1
+        c, face, rng = hit
+        mid = (rng[0] + rng[1]) / 2.0
+        wc = lo_w if want_low else hi_w
+        refs = [wface['ref'], face['ref']] if want_low else [face['ref'], wface['ref']]
+        p_a, p_b = (wc, c) if want_low else (c, wc)
+        if along_a:
+            q1, q2 = _rot_pt(info, p_a, mid, z), _rot_pt(info, p_b, mid, z)
+        else:
+            q1, q2 = _rot_pt(info, mid, p_a, z), _rot_pt(info, mid, p_b, z)
+        if _try_dim(view, refs, q1, q2, ledger, dim_type=True):
+            made += 1
     if not found:
         _bump(stats, _SKIP_COVER)
     return made
@@ -3311,6 +3375,15 @@ def main():
                         if not ok_rot:
                             failed_steps.append('{}：旋转井标注（Revit 判定参照失效，引出线重试也失败）'.format(v.Name))
                             continue
+                        if _COVER_DIMS and _frame(v)['plan']:
+                            def _rcover(v=v, elems=elems, rres=rres, rled=rled):
+                                rres['cv'] = make_cover_dims_rot(v, elems, rled, stats, _COVER_DIMS_V)
+                            rres['cv'] = 0
+                            if not _step("井盖尺寸（旋转井）", _rcover):
+                                rres['cv'] = 0
+                                failed_steps.append('{}：井盖到内壁尺寸（Revit 判定参照失效）'.format(v.Name))
+                            cover_total[0] += rres['cv']
+                            rres['n'] += rres['cv']
                         _bump(stats, _ST_DUP, rled.dup)
                         dim_errs.extend(_DIM_ERRS)
                         made += rres['n']
