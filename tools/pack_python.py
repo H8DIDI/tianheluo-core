@@ -8,7 +8,7 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"well-sheets": "0.5.10", "well-annotate": "0.3.32", "well-zone": "0.1.3", "well-sheet-no": "0.1.5", "well-sheet-fit": "0.1.1", "well-spec-table": "0.1.3", "well-param-sync": "0.1.0", "well-family-guard": "0.1.0", "family-param-dim": "0.1.0", "pile-cushion": "0.4.0", "pile-cleanup": "0.2.0",
+VERSION_OVERRIDE = {"well-sheets": "0.5.10", "well-annotate": "0.3.33", "well-zone": "0.1.3", "well-sheet-no": "0.1.5", "well-sheet-fit": "0.1.1", "well-spec-table": "0.1.3", "well-param-sync": "0.1.0", "well-family-guard": "0.1.0", "family-param-dim": "0.1.0", "pile-cushion": "0.4.0", "pile-cleanup": "0.2.0",
                     "quantity-export": "0.2.1", "rebar-cage": "0.2.1", "sheet-organize": "0.6.4", "export-dwg": "0.4.5",
                     "export-nwc": "0.2.0", "well-number": "0.2.0", "well-clear-marks": "0.1.1", "elv-merge": "0.2.0",
                     "control-points": "0.1.0", "well-depth-report": "0.1.4"}

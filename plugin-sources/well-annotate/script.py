@@ -607,6 +607,7 @@ _SKIP_BANK_DIR = '排管方向不水平/不垂直（未标注）'
 _SKIP_BANK_THROUGH = '排管穿过井（两侧都伸出井外，未标注）'
 _SKIP_BANK_PASS = '排管不止于本井（从旁边或穿井而过、别的系统或电缆沟，未标注）'
 _SKIP_BANK_ERR = '排管处理异常（未标注）'
+_SKIP_COVER = '平面里没认出井盖（未标井盖到内壁尺寸）'
 _SKIP_HIDDEN = '不可见'
 _SKIP_NOBB = '没有包围盒'
 _SKIP_ZERO = '尺寸为零'
@@ -620,6 +621,7 @@ _REPORT_SKIPS = [
     (_SKIP_BANK_DIR, '根'),
     (_SKIP_BANK_THROUGH, '根'),
     (_SKIP_BANK_ERR, '根'),
+    (_SKIP_COVER, '个视图'),
     (_SKIP_HIDDEN, '个'),
     (_SKIP_NOBB, '个'),
     (_SKIP_ZERO, '个'),
@@ -2019,6 +2021,174 @@ def make_chain_dims(view, elems, box, ledger=None, stats=None, extents=None, onl
 
 
 # ============================================================
+# 井盖到井内壁尺寸（平面）：像族里标的「井盖距内壁」，从井内壁标到井盖外沿
+# ============================================================
+
+_VFACE_CACHE = {}
+_COVER_AREA_MIN_FT2 = 0.108      # 井盖外沿面的最小面积（约 0.01 m2）：滤掉格栅、孔洞的碎面
+_COVER_TOP_TOL_FT = 0.0033       # 面的顶端与井最高处相差不超过 1 mm，才算井盖这一层
+_COVER_GAP_MIN_FT = 0.07         # 井盖离内壁小于约 20 mm 时不标
+
+
+def _vfaces(elem):
+    """井构件里的竖直轴向大面（世界坐标），带顶、底高度和在水平面上的范围。同 _extract_faces 的遍历方式。"""
+    key = str(elem.Id)
+    if key in _VFACE_CACHE:
+        return _VFACE_CACHE[key]
+    out = []
+    opt = DB.Options()
+    opt.ComputeReferences = True
+    opt.IncludeNonVisibleObjects = False
+    opt.DetailLevel = DB.ViewDetailLevel.Fine
+    geom = elem.get_Geometry(opt)
+    if not geom:
+        _VFACE_CACHE[key] = out
+        return out
+
+    def _walk(ge, tr):
+        for obj in ge:
+            if isinstance(obj, DB.GeometryInstance):
+                _walk(obj.GetSymbolGeometry(), tr.Multiply(obj.Transform))
+            elif isinstance(obj, DB.Solid) and obj.Faces.Size > 0:
+                for f in obj.Faces:
+                    try:
+                        if f.Reference is None or not isinstance(f, DB.PlanarFace) or f.Area < _COVER_AREA_MIN_FT2:
+                            continue
+                        n = tr.OfVector(f.FaceNormal)
+                        if abs(n.Z) > 0.02:
+                            continue
+                        lo = [1e18, 1e18, 1e18]
+                        hi = [-1e18, -1e18, -1e18]
+                        for lp in f.GetEdgesAsCurveLoops():
+                            for c in lp:
+                                for k in (0, 1):
+                                    p = tr.OfPoint(c.GetEndPoint(k))
+                                    for i, val in enumerate((p.X, p.Y, p.Z)):
+                                        lo[i] = min(lo[i], val)
+                                        hi[i] = max(hi[i], val)
+                        out.append({'ref': f.Reference, 'norm': n, 'orig': tr.OfPoint(f.Origin), 'lo': lo, 'hi': hi})
+                    except:
+                        continue
+
+    _walk(geom, DB.Transform.Identity)
+    _VFACE_CACHE[key] = out
+    return out
+
+
+def _axis_ix(axis):
+    return {'X': 0, 'Y': 1, 'Z': 2}[axis]
+
+
+def _cover_edge(faces, axis, other, lo_wall, hi_wall, want_low):
+    """某一侧最靠墙的井盖外沿面。faces 为井盖那一层的竖直面；axis 为量距方向，other 为另一水平轴。
+    井盖外面常套一圈井脖子（外沿比井盖再外一点）：与某个反向面重合的外沿才是井盖本身（井脖子的内孔就是井盖轮廓），
+    有这样的面优先用，没有就取最靠墙的外沿。返回 (坐标, 面, other 方向的范围) 或 None。"""
+    ai = _axis_ix(axis)
+    oi = _axis_ix(other)
+    cand = []
+    for f in faces:
+        nn = _coord(f['norm'], axis)
+        if abs(nn) < _AXIAL_TOL:
+            continue
+        c = _coord(f['orig'], axis)
+        if not (lo_wall + _COVER_GAP_MIN_FT < c < hi_wall - _COVER_GAP_MIN_FT):
+            continue
+        # 朝向墙一侧的面（低侧取朝 -轴 的面，高侧取朝 +轴 的面）；井盖偏在井的一边时也不会漏
+        if (want_low and nn < 0) or ((not want_low) and nn > 0):
+            cand.append((c, f))
+    if not cand:
+        return None
+
+    def _paired(c, f):
+        for g in faces:
+            if g is f:
+                continue
+            if _coord(g['norm'], axis) * _coord(f['norm'], axis) >= 0 or abs(_coord(g['norm'], axis)) < _AXIAL_TOL:
+                continue
+            if abs(_coord(g['orig'], axis) - c) > 0.004:
+                continue
+            if min(g['hi'][oi], f['hi'][oi]) - max(g['lo'][oi], f['lo'][oi]) > 0.05:
+                return True
+        return False
+
+    paired = [(c, f) for c, f in cand if _paired(c, f)]
+    pool = paired or cand
+    # 坐标相同（两个井盖并排）时取 other 方向最靠前的那个，上下两侧的尺寸才会落在同一个井盖上
+    if want_low:
+        pick = min(pool, key=lambda t: (round(t[0], 3), t[1]['lo'][oi]))
+    else:
+        pick = max(pool, key=lambda t: (round(t[0], 3), -t[1]['lo'][oi]))
+    return pick[0], pick[1], (pick[1]['lo'][oi], pick[1]['hi'][oi])
+
+
+def make_cover_dims(view, elems, box, ledger=None, stats=None, vertical=True):
+    """平面视图里，从井内壁到井盖外沿标尺寸（每侧一道，取最靠墙的井盖）：左右沿水平方向，上下沿竖向。
+    只用井构件本身的面当参照，不画线、不改视图。找不到井盖（井最高处没有井盖那一层）时不标并计入统计。返回生成数。"""
+    fr = _frame(view)
+    if not fr['plan']:
+        return 0
+    h, v, d = fr['h'], fr['v'], fr['d']
+    walls, _fb = _inner_walls(elems, box, fr, None)
+    if any(x is None for x in walls.values()):
+        return 0
+    ztop = None
+    for e in elems:
+        try:
+            bb = e.get_BoundingBox(None)
+            if bb is not None:
+                ztop = bb.Max.Z if ztop is None else max(ztop, bb.Max.Z)
+        except:
+            continue
+    if ztop is None:
+        return 0
+    faces = []
+    for e in elems:
+        for f in _vfaces(e):
+            if f['hi'][2] >= ztop - _COVER_TOP_TOL_FT:
+                faces.append(f)
+    if not faces:
+        _bump(stats, _SKIP_COVER)
+        return 0
+    d0, d1 = _rng_of(box, d)
+    dep = (d0 + d1) / 2.0
+    wL, wR, wB, wT = walls['L'][0], walls['R'][0], walls['B'][0], walls['T'][0]
+    made = 0
+    found = 0
+
+    def _go(side, wall_ref, c, face, rng, horizontal):
+        """horizontal=True：沿 h 方向的尺寸，线放在井盖面在 v 方向范围的中间；否则沿 v 方向。"""
+        mid = (rng[0] + rng[1]) / 2.0
+        if horizontal:
+            w = wL if side == 'L' else wR
+            a, b = (w, c) if side == 'L' else (c, w)
+            refs = [wall_ref, face['ref']] if side == 'L' else [face['ref'], wall_ref]
+            return 1 if _try_dim(view, refs, _mk(fr, a, mid, dep), _mk(fr, b, mid, dep), ledger, dim_type=True) else 0
+        w = wB if side == 'B' else wT
+        a, b = (w, c) if side == 'B' else (c, w)
+        refs = [wall_ref, face['ref']] if side == 'B' else [face['ref'], wall_ref]
+        return 1 if _try_dim(view, refs, _mk(fr, mid, a, dep), _mk(fr, mid, b, dep), ledger, dim_type=True) else 0
+
+    for side, want_low in (('L', True), ('R', False)):
+        if walls[side][2]:
+            continue
+        hit = _cover_edge(faces, h, v, wL, wR, want_low)
+        if hit is not None:
+            found += 1
+            made += _go(side, walls[side][1]['ref'], hit[0], hit[1], hit[2], True)
+    if vertical:
+        for side, want_low in (('B', True), ('T', False)):
+            if walls[side][2]:
+                continue
+            hit = _cover_edge(faces, v, h, wB, wT, want_low)
+            if hit is not None:
+                found += 1
+                made += _go(side, walls[side][1]['ref'], hit[0], hit[1], hit[2], False)
+    if not found:
+        _bump(stats, _SKIP_COVER)
+    return made
+
+
+# ============================================================
 # 旋转井：井体转了一个不是 90° 倍数的角度（如 TELCO 井旋转 171°），墙面与视图轴不平行
 # 平面：沿井自己的两个方向标「对齐尺寸」（井内壁净尺寸）；排管用接触点处画的引出线定位
 # 立面：竖向用水平面（不受旋转影响），水平方向用井内腔的投影位置画引出线定位
@@ -2472,6 +2642,8 @@ _WELL_CAT = DB.BuiltInCategory.OST_GenericModel     # 井所在的类别（设�
 _MARK_PARAM = ''                                    # 井号参数名；空 = Revit 自带的「标记」（设置文件 mark_parameter）
 _CONFIRM_RUN = True                                 # 运行前先弹确认（设置文件 confirm_before_run）
 _SKIP_ANNOTATED = True                              # 已经有尺寸的视图默认跳过（设置文件 skip_annotated_views）
+_COVER_DIMS = True                                  # 平面视图标「井盖到井内壁」尺寸（设置文件 cover_dims）
+_COVER_DIMS_V = True                                # 同上，竖向（上下）也标（设置文件 cover_dims_vertical）
 
 
 def _mark_of(e):
@@ -2672,6 +2844,8 @@ def _settings_defaults():
         'bank_category': 'OST_StructuralFraming',
         'confirm_before_run': _CONFIRM_RUN,
         'skip_annotated_views': _SKIP_ANNOTATED,
+        'cover_dims': _COVER_DIMS,
+        'cover_dims_vertical': _COVER_DIMS_V,
     }
 
 
@@ -2679,7 +2853,7 @@ def _apply_settings():
     """读设置文件（没有就写出默认值）并覆盖脚本里的默认数值。某一项写错时只忽略那一项。返回设置文件路径。"""
     global _DIM_MARGIN, _CHAIN_OFFSET_MM, _CHAIN_OFFSET_FT, _CHAIN_STEP_MM, _CHAIN_STEP_FT, _TOTAL_GAP_MM, _TOTAL_GAP_FT
     global _PROTRUDE_FT, _REACH_TOL_FT, _CROP_TEXT_FT, _WALL_AREA_MIN_FT2, _SPAN_RATIO, _DIM_TYPE_NAME, _TOTAL_RULES
-    global _WELL_CAT, _MARK_PARAM, _BANK_CAT, _BANK_IDS, _CONFIRM_RUN, _SKIP_ANNOTATED
+    global _WELL_CAT, _MARK_PARAM, _BANK_CAT, _BANK_IDS, _CONFIRM_RUN, _SKIP_ANNOTATED, _COVER_DIMS, _COVER_DIMS_V
     d = _settings_defaults()
     try:
         if not os.path.isfile(SETTINGS_FILE):
@@ -2728,6 +2902,8 @@ def _apply_settings():
     _MARK_PARAM = (d.get('mark_parameter') or '').strip()
     _CONFIRM_RUN = bool(d.get('confirm_before_run', True))
     _SKIP_ANNOTATED = bool(d.get('skip_annotated_views', True))
+    _COVER_DIMS = bool(d.get('cover_dims', True))
+    _COVER_DIMS_V = bool(d.get('cover_dims_vertical', True))
     wc = getattr(DB.BuiltInCategory, str(d.get('well_category') or ''), None)
     if wc is not None:
         _WELL_CAT = wc
@@ -2755,6 +2931,11 @@ def _settings_fields():
          'hint': '建议保持勾选，避免一点就开始跑。'},
         {'key': 'skip_annotated_views', 'label': '已经有尺寸的视图', 'kind': 'bool', 'bool_text': '默认跳过（不再重复标注）',
          'hint': '确认窗口里仍然可以选「全部都标」。'},
+        {'kind': 'header', 'label': '平面视图的井盖尺寸'},
+        {'key': 'cover_dims', 'label': '井盖到井内壁', 'kind': 'bool', 'bool_text': '平面视图标井盖外沿到井内壁的尺寸',
+         'hint': '同族里的「井盖距内壁」：从内壁标到最靠墙的井盖外沿，每侧一道。'},
+        {'key': 'cover_dims_vertical', 'label': '上下方向也标', 'kind': 'bool', 'bool_text': '除左右外，上下两侧也标',
+         'hint': '取消勾选则只标左右。'},
         {'kind': 'header', 'label': '尺寸线的位置（长度单位 mm）'},
         {'key': 'dim_margin_mm', 'label': '总尺寸线离井墙的最小距离', 'kind': 'num', 'min': 0, 'max': 5000,
          'hint': '没有排管链的一侧，总尺寸线离井墙多远。'},
@@ -2840,6 +3021,7 @@ def main():
         _load_sheet_caches()
         _FACE_CACHE.clear()
         _EDGE_CACHE.clear()
+        _VFACE_CACHE.clear()
         del _BANK_ERRS[:]
         # ---------- 1. 选标注范围（范围列表同「一键导出图纸」：选中的图纸 / 当前图纸 / 各系列 / 各图集 / 全部 / 手动勾选）----------
         selected = []
@@ -3080,6 +3262,7 @@ def main():
         failed_steps = []
         out_views = []   # 裁剪框放不下而未标的视图：(视图名, 未标道数, 缺口说明)
         out_total = 0
+        cover_total = [0]
         cancelled = [False]
         done_views = [0]
         skipped_annot = [0]
@@ -3192,6 +3375,17 @@ def main():
                             res['n'] = 0
                             failed_steps.append('{}：总尺寸（Revit 判定参照失效）'.format(v.Name))
 
+                    # 井盖到内壁尺寸：单独一个事务，失败不影响上面的排管链和总尺寸
+                    if _COVER_DIMS and _frame(v)['plan']:
+                        def _covers():
+                            res['cv'] = make_cover_dims(v, elems, box, led, stats, _COVER_DIMS_V)
+                        res['cv'] = 0
+                        if not _step("井盖尺寸", _covers):
+                            res['cv'] = 0
+                            failed_steps.append('{}：井盖到内壁尺寸（Revit 判定参照失效）'.format(v.Name))
+                        cover_total[0] += res['cv']
+                        res['n'] += res['cv']
+
                     _bump(stats, _ST_DUP, led.dup)
                     if _OUT_CROP:
                         out_total += len(_OUT_CROP)
@@ -3240,7 +3434,9 @@ def main():
         if skipped_annot[0]:
             msg += '• 已经有尺寸而跳过的视图：{} 个（没有重复标注）' .format(skipped_annot[0]) + chr(10)
         msg += '• 标注排管（井内尺寸链）：{} 根（按视图累计）\n'.format(stats.get(_ST_BANK_OK, 0))
-        msg += '• 生成尺寸：{} 道（外包总尺寸 + 尺寸链）\n'.format(made)
+        msg += '• 生成尺寸：{} 道（外包总尺寸 + 尺寸链 + 井盖到内壁）\n'.format(made)
+        if cover_total[0]:
+            msg += '    其中井盖到井内壁：{} 道\n'.format(cover_total[0])
         if dup_views:
             msg += '• 重复选择的视图（已合并）：{} 个\n'.format(dup_views)
         if stats.get(_ST_DUP):
