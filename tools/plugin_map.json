@@ -1,0 +1,61 @@
+{
+  "说明": "插件体系表（唯一来源）：分组 = 宿主和商店里的分类；step = 「井大样出图」上手路线的第几步；status = 成熟度。pack_python.py、build_site.py 读它；C# 插件的 plugin.json 分类要手动保持一致。",
+  "groups": [
+    {"name": "井大样出图", "color": "#818CF8", "desc": "从一口井到一张报审图：配置、展开图、标注、排版、规格表、图号。"},
+    {"name": "井与管线", "color": "#3FA9FF", "desc": "井和排管的建模整理：编号、井深、排管贴井、分区、参数、族、垫层、控制点。"},
+    {"name": "结构与算量", "color": "#10B981", "desc": "柱和基础配筋、钢筋三维查看、框选提量。"},
+    {"name": "图纸视图", "color": "#06B6D4", "desc": "任何项目通用的图纸、视图、明细表和标注管理。"},
+    {"name": "导出", "color": "#F59E0B", "desc": "批量导出 DWG / PDF / NWC。"}
+  ],
+  "status": {
+    "proven": {"label": "项目实战", "note": "已在 DAYONE 小市政项目的实际出图中使用（2026 年 10 月）。"},
+    "tested": {"label": "已实测", "note": "2026-10-27 在测试项目里自动跑通并核对了结果，还没在真实项目里用过，欢迎反馈。"},
+    "beta": {"label": "试用", "note": "做好了、通过基本检查，还没在实际项目里用过；建议先在模型副本上试，有问题请反馈。"}
+  },
+  "route": [
+    {"step": 1, "id": "well-config", "do": "第一次用：设好图纸名前缀、井号系列、图框 logo（换项目时再改）"},
+    {"step": 2, "id": "well-number", "do": "按位置给井编号（已有编号可跳过）"},
+    {"step": 3, "id": "well-depth", "do": "按最低接入排管底 − 300 校正井底标高和井深"},
+    {"step": 4, "id": "duct-snap", "do": "排管端点贴到井内壁（延伸/修剪）"},
+    {"step": 5, "id": "well-sheets", "do": "选井，自动生成平面 + 四面剖面并排进图框"},
+    {"step": 6, "id": "well-annotate", "do": "平面和立面自动标尺寸（只加不改）"},
+    {"step": 7, "id": "well-sheet-fit", "do": "按放得下的最大比例重排五个视图"},
+    {"step": 8, "id": "well-spec-table", "do": "每张图放这口井的规格表"},
+    {"step": 9, "id": "well-sheet-no", "do": "按系统号段重编连续图号（或用「一键图纸归类与图框编号」）"},
+    {"step": 10, "id": "export-dwg", "do": "批量导出 DWG / PDF（可另导带坐标的平面）"}
+  ],
+  "plugins": {
+    "well-config":       {"group": "井大样出图", "status": "proven"},
+    "well-sheets":       {"group": "井大样出图", "status": "proven"},
+    "well-annotate":     {"group": "井大样出图", "status": "proven"},
+    "well-sheet-fit":    {"group": "井大样出图", "status": "proven"},
+    "well-spec-table":   {"group": "井大样出图", "status": "proven"},
+    "well-sheet-no":     {"group": "井大样出图", "status": "proven"},
+    "sheet-organize":    {"group": "井大样出图", "status": "proven"},
+    "well-clear-marks":  {"group": "井大样出图", "status": "beta"},
+    "well-number":       {"group": "井与管线", "status": "beta"},
+    "well-depth":        {"group": "井与管线", "status": "proven"},
+    "duct-snap":         {"group": "井与管线", "status": "proven"},
+    "well-zone":         {"group": "井与管线", "status": "proven"},
+    "well-param-sync":   {"group": "井与管线", "status": "proven"},
+    "well-family-guard": {"group": "井与管线", "status": "proven"},
+    "family-param-dim":  {"group": "井与管线", "status": "proven"},
+    "elv-merge":         {"group": "井与管线", "status": "beta"},
+    "well-depth-report": {"group": "井与管线", "status": "beta"},
+    "pile-cushion":      {"group": "井与管线", "status": "proven"},
+    "pile-cleanup":      {"group": "井与管线", "status": "tested"},
+    "control-points":    {"group": "井与管线", "status": "tested"},
+    "rebar-cage":        {"group": "结构与算量", "status": "tested"},
+    "rebar-3d-view":     {"group": "结构与算量", "status": "tested"},
+    "quantity-export":   {"group": "结构与算量", "status": "proven"},
+    "sheet-manager":     {"group": "图纸视图", "status": "beta"},
+    "view-manager":      {"group": "图纸视图", "status": "beta"},
+    "issue-manager":     {"group": "图纸视图", "status": "beta"},
+    "plan-batch":        {"group": "图纸视图", "status": "beta"},
+    "sheet-preview":     {"group": "图纸视图", "status": "tested"},
+    "tag-check":         {"group": "图纸视图", "status": "beta"},
+    "schedule-excel":    {"group": "图纸视图", "status": "tested"},
+    "export-dwg":        {"group": "导出", "status": "proven"},
+    "export-nwc":        {"group": "导出", "status": "tested"}
+  }
+}

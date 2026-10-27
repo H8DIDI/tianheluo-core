@@ -37,6 +37,7 @@ def brief(s, n=80):
     return (cut[:k] if k >= n * 0.4 else cut) + "…"
 
 
+PMAP = json.loads((root / "tools" / "plugin_map.json").read_text(encoding="utf-8"))   # 分组、成熟度、上手路线
 REPO = "https://github.com/H8DIDI/tianheluo-core/tree/main/"
 cs_dirs = {}
 for mf in (root / "plugins").glob("*/plugin.json"):
@@ -58,6 +59,7 @@ for pkg in sorted(dist.glob("*.thlp")):
         "version": m["version"], "revit": m.get("revit", "2026"),
         "size": f"{pkg.stat().st_size/1024:.0f} KB", "status": "beta",
         "download": f"/api/dl/{m['id']}", "file": f"/dl/{pkg.name}", "sha256": hashlib.sha256(pkg.read_bytes()).hexdigest(), "hostApi": m.get("hostApi", 1), "source": REPO + (f"plugins/{cs_dirs[m['id']]}" if m["id"] in cs_dirs else f"plugin-sources/{m['id']}"), "date": date,
+        "maturity": PMAP["plugins"].get(m["id"], {}).get("status", "beta"),
         "glyph": m.get("glyph", ""), "color": m.get("color", ""),
         "tier": m.get("tier", "official"), "author": m.get("author", ""), "license": m.get("license", ""), "homepage": m.get("homepage", ""),
     })
@@ -65,5 +67,8 @@ for pkg in sorted(dist.glob("*.thlp")):
 installer = dist / "THL-Host.zip"
 if installer.exists():
     shutil.copy(installer, dl / installer.name)
-json.dump({"revit": "2026", "plugins": plugins}, open(site / "plugins.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+names = {p["id"]: p["name"] for p in plugins}
+route = [{"step": r["step"], "id": r["id"], "name": names.get(r["id"], r["id"]), "do": r["do"]} for r in PMAP["route"]]
+json.dump({"revit": "2026", "groups": PMAP["groups"], "maturity": PMAP["status"], "route": route, "plugins": plugins},
+          open(site / "plugins.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 print(len(plugins), "个插件已写入商店清单")

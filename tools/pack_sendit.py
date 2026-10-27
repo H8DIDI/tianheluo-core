@@ -8,7 +8,7 @@ SRC = pathlib.Path(r"C:\Users\PCB\AppData\Roaming\pyRevit\Extensions\Sendit.exte
 REPO = pathlib.Path(__file__).resolve().parent.parent / "python-src" / "sendit"
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 OUT.mkdir(exist_ok=True)
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 LICENSE = ((REPO if (REPO / "LICENSE").exists() else SRC) / "LICENSE").read_text(encoding="utf-8")
 NOTICE = ("本插件基于开源项目 Sendit，作者 lewismconte，MIT 许可。\n"
           "原项目：https://github.com/lewismconte/sendit\n"
@@ -24,7 +24,9 @@ TOOLS = {
         "图纸签发与归档：把签发的图纸导出成 PDF 放进带日期的文件夹，可同时导出 DWG，维护签发记录 CSV，显示图纸与签发的对照矩阵，并在 Revit 里生成签发记录明细表。"),
 }
 
+PLUGIN_MAP = json.loads((pathlib.Path(__file__).resolve().parent / "plugin_map.json").read_text(encoding="utf-8"))["plugins"]
 for folder, (pid, name, cat, glyph, desc) in TOOLS.items():
+    cat = PLUGIN_MAP.get(pid, {}).get("group", cat)
     repo_tool = REPO / "tools" / folder
     d = repo_tool if (repo_tool / "script.py").exists() else SRC / "Sendit.tab" / "Tools.panel" / f"{folder}.pushbutton"
     mf = {"id": pid, "name": name, "version": VERSION, "description": desc, "category": cat, "revit": "2026",

@@ -1,9 +1,9 @@
 {
   "id": "view-manager",
   "name": "视图管理",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "批量管理视图：筛选、重命名、套用视图样板、批量设比例/详细程度/专业、查找替换、定位视图、找出没上图纸的视图并清理；视图样板可导出/导入 JSON，在不同项目间复用。",
-  "category": "出图打印",
+  "category": "图纸视图",
   "revit": "2026",
   "hostApi": 1,
   "type": "python",

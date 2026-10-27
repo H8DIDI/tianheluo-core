@@ -1,9 +1,9 @@
 {
   "id": "tag-check",
   "name": "标注检查",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "检查当前视图里的构件有没有标注：列出漏标、用错了标记族的构件。只读，不修改模型。标记标准可以在窗口里打开标准文件自己改（Documents\\KaifaTools\\标注标准.json）；没有配置标准时，按模型里该类构件用得最多的标记族来对比。",
-  "category": "出图打印",
+  "category": "图纸视图",
   "revit": "2026",
   "hostApi": 1,
   "dll": "TagCheck.dll",

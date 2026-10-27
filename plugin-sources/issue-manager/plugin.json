@@ -1,9 +1,9 @@
 {
   "id": "issue-manager",
   "name": "图纸签发管理",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "图纸签发与归档：把签发的图纸导出成 PDF 放进带日期的文件夹，可同时导出 DWG，维护签发记录 CSV，显示图纸与签发的对照矩阵，并在 Revit 里生成签发记录明细表。",
-  "category": "出图打印",
+  "category": "图纸视图",
   "revit": "2026",
   "hostApi": 1,
   "type": "python",
