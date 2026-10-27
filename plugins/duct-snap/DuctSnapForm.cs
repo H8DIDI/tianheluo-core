@@ -143,6 +143,7 @@ public sealed class DuctSnapForm : Form
         buttons.Controls.Add(Btn("关闭", Close));
         root.Controls.Add(buttons, 0, 4);
 
+        DpiFit.Apply(this);
         ShowReport(report, null);
     }
 

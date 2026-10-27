@@ -20,6 +20,7 @@ from pyrevit import revit, forms
 import System.Windows.Forms as WF
 import json
 
+# @include _shared/form_fit.py
 # @include _shared/settings_ui.py
 
 doc = revit.doc

@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\plugins\well-depth\ReviewForm.cs" Link="ReviewForm.cs" />
+    <Compile Include="..\..\plugins\_shared\DpiFit.cs" Link="DpiFit.cs" />
     <Reference Include="WellDepth">
       <HintPath>..\..\plugins\well-depth\bin\Release\net8.0-windows\WellDepth.dll</HintPath>
     </Reference>

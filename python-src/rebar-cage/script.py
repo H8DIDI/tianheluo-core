@@ -35,6 +35,9 @@ MIN_CLEAR_MM = 25.0
 MAX_STIRRUP_MM = 400.0
 
 
+# @include _shared/form_fit.py
+
+
 def _eid(x):
     try:
         return int(x.Value)
@@ -184,28 +187,65 @@ def _cover_ft():
     return covers[0].CoverDistance
 
 
+def _local_box(host):
+    """构件自身坐标系下的外形范围。柱子旋转过时，世界坐标的外包框比柱子大，钢筋会跑到混凝土外面，
+    所以把实体的顶点换到族的坐标系里再求范围。返回 (变换, 最小点, 最大点)，最小/最大点是局部坐标。"""
+    tf = DB.Transform.Identity
+    try:
+        tf = host.GetTransform()
+    except Exception:
+        pass
+    inv = tf.Inverse
+    opt = DB.Options()
+    opt.DetailLevel = DB.ViewDetailLevel.Fine
+    pts = []
+
+    def solids(geo):
+        for g in geo:
+            if isinstance(g, DB.Solid) and g.Volume > 1e-9:
+                yield g
+            elif isinstance(g, DB.GeometryInstance):
+                for x in solids(g.GetInstanceGeometry()):
+                    yield x
+    try:
+        for so in solids(host.get_Geometry(opt)):
+            for ed in so.Edges:
+                for q in ed.Tessellate():
+                    pts.append(inv.OfPoint(q))
+    except Exception:
+        pts = []
+    if not pts:
+        bb = host.get_BoundingBox(None)
+        return DB.Transform.Identity, bb.Min, bb.Max
+    lo = DB.XYZ(min(q.X for q in pts), min(q.Y for q in pts), min(q.Z for q in pts))
+    hi = DB.XYZ(max(q.X for q in pts), max(q.Y for q in pts), max(q.Z for q in pts))
+    return tf, lo, hi
+
+
 def build_cage(host, cover, ds, dm, n_main, spacing_mm, bar_type, stir_type, hook, per_face=None):
-    """在 host 里生成主筋和箍筋（调用方负责事务）。返回 (主筋根数, 箍筋道数)。"""
-    bb = host.get_BoundingBox(None)
-    cx = (bb.Min.X + bb.Max.X) / 2.0
-    cy = (bb.Min.Y + bb.Max.Y) / 2.0
-    W = bb.Max.X - bb.Min.X
-    D = bb.Max.Y - bb.Min.Y
-    sx, sy, bars, heights = cage_layout(W, D, bb.Min.Z, bb.Max.Z, cover, ds, dm, n_main,
+    """在 host 里生成主筋和箍筋（调用方负责事务）。返回 (主筋根数, 箍筋道数)。
+    按构件自身坐标系布置，旋转过的柱子钢筋也在混凝土里。"""
+    tf, lo, hi = _local_box(host)
+    cx = (lo.X + hi.X) / 2.0
+    cy = (lo.Y + hi.Y) / 2.0
+    W = hi.X - lo.X
+    D = hi.Y - lo.Y
+    sx, sy, bars, heights = cage_layout(W, D, lo.Z, hi.Z, cover, ds, dm, n_main,
                                         spacing_mm * MM_TO_FT, per_face)
-    up = DB.XYZ(0, 0, 1)
+    P = lambda x, y, z: tf.OfPoint(DB.XYZ(x, y, z))
+    up = tf.OfVector(DB.XYZ(0, 0, 1))
     n_bars = 0
     for x, y, z0, z1 in bars:
-        line = DB.Line.CreateBound(DB.XYZ(cx + x, cy + y, z0), DB.XYZ(cx + x, cy + y, z1))
+        line = DB.Line.CreateBound(P(cx + x, cy + y, z0), P(cx + x, cy + y, z1))
         DB.Structure.Rebar.CreateFromCurves(doc, DB.Structure.RebarStyle.Standard, bar_type,
-                                            None, None, host, DB.XYZ(1, 0, 0),
+                                            None, None, host, tf.OfVector(DB.XYZ(1, 0, 0)),
                                             List[DB.Curve]([line]), DB.Structure.RebarHookOrientation.Left,
                                             DB.Structure.RebarHookOrientation.Left, True, False)
         n_bars += 1
     n_stir = 0
     for z in heights:
-        pts = [DB.XYZ(cx - sx, cy - sy, z), DB.XYZ(cx + sx, cy - sy, z),
-               DB.XYZ(cx + sx, cy + sy, z), DB.XYZ(cx - sx, cy + sy, z)]
+        pts = [P(cx - sx, cy - sy, z), P(cx + sx, cy - sy, z),
+               P(cx + sx, cy + sy, z), P(cx - sx, cy + sy, z)]
         curves = List[DB.Curve]([DB.Line.CreateBound(pts[i], pts[(i + 1) % 4]) for i in range(4)])
         DB.Structure.Rebar.CreateFromCurves(doc, DB.Structure.RebarStyle.StirrupTie, stir_type,
                                             hook, hook, host, up, curves,
@@ -545,15 +585,14 @@ def rebar_dialog(geo):
     """图形参数窗口。返回参数字典（确定）或 None（取消）。"""
     result = {}
     form = build_rebar_form(geo, result)
-    if form.ShowDialog() == WF.DialogResult.OK and 'p' in result:
+    if ff_fit(form).ShowDialog() == WF.DialogResult.OK and 'p' in result:
         return result['p']
     return None
 
 
 def _geo_of(host, cover_ft):
-    bb = host.get_BoundingBox(None)
-    return {'W': bb.Max.X - bb.Min.X, 'D': bb.Max.Y - bb.Min.Y,
-            'H': bb.Max.Z - bb.Min.Z, 'cover': cover_ft}
+    _tf, lo, hi = _local_box(host)
+    return {'W': hi.X - lo.X, 'D': hi.Y - lo.Y, 'H': hi.Z - lo.Z, 'cover': cover_ft}
 
 
 def main():

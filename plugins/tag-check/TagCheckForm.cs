@@ -123,6 +123,7 @@ public sealed class TagCheckForm : Form
         buttons.Controls.Add(Btn("导出 CSV", ExportCsv));
         buttons.Controls.Add(Btn("关闭", Close));
         root.Controls.Add(buttons, 0, 4);
+        DpiFit.Apply(this);
         RefreshShown();
     }
 

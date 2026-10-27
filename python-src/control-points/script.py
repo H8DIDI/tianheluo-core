@@ -56,6 +56,7 @@ DEFAULTS = {
     "marker_height_mm": 600.0,
 }
 
+# @include _shared/form_fit.py
 # @include _shared/xlsx_lite.py
 
 
@@ -201,7 +202,10 @@ def collect_family(s):
     if not kw:
         return []
     out = []
-    for e in DB.FilteredElementCollector(doc).WhereElementIsNotElementType():
+    # 只看族实例和 DirectShape（控制点标记、桩、井都在这两类里）：大模型里逐个翻全部图元要几分钟
+    cand = list(DB.FilteredElementCollector(doc).OfClass(DB.FamilyInstance)) + \
+        list(DB.FilteredElementCollector(doc).OfClass(DB.DirectShape))
+    for e in cand:
         try:
             if e.Category is None or e.Category.CategoryType != DB.CategoryType.Model:
                 continue
@@ -480,7 +484,7 @@ def export_dialog(s):
     f.CancelButton = cancel
     f.ClientSize = SD.Size(520, y[0] + 46)
 
-    if f.ShowDialog() != WF.DialogResult.OK:
+    if ff_fit(f).ShowDialog() != WF.DialogResult.OK:
         return None
     s = dict(s)
     s['source'] = 'pick' if r_pick.Checked else ('family' if r_fam.Checked else 'selection')

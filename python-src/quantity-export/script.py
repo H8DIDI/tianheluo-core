@@ -69,6 +69,9 @@ SCHEDULE_SPECS = [
 ]
 
 
+# @include _shared/form_fit.py
+
+
 def _u(x):
     if x is None:
         return u''
@@ -487,7 +490,7 @@ def _show_window(tables, summary, src_txt, res):
 
     form.Controls.Add(tabs)
     form.Controls.Add(bottom)
-    form.ShowDialog()
+    ff_fit(form).ShowDialog()
 
 
 def main():

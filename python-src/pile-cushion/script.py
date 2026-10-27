@@ -56,6 +56,9 @@ LINE_DOUBLE_MAX_MM = DEFAULT_LINE_DOUBLE_MAX_MM
 PILE_SYMBOL_NAME = "松木桩 - Φ75"
 
 
+# @include _shared/form_fit.py
+
+
 def get_elem_id_val(elem_or_id):
     """安全获取 64位/32位 ElementId 整数值"""
     if elem_or_id is None:
@@ -1504,7 +1507,7 @@ def show_rules_dialog(r, sel_count):
     form.CancelButton = btn_cancel
     form.ClientSize = SD.Size(640, y + 90)
 
-    if form.ShowDialog() == WF.DialogResult.OK and 'rules' in result:
+    if ff_fit(form).ShowDialog() == WF.DialogResult.OK and 'rules' in result:
         return result['rules']
     return None
 

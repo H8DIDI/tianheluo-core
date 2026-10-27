@@ -18,6 +18,7 @@ clr.AddReference('RevitAPI')
 from Autodesk.Revit import DB
 from pyrevit import revit, forms
 
+# @include _shared/form_fit.py
 # @include _shared/settings_ui.py
 
 doc = revit.doc

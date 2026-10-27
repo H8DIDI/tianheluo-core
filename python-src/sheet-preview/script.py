@@ -29,6 +29,9 @@ CACHE_LRU = 14      # 窗口里最多同时留多少张图在内存
 # 图纸收集与分组
 # ------------------------------------------------------------------
 
+# @include _shared/form_fit.py
+
+
 def _natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(u"(\\d+)", s or u"")]
 
@@ -668,7 +671,7 @@ class Viewer(object):
         _save_json(os.path.join(self.cdir, u"state.json"), {"last": self.items[self.cur]['id'] if self.items else None})
 
     def run(self):
-        self.form.ShowDialog()
+        ff_fit(self.form).ShowDialog()
         return self.result_id
 
 

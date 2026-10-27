@@ -21,6 +21,7 @@ uidoc = revit.uidoc
 
 
 # 图纸名前缀、井编号系列、logo 位置都来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
+# @include _shared/form_fit.py
 # @include _shared/well_config.py
 WCFG = wcfg_load()
 
@@ -772,7 +773,7 @@ def _dialog(s, items):
     ca = WF.Button(); ca.Text = u'取消'; ca.DialogResult = WF.DialogResult.Cancel; ca.Location = SD.Point(W - 104, y[0]); ca.Size = SD.Size(88, 30)
     f.Controls.Add(ok); f.Controls.Add(ca); f.AcceptButton = ok; f.CancelButton = ca
     f.ClientSize = SD.Size(W, y[0] + 44)
-    if f.ShowDialog() != WF.DialogResult.OK:
+    if ff_fit(f).ShowDialog() != WF.DialogResult.OK:
         return None, None
     s = dict(s)
     s.update({u'dwg': c_dwg.Checked, u'logo': c_logo.Checked, u'slim': c_slim.Checked, u'pdf_merge': c_pm.Checked,

@@ -7,6 +7,7 @@ __doc__ = ('井大样系列插件（一键井展开图、一键井大样标注�
 
 from pyrevit import revit, DB, UI, forms
 
+# @include _shared/form_fit.py
 # @include _shared/well_config.py
 # @include _shared/settings_ui.py
 # @include _shared/well_config_ui.py

@@ -24,6 +24,7 @@ import System.Windows.Forms as WF
 import System.Drawing as SD
 import json
 
+# @include _shared/form_fit.py
 # @include _shared/settings_ui.py
 
 doc = revit.doc
@@ -494,7 +495,7 @@ def show_dialog(rows, cfg):
     btn('导出清单', 124, 100, on_exp)
     btn('设置…', 234, 100, on_set)
     btn('关闭', 666, 100, lambda s, e: f.Close())
-    f.ShowDialog()
+    ff_fit(f).ShowDialog()
     return res['act']
 
 

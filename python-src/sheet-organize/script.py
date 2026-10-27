@@ -27,6 +27,7 @@ uidoc = revit.uidoc
 
 TITLE = u"一键图纸归类与图框编号"
 # 图纸名前缀、图号前缀、井编号系列都来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
+# @include _shared/form_fit.py
 # @include _shared/well_config.py
 # @include _shared/settings_ui.py
 # @include _shared/well_config_ui.py
@@ -581,7 +582,7 @@ def form_dialog(owner, title, rows, widths):
     f.CancelButton = b_cancel
 
     out = None
-    if f.ShowDialog(owner) == DialogResult.OK:
+    if ff_fit(f).ShowDialog(owner) == DialogResult.OK:
         out = [[tb.Text.strip() for tb in rb] for rb in boxes]
     return out
 
@@ -1049,7 +1050,7 @@ def main():
             return
         result = {}
         form, tb_types = build_form(result)
-        if form.ShowDialog() != WF.DialogResult.OK or "plan" not in result:
+        if ff_fit(form).ShowDialog() != WF.DialogResult.OK or "plan" not in result:
             return
         plan = result["plan"]
         tb_index = result.get("tb_index", 0)

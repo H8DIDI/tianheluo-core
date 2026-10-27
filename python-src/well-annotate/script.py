@@ -11,6 +11,7 @@ __doc__ = ('选中井/图纸 → 勾选要标注的视图 → 生成两类尺寸
 from pyrevit import revit, DB, UI, forms
 
 # 图纸名前缀来自项目配置（文档\KaifaTools\井大样配置.json），默认「井大样_」
+# @include _shared/form_fit.py
 # @include _shared/well_config.py
 # @include _shared/settings_ui.py
 # @include _shared/well_config_ui.py

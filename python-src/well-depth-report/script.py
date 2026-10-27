@@ -33,6 +33,7 @@ DEFAULTS = {
     'family_exclude': ['井盖', '爬梯', 'mold_'],
 }
 
+# @include _shared/form_fit.py
 # @include _shared/xlsx_lite.py
 # @include _shared/well_config.py
 # @include _shared/settings_ui.py

@@ -4,4 +4,7 @@
     <RootNamespace>KaifaTools</RootNamespace>
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\_shared\DpiFit.cs" Link="DpiFit.cs" />
+  </ItemGroup>
 </Project>

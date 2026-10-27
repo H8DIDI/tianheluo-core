@@ -22,6 +22,7 @@ from pyrevit import revit, forms
 import System.Windows.Forms as WF
 import System.Drawing as SD
 
+# @include _shared/form_fit.py
 # @include _shared/sheet_blocks.py
 # @include _shared/settings_ui.py
 
@@ -346,7 +347,7 @@ def edit_rules(rules):
     b_def.Click += on_def
     b_file.Click += (lambda s, e: (sb_load(), su_open_file(SB_FILE)))
     b_ca.Click += (lambda s, e: f.Close())
-    f.ShowDialog()
+    ff_fit(f).ShowDialog()
     return done['saved']
 
 
@@ -464,7 +465,7 @@ def show_dialog(rules, plan):
     b_exp.Click += on_exp
     b_rule.Click += on_rule
     b_close.Click += lambda s, e: f.Close()
-    f.ShowDialog()
+    ff_fit(f).ShowDialog()
     return res['act']
 
 

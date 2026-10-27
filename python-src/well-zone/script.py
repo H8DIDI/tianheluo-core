@@ -25,6 +25,7 @@ from pyrevit import revit, forms
 import System.Windows.Forms as WF
 import System.Drawing as SD
 
+# @include _shared/form_fit.py
 # @include _shared/settings_ui.py
 
 doc = revit.doc
@@ -500,7 +501,7 @@ def ask_text(title, prompt, default=''):
         f.Controls.Add(c)
     f.AcceptButton = ok
     f.CancelButton = ca
-    if f.ShowDialog() != WF.DialogResult.OK:
+    if ff_fit(f).ShowDialog() != WF.DialogResult.OK:
         return None
     return (t.Text or '').strip()
 
@@ -728,7 +729,7 @@ def main_dialog(st):
     b_close.Click += lambda s, e: f.Close()
     f.Shown += on_shown
     refresh()
-    f.ShowDialog()
+    ff_fit(f).ShowDialog()
     save_cfg(cfg)
     return result['act']
 

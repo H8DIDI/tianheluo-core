@@ -159,13 +159,27 @@ public static class ScheduleService
                     if (p == null || p.IsReadOnly) continue;
                     var cell = (c < row.Count ? row[c] : "").Trim();
                     var cur = ValueText(p).Trim();
-                    if (cell == cur) continue;
+                    if (cell == cur || SameNumber(doc, p, cell)) continue;
                     if (cell.Length == 0 && p.StorageType != StorageType.String) continue; // 数值类参数不能置空
                     plan.Changes.Add(new Change { Element = e, Param = p, ScheduleName = sched.Name, Field = col.Heading, Old = cur, New = cell });
                 }
             }
         }
         return plan;
+    }
+
+    /// <summary>数值参数按数值比较：Excel 里的「2400」「2400.0」「2,400」和 Revit 的 2400 mm 是同一个值，不算改动。</summary>
+    static bool SameNumber(Document doc, Parameter p, string cell)
+    {
+        try
+        {
+            if (p.StorageType == StorageType.Integer)
+                return int.TryParse(cell.Replace(",", ""), out var i) && i == p.AsInteger();
+            if (p.StorageType != StorageType.Double) return false;
+            if (!UnitFormatUtils.TryParse(doc.GetUnits(), p.Definition.GetDataType(), cell.Replace(",", ""), out double v)) return false;
+            return Math.Abs(v - p.AsDouble()) <= 1e-6 * Math.Max(1.0, Math.Abs(v));
+        }
+        catch { return false; }
     }
 
     // ------------------------------------------------------------ 导入：应用（单个事务，可一步撤销）
@@ -189,7 +203,12 @@ public static class ScheduleService
                 res.Failed.Add($"{ch.ScheduleName} · {ch.Element.Id.Value} · {ch.Field}：{ex.Message}");
             }
         }
-        tx.Commit();
+        if (tx.Commit() != TransactionStatus.Committed)
+        {
+            // 例如有构件被别人占用（协同）：Revit 整个回滚了，一项都没写进去
+            res.Failed.Insert(0, $"Revit 没能提交这次修改（常见原因：有构件被别人占用或模型不是最新），{res.Ok} 项都已撤销，模型未改动。");
+            res.Ok = 0;
+        }
         return res;
     }
 }

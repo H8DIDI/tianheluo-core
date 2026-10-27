@@ -37,6 +37,7 @@ import os as _os
 FT_MM = 304.8
 
 # 图纸名前缀、图号前缀、井编号系列来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
+# @include _shared/form_fit.py
 # @include _shared/well_config.py
 # @include _shared/settings_ui.py
 # @include _shared/well_config_ui.py
@@ -238,6 +239,13 @@ def section_sketch(hx, hy, fo, fd):
     }
 
 
+def _num_txt(v):
+    """数字显示成 76.2 而不是 76.200000000000003。"""
+    if isinstance(v, float):
+        return (u"%.3f" % v).rstrip(u"0").rstrip(u".")
+    return u"%s" % v
+
+
 def rules_preview_dialog(sample):
     """规则与预览窗口：改参数，右边立刻画出按这些规则排版的图纸效果；
     下方是图例与剖面示意（数字为模型毫米）。保存并返回规则；取消返回 None。"""
@@ -271,7 +279,7 @@ def rules_preview_dialog(sample):
         tb = TextBox()
         tb.Location = Point(200, y)
         tb.Width = 110
-        tb.Text = str(rules[key])
+        tb.Text = _num_txt(rules[key])
         form.Controls.Add(lb)
         form.Controls.Add(tb)
         boxes[key] = tb
@@ -380,19 +388,20 @@ def rules_preview_dialog(sample):
         fn = Font("Microsoft YaHei UI", 9.0)
         ink = SolidBrush(Color.FromArgb(50, 50, 50))
         sc = int(state["rules"]["view_scale"])
-        g.DrawString("图例", fb, ink, PointF(14, T + 8))
-        yy = T + 28
+        k = g.DpiX / 96.0                     # 高分屏上字更大，行距跟着放大
+        g.DrawString("图例", fb, ink, PointF(14 * k, T + 8 * k))
+        yy = T + 28 * k
         for col, text in ((Color.FromArgb(139, 92, 246), "紫框：平面视图（俯视）"),
                           (Color.FromArgb(47, 140, 255), "蓝框：南 / 北 / 西 / 东 剖面视图"),
                           (Color.Firebrick, "红框：与其他视图重叠，需加大间距")):
-            g.DrawRectangle(Pen(col, 2.0), 14, yy + 3, 14, 10)
-            g.DrawString(text, fn, ink, PointF(36, yy))
-            yy += 18
+            g.DrawRectangle(Pen(col, 2.0), 14 * k, yy + 3 * k, 14 * k, 10 * k)
+            g.DrawString(text, fn, ink, PointF(36 * k, yy))
+            yy += 18 * k
         for text in ("比例 1:%d：图纸 1 mm = 模型 %d mm" % (sc, sc),
                      "框的尺寸为图纸 mm（打印到图纸上）",
                      "右侧示意的数字为模型 mm（实际距离）"):
-            g.DrawString(text, fn, ink, PointF(14, yy))
-            yy += 18
+            g.DrawString(text, fn, ink, PointF(14 * k, yy))
+            yy += 18 * k
 
     def _draw_sketch(g, T):
         if not state["rects"]:
@@ -400,8 +409,9 @@ def rules_preview_dialog(sample):
         r = state["rules"]
         hx, hy = state["half"]
         geo = section_sketch(hx, hy, r["face_out_mm"], r["face_depth_mm"])
-        sx0 = 390.0
-        sy0 = T + 36.0
+        k = g.DpiX / 96.0
+        sx0 = 390.0 * k
+        sy0 = T + 36.0 * k
         ink = SolidBrush(Color.FromArgb(50, 50, 50))
         fb = Font("Microsoft YaHei UI", 9.0, FontStyle.Bold)
         fn = Font("Microsoft YaHei UI", 9.0)
@@ -430,17 +440,18 @@ def rules_preview_dialog(sample):
         sf_r.Alignment = StringAlignment.Far
         mid1 = sy0 + (d1a + d1b) / 2.0
         g.DrawString("剖切面外移\n%.0f mm" % r["face_out_mm"], fn, ink,
-                     RectangleF(sx0, mid1 - 24, d1x - 6, 48), sf_r)
+                     RectangleF(sx0 - 60 * k, mid1 - 24 * k, d1x - 6 + 60 * k, 48 * k), sf_r)
         mid2 = sy0 + (d2a + d2b) / 2.0
         g.DrawString("剖面框厚\n%.0f mm" % r["face_depth_mm"], fn, ink,
-                     RectangleF(sx0 + d2x + 6, mid2 - 24, 90, 48))
+                     RectangleF(sx0 + d2x + 6, mid2 - 24 * k, 90 * k, 48 * k))
 
     def _paint(e):
         g = e.Graphics
         g.SmoothingMode = SmoothingMode.AntiAlias
         W_all = panel.Width
-        draw_h = panel.Height - STRIP_H
-        g.FillRectangle(SolidBrush(Color.FromArgb(246, 247, 250)), 0, draw_h, W_all, STRIP_H)
+        strip = STRIP_H * g.DpiX / 96.0
+        draw_h = panel.Height - strip
+        g.FillRectangle(SolidBrush(Color.FromArgb(246, 247, 250)), 0, draw_h, W_all, strip)
         g.DrawLine(Pen(Color.FromArgb(210, 214, 222), 1.0), 0, draw_h, W_all, draw_h)
         _draw_legend(g, draw_h)
         _draw_sketch(g, draw_h)
@@ -496,7 +507,7 @@ def rules_preview_dialog(sample):
         state["busy"] = True
         try:
             for key, label, lo, hi in RULE_LABELS:
-                boxes[key].Text = str(values[key])
+                boxes[key].Text = _num_txt(values[key])
             chk.Checked = bool(hide)
         finally:
             state["busy"] = False
@@ -561,7 +572,7 @@ def rules_preview_dialog(sample):
     form.TopMost = True
     recompute()
     _log("规则窗口：打开")
-    answer = form.ShowDialog()
+    answer = ff_fit(form).ShowDialog()
     _log("规则窗口：关闭，返回 " + str(answer))
     if answer != DialogResult.OK:
         return None

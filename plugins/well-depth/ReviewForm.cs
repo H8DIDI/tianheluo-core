@@ -182,6 +182,7 @@ public sealed class ReviewForm : Form
         buttons.Controls.Add(Btn("关闭", false, Close));
         root.Controls.Add(buttons, 0, 4);
 
+        DpiFit.Apply(this);
         RefreshShown();
     }
 

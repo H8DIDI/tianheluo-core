@@ -60,7 +60,19 @@ for bad, fn in ((["AA 强电"], "_wcfg_lines_to_series"), (["AA 没有等号"], 
 
 # ③ lines 字段的连接符
 su = (SRC / "_shared" / "settings_ui.py").read_text(encoding="utf-8")
-check("settings_ui 的 lines 用 \\r\\n 连接", 'return u"\\r\\n".join(val or [])' in su)
+check("settings_ui 的 lines 用 \\r\\n 连接", 'return u"\\r\\n".join(u"%s" % x for x in (val or []))' in su)
+# 列表里是数字时（如候选比例 25, 30）也要能转成文字，曾经直接 join 报错
+check("settings_ui 的 list 能连接数字", 'return u", ".join(u"%s" % x for x in (val or []))' in su)
+# ④ 带窗口的插件都要接 form_fit（高分屏不截字、能拖动）
+for d in sorted(SRC.iterdir()):
+    f = d / "script.py"
+    if d.name.startswith("_") or not f.exists():
+        continue
+    t = f.read_text(encoding="utf-8")
+    uses_form = "ShowDialog(" in t.replace("FolderBrowserDialog", "").replace("SaveFileDialog", "").replace("OpenFileDialog", "") \
+        and ("WF.Form()" in t or "Form()" in t)
+    if uses_form or "@include _shared/settings_ui.py" in t:
+        check("接了 form_fit：" + d.name, "@include _shared/form_fit.py" in t)
 
 print("\n%s" % ("全部通过" if not fail else "%d 项失败" % fail))
 sys.exit(1 if fail else 0)

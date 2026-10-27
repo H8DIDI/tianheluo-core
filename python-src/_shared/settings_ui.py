@@ -1,5 +1,6 @@
 # ---- settings_ui（天河落共用片段，打包时内联进脚本）-----------------------------
 # 图形化「设置」窗口：每个参数一行（中文名、输入框/下拉框/勾选、单位和说明），保存、恢复默认、取消。
+# 依赖 form_fit（插件里要先 include _shared/form_fit.py）。
 # 用法：su_fields_dialog(标题, 说明, 字段列表, 当前值, 默认值) -> 新值字典 或 None（取消）。
 # 字段 dict：key、label、kind（header 分组标题 / num 数字 / text 文本 / list 逗号分隔的列表 / choice 下拉（只能选）/
 #           combo 下拉（可选可手填）/ bool 勾选 / palette 颜色列表「R,G,B; R,G,B」/ lines 多行文本，每行一项，rows 行高）、hint 说明、
@@ -28,9 +29,9 @@ def _su_split(text):
 def _su_to_text(fld, val):
     kind = fld.get(u"kind", u"text")
     if kind == u"list":
-        return u", ".join(val or [])
+        return u", ".join(u"%s" % x for x in (val or []))
     if kind == u"lines":
-        return u"\r\n".join(val or [])
+        return u"\r\n".join(u"%s" % x for x in (val or []))
     if kind == u"palette":
         return u"; ".join(u"%d,%d,%d" % tuple(c[:3]) for c in (val or []))
     if kind == u"num":
@@ -245,5 +246,5 @@ def su_fields_dialog(title, intro, fields, values, defaults=None, extra_buttons=
         f.Close()
     b_ok.Click += _on_ok
     b_ca.Click += (lambda s, e: f.Close())
-    f.ShowDialog()
+    ff_fit(f).ShowDialog()
     return result[u"v"]

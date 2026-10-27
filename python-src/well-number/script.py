@@ -36,6 +36,9 @@ DEFAULTS = {'prefix': '', 'start': 1, 'digits': 2, 'step': 1, 'sort': 'X_ASC', '
             'param': '标记', 'only_empty': False}
 
 
+# @include _shared/form_fit.py
+
+
 def load():
     s = dict(DEFAULTS)
     try:
@@ -122,7 +125,7 @@ def dialog(s, n_sel):
     ca = WF.Button(); ca.Text = '取消'; ca.DialogResult = WF.DialogResult.Cancel; ca.Location = SD.Point(366, y[0]); ca.Size = SD.Size(90, 30)
     f.Controls.Add(ok); f.Controls.Add(ca); f.AcceptButton = ok; f.CancelButton = ca
     f.ClientSize = SD.Size(472, y[0] + 44)
-    if f.ShowDialog() != WF.DialogResult.OK:
+    if ff_fit(f).ShowDialog() != WF.DialogResult.OK:
         return None
     return {'prefix': t_pre.Text, 'start': int(n_start.Value), 'digits': int(n_dig.Value), 'step': int(n_step.Value),
             'param': (t_par.Text or '标记').strip(), 'filter': t_fil.Text.strip(), 'sort': keys[cb.SelectedIndex],

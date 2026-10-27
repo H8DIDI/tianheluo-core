@@ -19,6 +19,10 @@ public sealed class PlanPickerForm : Form
     private const int Gap = 16;
     private const int ButtonWidth = 140;
 
+    // 高分屏：下面的像素都按 100% 缩放写，乘上屏幕缩放比例（150% 时字变大，框也要跟着变大，否则截字）
+    private static float _k = 1f;
+    private static int S(int px) => (int)Math.Round(px * _k);
+
     private readonly HashSet<string> _existing;
     private readonly ToolTip _tips = new();
     private readonly PickerColumn _types;
@@ -29,8 +33,8 @@ public sealed class PlanPickerForm : Form
     private readonly Label _line1 = StatusLine("statusLine1");
     private readonly Label _line2 = StatusLine("statusLine2");
     private readonly Label _line3 = StatusLine("statusLine3");
-    private readonly Button _ok = new() { Name = "ok", Text = "确认", Size = new Size(ButtonWidth, 36), BackColor = Color.FromArgb(47, 140, 255), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-    private readonly Button _cancel = new() { Name = "cancel", Text = "取消", Size = new Size(ButtonWidth, 36), FlatStyle = FlatStyle.Flat };
+    private readonly Button _ok = new() { Name = "ok", Text = "确认", BackColor = Color.FromArgb(47, 140, 255), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+    private readonly Button _cancel = new() { Name = "cancel", Text = "取消", FlatStyle = FlatStyle.Flat };
 
     public IReadOnlyList<string> ViewTypeNames { get; }
     public IReadOnlyList<string> LevelNames { get; }
@@ -51,6 +55,9 @@ public sealed class PlanPickerForm : Form
     public PlanPickerForm(IReadOnlyList<string> viewTypes, IReadOnlyList<string> levels,
         IEnumerable<string>? existingViewNames = null, PickerMemory? remembered = null)
     {
+        _k = Math.Max(1f, DeviceDpi / 96f);
+        _ok.Size = new Size(S(ButtonWidth), S(36));
+        _cancel.Size = new Size(S(ButtonWidth), S(36));
         ViewTypeNames = viewTypes;
         LevelNames = levels;
         _existing = new HashSet<string>(existingViewNames ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
@@ -67,8 +74,8 @@ public sealed class PlanPickerForm : Form
         MaximizeBox = true;
         MinimizeBox = false;
         BackColor = Color.White;
-        ClientSize = new Size(840, 560);
-        MinimumSize = SizeFromClientSize(new Size(760, 520));
+        ClientSize = FitScreen(new Size(S(840), S(560)));
+        MinimumSize = SizeFromClientSize(FitScreen(new Size(S(760), S(520))));
 
         // a remembered pattern that is no longer valid falls back to the default
         string saved = remembered?.NamePattern.Trim() ?? "";
@@ -127,28 +134,36 @@ public sealed class PlanPickerForm : Form
         return base.ProcessDialogKey(keyData);
     }
 
+    /// <summary>不超过屏幕可用区域（笔记本小屏 + 150% 缩放时）。</summary>
+    private static Size FitScreen(Size want)
+    {
+        var wa = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, want.Width, want.Height);
+        return new Size(Math.Min(want.Width, wa.Width - 40), Math.Min(want.Height, wa.Height - 60));
+    }
+
     private void LayoutAll()
     {
         int w = ClientSize.Width, h = ClientSize.Height;
-        int fieldLeft = Pad + 74;
+        int pad = S(Pad), gap = S(Gap), bw = S(ButtonWidth);
+        int fieldLeft = pad + S(74);
 
-        _patternLabel.Location = new Point(Pad, 16);
-        _pattern.Bounds = new Rectangle(fieldLeft, 12, w - fieldLeft - Pad, 24);
-        _patternHint.Bounds = new Rectangle(fieldLeft, 40, w - fieldLeft - Pad, 20);
+        _patternLabel.Location = new Point(pad, S(16));
+        _pattern.Bounds = new Rectangle(fieldLeft, S(12), w - fieldLeft - pad, S(24));
+        _patternHint.Bounds = new Rectangle(fieldLeft, S(40), w - fieldLeft - pad, S(20));
 
         // the two columns fill the space between the name row and the summary
-        int top = 66, bottom = h - 88;
-        int colWidth = (w - Pad * 2 - Gap) / 2;
-        _types.Place(new Rectangle(Pad, top, colWidth, bottom - top));
-        _levels.Place(new Rectangle(Pad + colWidth + Gap, top, colWidth, bottom - top));
+        int top = S(66), bottom = h - S(88);
+        int colWidth = (w - pad * 2 - gap) / 2;
+        _types.Place(new Rectangle(pad, top, colWidth, bottom - top));
+        _levels.Place(new Rectangle(pad + colWidth + gap, top, colWidth, bottom - top));
 
         // buttons bottom right, the three summary lines bottom left
-        _cancel.Location = new Point(w - Pad - ButtonWidth, h - 48);
-        _ok.Location = new Point(_cancel.Left - Gap - ButtonWidth, h - 48);
-        int lineWidth = _ok.Left - Gap - Pad;
-        _line1.Bounds = new Rectangle(Pad, h - 78, lineWidth, 22);
-        _line2.Bounds = new Rectangle(Pad, h - 55, lineWidth, 22);
-        _line3.Bounds = new Rectangle(Pad, h - 32, lineWidth, 22);
+        _cancel.Location = new Point(w - pad - bw, h - S(48));
+        _ok.Location = new Point(_cancel.Left - gap - bw, h - S(48));
+        int lineWidth = _ok.Left - gap - pad;
+        _line1.Bounds = new Rectangle(pad, h - S(78), lineWidth, S(22));
+        _line2.Bounds = new Rectangle(pad, h - S(55), lineWidth, S(22));
+        _line3.Bounds = new Rectangle(pad, h - S(32), lineWidth, S(22));
     }
 
     /// <summary>Summary under the lists: view count, existing names, example name, warnings in orange.</summary>
@@ -244,8 +259,8 @@ public sealed class PlanPickerForm : Form
         private readonly Label _searchLabel = new() { Text = "搜索", TextAlign = ContentAlignment.MiddleLeft, ForeColor = HintColor };
         private readonly Label _searchCount = new() { TextAlign = ContentAlignment.MiddleRight, ForeColor = HintColor };
         private readonly CheckedListBox _list = new() { CheckOnClick = true, IntegralHeight = false, BorderStyle = BorderStyle.FixedSingle };
-        private readonly Button _all = new() { Text = "全选", Size = new Size(90, 30), FlatStyle = FlatStyle.Flat };
-        private readonly Button _none = new() { Text = "全不选", Size = new Size(90, 30), FlatStyle = FlatStyle.Flat };
+        private readonly Button _all = new() { Text = "全选", Size = new Size(S(90), S(30)), FlatStyle = FlatStyle.Flat };
+        private readonly Button _none = new() { Text = "全不选", Size = new Size(S(90), S(30)), FlatStyle = FlatStyle.Flat };
         private TextBox? _search;
         private bool _syncing;
         private string _filter = "";
@@ -315,18 +330,18 @@ public sealed class PlanPickerForm : Form
         public void Place(Rectangle bounds)
         {
             Box.Bounds = bounds;
-            int inner = bounds.Width - 28;      // 14 px padding on each side
-            _hint.Bounds = new Rectangle(14, 26, inner - 130, 22);
-            _summary.Bounds = new Rectangle(14 + inner - 130, 26, 130, 22);
+            int p = S(14), inner = bounds.Width - p * 2;      // 14 px padding on each side
+            _hint.Bounds = new Rectangle(p, S(26), inner - S(130), S(22));
+            _summary.Bounds = new Rectangle(p + inner - S(130), S(26), S(130), S(22));
             if (_search is not null)
             {
-                _searchLabel.Bounds = new Rectangle(14, 52, 40, 24);
-                _search.Bounds = new Rectangle(54, 52, inner - 54 - 96, 24);
-                _searchCount.Bounds = new Rectangle(14 + inner - 92, 52, 92, 24);
+                _searchLabel.Bounds = new Rectangle(p, S(52), S(40), S(24));
+                _search.Bounds = new Rectangle(S(54), S(52), inner - S(54) - S(96), S(24));
+                _searchCount.Bounds = new Rectangle(p + inner - S(92), S(52), S(92), S(24));
             }
-            _list.Bounds = new Rectangle(14, 84, inner, bounds.Height - 84 - 52);
-            _all.Location = new Point(14, bounds.Height - 44);
-            _none.Location = new Point(112, bounds.Height - 44);
+            _list.Bounds = new Rectangle(p, S(84), inner, bounds.Height - S(84) - S(52));
+            _all.Location = new Point(p, bounds.Height - S(44));
+            _none.Location = new Point(S(112), bounds.Height - S(44));
         }
 
         public void FocusList()
