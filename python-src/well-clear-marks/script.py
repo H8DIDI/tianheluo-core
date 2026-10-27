@@ -26,6 +26,9 @@ class SuppressWarnings(DB.IFailuresPreprocessor):
         return DB.FailureProcessingResult.Continue
 
 
+# @include _shared/ws_guard.py
+
+
 def _mark_param(elem):
     p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
     if not p:
@@ -97,6 +100,17 @@ def main():
         )
         return
 
+    # 协同模型：被别人占用的图元清不了，先排除并在确认框里说明（否则整批回滚）
+    _ok, blocked = wg_split(doc, [e for e, _p, _m in wells + others])
+    if blocked:
+        bad = set(e.Id for e, _w in blocked)
+        wells = [w for w in wells if w[0].Id not in bad]
+        others = [o for o in others if o[0].Id not in bad]
+    note = wg_note(blocked, lambda e: (_mark_param(e).AsString() or u'').strip())
+    if not wells and not others:
+        forms.alert(u"选中的图元都改不了。" + note, title=TITLE)
+        return
+
     # 4. 防呆：先列出要清的内容，确认后才执行
     names = _sheet_names()
     on_sheet = [m for _e, _p, m in wells if any(m in nm for nm in names)]
@@ -114,12 +128,14 @@ def main():
             cats[nm] = cats.get(nm, 0) + 1
         msg += u"\n另有 {} 个其他图元也带标记（{}），默认不动。\n".format(
             len(others), u"、".join(u"{} {} 个".format(k, v) for k, v in sorted(cats.items())))
-        msg += u"\n是：只清井的标记\n否：井和其他图元的标记一起清\n取消：不清"
+        msg += note
+        msg += u"\n\n是：只清井的标记\n否：井和其他图元的标记一起清\n取消：不清"
         ans = _WF.MessageBox.Show(msg, TITLE, _WF.MessageBoxButtons.YesNoCancel, _WF.MessageBoxIcon.Question)
         if ans == _WF.DialogResult.Cancel:
             return
         targets = wells if ans == _WF.DialogResult.Yes else wells + others
     else:
+        msg += note
         msg += u"\n确定清空吗？（Ctrl+Z 可撤销）"
         ans = _WF.MessageBox.Show(msg, TITLE, _WF.MessageBoxButtons.OKCancel, _WF.MessageBoxIcon.Question)
         if ans != _WF.DialogResult.OK:

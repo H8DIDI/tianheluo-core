@@ -20,6 +20,7 @@ from pyrevit import revit, forms
 
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
+# @include _shared/ws_guard.py
 
 doc = revit.doc
 TITLE = '族类型清洗合并'
@@ -81,8 +82,49 @@ def plan(rules):
     return out
 
 
+def _type_values(sym):
+    """类型参数的显示值（比较合并的类型之间有没有不同）。"""
+    out = {}
+    for prm in sym.Parameters:
+        try:
+            if prm.Definition is None or not prm.HasValue:
+                continue
+            nm = prm.Definition.Name
+            if nm in (u'类型名称', u'Type Name', u'族名称', u'Family Name'):
+                continue
+            v = prm.AsString() if prm.StorageType == DB.StorageType.String else prm.AsValueString()
+            out[nm] = v
+        except Exception:
+            pass
+    return out
+
+
+def type_diffs(syms, tgt):
+    """要合并到同一个名字的几个类型，类型参数值不一样的参数名 → 有几种值。合并后统一用保留的那个类型的值。"""
+    groups = {}
+    for x in syms:
+        groups.setdefault(tgt[x.Id], []).append(x)
+    diff = {}
+    for name, xs in groups.items():
+        if len(xs) < 2:
+            continue
+        vals = [_type_values(x) for x in xs]
+        for k in set().union(*[set(v) for v in vals]):
+            got = set(v.get(k) for v in vals)
+            if len(got) > 1:
+                diff[k] = max(diff.get(k, 0), len(got))
+    return diff
+
+
 def count_instances(sym):
     return DB.FilteredElementCollector(doc).WherePasses(DB.FamilyInstanceFilter(doc, sym.Id)).GetElementCount()
+
+
+def mark(e):
+    try:
+        return (e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK).AsString() or '').strip()
+    except Exception:
+        return ''
 
 
 def save_rules(families, strips):
@@ -171,8 +213,22 @@ def main():
         lines.append('%s：%d 个类型改名/合并，涉及 %d 个构件' % (fam.Name, len(changes), k))
         for s in changes[:3]:
             lines.append('    %s → %s' % (s.Name, tgt[s.Id]))
+        diff = type_diffs(syms, tgt)
+        if diff:
+            # 合并后构件统一用保留类型的值：如果深度之类是类型参数，构件的样子会变
+            lines.append('    ⚠ 合并的类型之间这些类型参数不一样，合并后以保留的类型为准：%s' %
+                         '、'.join('%s（%d 种值）' % (k, v) for k, v in sorted(diff.items())[:6]))
     msg = '\n'.join(lines[:40]) + ('\n…' if len(lines) > 40 else '')
-    msg += '\n\n共 %d 个类型、%d 个构件。编组里的构件改不了类型，会跳过并报告。\n继续？（可 Ctrl+Z 撤销）' % (n_types, n_inst)
+    insts = []
+    for fam, syms, tgt in work:
+        for x in syms:
+            if tgt[x.Id] != x.Name:
+                insts += list(DB.FilteredElementCollector(doc).WherePasses(DB.FamilyInstanceFilter(doc, x.Id)))
+    _ok, blocked = wg_split(doc, insts)
+    blocked_ids = set(e.Id for e, _w in blocked)
+    msg += '\n\n共 %d 个类型、%d 个构件。编组里的构件改不了类型，会跳过并报告。' % (n_types, n_inst)
+    msg += wg_note(blocked, mark)
+    msg += '\n继续？（可 Ctrl+Z 撤销）'
     if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
         return
     updated = deleted = renamed = grouped = 0
@@ -202,6 +258,9 @@ def main():
                 for inst in DB.FilteredElementCollector(doc).WherePasses(DB.FamilyInstanceFilter(doc, s.Id)):
                     if inst.GroupId != DB.ElementId.InvalidElementId:
                         grouped += 1
+                        left += 1
+                        continue
+                    if inst.Id in blocked_ids:      # 被别人占用：不动，旧类型保留
                         left += 1
                         continue
                     pinned = inst.Pinned

@@ -19,6 +19,7 @@ from System.Collections.Generic import List
 from pyrevit import revit, DB, forms
 
 doc = revit.doc
+uidoc = revit.uidoc
 TITLE = u"清理重复松木桩垫层"
 APP_ID = "PinePileCushionPlugin"     # 一键布置松木桩垫层 生成的垫层（DirectShape）的标识
 PILE_KEYS = (u"松木桩", u"Φ75")
@@ -108,15 +109,22 @@ def main():
                u"• 重合的松木桩：{} 根（共 {} 根）\n"
                u"• 重合的垫层（DirectShape）：{} 块\n"
                u"• 重合的井垫层族：{} 块\n\n"
-               u"每处位置只保留最早生成的一套，删除其余 {} 个图元。整次可以 Ctrl+Z 撤销。\n\n确定清理？"
+               u"每处位置只保留最早生成的一套，删除其余 {} 个图元。整次可以 Ctrl+Z 撤销。"
                ).format(len(pile_dups), n_piles, len(ds_dups), len(fampad_dups), total)
-        # 注意：天河落宿主里 ok+cancel 只会显示「取消」，确认框必须用 yes/no
-        if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
+        dups = pile_dups + ds_dups + fampad_dups
+        go_del = u"删除这 {} 个重复图元".format(total)
+        go_sel = u"先在模型里选中它们（不删除，看一下再决定）"
+        pick = forms.CommandSwitchWindow.show([go_del, go_sel], message=msg)
+        if pick == go_sel:
+            uidoc.Selection.SetElementIds(List[DB.ElementId](dups))
+            forms.alert(u"已选中 {} 个重复图元。看过没问题后再运行本插件删除。".format(total), title=TITLE)
+            return
+        if pick != go_del:
             return
         t = DB.Transaction(doc, u"清理重复松木桩与垫层")
         t.Start()
         try:
-            doc.Delete(List[DB.ElementId](pile_dups + ds_dups + fampad_dups))
+            doc.Delete(List[DB.ElementId](dups))
             t.Commit()
         except Exception:
             if t.HasStarted() and not t.HasEnded():

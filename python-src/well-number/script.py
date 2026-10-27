@@ -37,6 +37,7 @@ DEFAULTS = {'prefix': '', 'start': 1, 'digits': 2, 'step': 1, 'sort': 'X_ASC', '
 
 
 # @include _shared/form_fit.py
+# @include _shared/ws_guard.py
 
 
 def load():
@@ -118,7 +119,7 @@ def dialog(s, n_sel):
     keys = [k for k, _t in SORTS]
     cb.SelectedIndex = keys.index(s['sort']) if s['sort'] in keys else 0
     cb.Location = SD.Point(16, y[0]); cb.Size = SD.Size(440, 24); f.Controls.Add(cb); y[0] += 32
-    c_emp = WF.CheckBox(); c_emp.Text = '只给参数还空着的构件编号（已有编号的不动、不占号）'
+    c_emp = WF.CheckBox(); c_emp.Text = '只给参数还空着的构件编号（已有编号的不动，新号自动跳过已用的号）'
     c_emp.Checked = bool(s['only_empty']); c_emp.Location = SD.Point(16, y[0]); c_emp.Size = SD.Size(440, 22)
     f.Controls.Add(c_emp); y[0] += 34
     ok = WF.Button(); ok.Text = '预览…'; ok.DialogResult = WF.DialogResult.OK; ok.Location = SD.Point(270, y[0]); ok.Size = SD.Size(90, 30)
@@ -208,17 +209,37 @@ def main():
         c = center(e)
         if c is not None:
             pool.append((e, c))
+    # 协同模型：被别人占用的构件改不了，先排除（不占号），确认框里列出来
+    _ok, blocked = wg_split(doc, [e for e, _c in pool])
+    if blocked:
+        bad = set(e.Id for e, _w in blocked)
+        pool = [(e, c) for e, c in pool if e.Id not in bad]
     if not pool:
-        forms.alert('没有可编号的构件。\n注释不符：%d 个；没有可写的「%s」文字参数：%d 个；已有编号保留：%d 个。'
-                    % (skipped_filter, s['param'], skipped_param, kept), title=TITLE)
+        forms.alert('没有可编号的构件。\n注释不符：%d 个；没有可写的「%s」文字参数：%d 个；已有编号保留：%d 个。%s'
+                    % (skipped_filter, s['param'], skipped_param, kept, wg_note(blocked)), title=TITLE)
         return
     try:
         ordered, note = order(pool, s['sort'])
     except Exception:
         return   # 点选时按了 Esc
+    # 「只给空着的编号」时，模型里同类构件已经用掉的号跳过，不会编出重号
+    used = set()
+    if s['only_empty']:
+        for cid in set(e.Category.Id for e, _p in ordered):
+            for o in DB.FilteredElementCollector(doc).OfCategoryId(cid).WhereElementIsNotElementType():
+                op = target_param(o, s['param'])
+                v = (op.AsString() or '').strip() if op is not None else ''
+                if v:
+                    used.add(v)
     plan = []
-    for i, (e, _p) in enumerate(ordered):
-        plan.append((e, '%s%s' % (s['prefix'], str(s['start'] + i * s['step']).zfill(s['digits']))))
+    k = 0
+    for e, _p in ordered:
+        while True:
+            v = '%s%s' % (s['prefix'], str(s['start'] + k * s['step']).zfill(s['digits']))
+            k += 1
+            if v not in used:
+                break
+        plan.append((e, v))
     # 和模型里其它（不在本次范围里的）同类构件重号
     mine = set(e.Id for e, _v in plan)
     new_vals = set(v for _e, v in plan)
@@ -240,6 +261,7 @@ def main():
         msg += '\n\n跳过：注释不符 %d、没有可写参数 %d、已有编号保留 %d。' % (skipped_filter, skipped_param, kept)
     if clash:
         msg += '\n\n⚠ 和模型里其它构件重号 %d 个：%s' % (len(set(clash)), '、'.join(sorted(set(clash))[:10]))
+    msg += wg_note(blocked, lambda e: (target_param(e, s['param']).AsString() or '').strip())
     msg += '\n\n写入？（可 Ctrl+Z 撤销）'
     if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
         return

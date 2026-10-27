@@ -219,6 +219,7 @@ CASES = [
     ('well-param-sync', u'设置', lambda n: n['open_settings']()),
     ('family-param-dim', u'设置', lambda n: n['open_settings']()),
     ('well-config', u'项目配置', lambda n: n['wcfg_edit']()),
+    ('export-nwc', u'导出设置', lambda n: n['dialog'](n['load'](), [], None)),
 ]
 
 _g = WF.Form()

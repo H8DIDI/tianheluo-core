@@ -27,6 +27,7 @@ import System.Drawing as SD
 
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
+# @include _shared/ws_guard.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -743,6 +744,9 @@ def pick_and_write(st):
     wells = [e for e in sel if _mark(e)]
     if not wells:
         return '框里没有井（常规模型且有标记）。'
+    wells, blocked = wg_split(doc, wells)        # 协同：被别人占用的井先排除，否则整批写不进去
+    if not wells:
+        return '框里的井都改不了。' + wg_note(blocked, _mark).replace('\n', ' ')
     over = [e for e in wells if zone_of(e, pname) and zone_of(e, pname) != value]
     same = [e for e in wells if zone_of(e, pname) == value]
     msg = '将给 {} 口井写入「{} = {}」。'.format(len(wells), pname, value)
@@ -750,6 +754,7 @@ def pick_and_write(st):
         msg += '\n其中 {} 口原来已有别的分区，会被覆盖。'.format(len(over))
     if same:
         msg += '\n其中 {} 口本来就是这个分区。'.format(len(same))
+    msg += wg_note(blocked, _mark)
     if WF.MessageBox.Show(msg + '\n\n确定写入吗？', TITLE, WF.MessageBoxButtons.OKCancel, WF.MessageBoxIcon.Question) != WF.DialogResult.OK:
         return '已取消，没有写入。'
     done, skipped = write_zone(wells, pname, value)

@@ -29,7 +29,8 @@ for pid in sorted(os.listdir(ROOT)):
 
 try:
     ns = {}
-    exec(compile(io.open(os.path.join(ROOT, '_shared', 'settings_ui.py'), encoding='utf-8').read(), 'su', 'exec'), ns)
+    for _sh in ('form_fit.py', 'settings_ui.py'):      # 设置窗口依赖 form_fit（插件里也是先 include 它）
+        exec(compile(io.open(os.path.join(ROOT, '_shared', _sh), encoding='utf-8').read(), _sh, 'exec'), ns)
     W = ns['_SUW']
     fields = [{u'kind': u'header', u'label': u'自测'},
               {u'key': u'a', u'label': u'文本', u'kind': u'text'},
