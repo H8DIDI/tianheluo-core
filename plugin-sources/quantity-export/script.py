@@ -182,49 +182,64 @@ def _pick_elements(sel_ids):
 
 
 def _quantities(elems):
-    """汇总：混凝土（楼层、类别、类型）、钢材（同上，含重量）、钢筋（楼层、直径）。"""
-    conc = {}
-    steel = {}
-    rebar = {}
-    skipped = 0
-    for e in elems:
-        try:
-            if _eid(e.Category.Id) == int(DB.BuiltInCategory.OST_Rebar):
-                lvl = _level_name(e)
-                t = doc.GetElement(e.GetTypeId())
-                d_ft = t.BarNominalDiameter if t is not None else 0.0
-                dia = round(d_ft * FT_TO_MM, 1)
-                bars = int(e.NumberOfBarPositions) if int(e.NumberOfBarPositions) > 0 else 1
-                length_m = e.TotalLength * FT_TO_M
-                r_m = d_ft * FT_TO_M / 2.0
-                kg = length_m * math.pi * r_m * r_m * STEEL_DENSITY
-                row = rebar.setdefault((lvl, dia), [0, 0.0, 0.0])
-                row[0] += bars
-                row[1] += length_m
-                row[2] += kg
-                continue
+    """汇总：混凝土（楼层、类别、类型）、钢材（同上，含重量）、钢筋（楼层、直径）。
+    构件多时显示进度条（读几何体积较慢），可以取消；取消返回 None（只读，不改模型）。"""
+    res = {'conc': {}, 'steel': {}, 'rebar': {}, 'skipped': 0}
+    pb = forms.ProgressBar(title=u'正在统计工程量…（点取消可停止）', cancellable=True) if len(elems) > 300 else None
+    try:
+        for i, e in enumerate(elems):
+            if pb is not None and i % 20 == 0:
+                pb.update_progress(i, len(elems))
+                if pb.cancelled:
+                    return None
+            try:
+                _add_one(e, res)
+            except Exception:
+                res['skipped'] += 1
+    finally:
+        if pb is not None:
+            try:
+                pb.close()
+            except Exception:
+                pass
+    return res
 
-            lvl = _level_name(e)
-            cat = _u(e.Category.Name)
-            typ = _type_name(e)
-            vol = _volume_m3(e)
-            dens = _density(e)
-            mname = _material_name(e)
-            is_steel = (dens is not None and dens >= STEEL_MIN_DENSITY) or (
-                dens is None and (u'钢' in mname or u'steel' in mname.lower()))
-            if is_steel:
-                d = dens if (dens is not None and dens >= STEEL_MIN_DENSITY) else STEEL_DENSITY
-                row = steel.setdefault((lvl, cat, typ), [0, 0.0, 0.0])
-                row[0] += 1
-                row[1] += vol
-                row[2] += vol * d  # kg，导出时再换算成 t
-            else:
-                row = conc.setdefault((lvl, cat, typ), [0, 0.0])
-                row[0] += 1
-                row[1] += vol
-        except Exception:
-            skipped += 1
-    return {'conc': conc, 'steel': steel, 'rebar': rebar, 'skipped': skipped}
+
+def _add_one(e, res):
+    """把一个构件的量累加进汇总表。"""
+    if _eid(e.Category.Id) == int(DB.BuiltInCategory.OST_Rebar):
+        lvl = _level_name(e)
+        t = doc.GetElement(e.GetTypeId())
+        d_ft = t.BarNominalDiameter if t is not None else 0.0
+        dia = round(d_ft * FT_TO_MM, 1)
+        bars = int(e.NumberOfBarPositions) if int(e.NumberOfBarPositions) > 0 else 1
+        length_m = e.TotalLength * FT_TO_M
+        r_m = d_ft * FT_TO_M / 2.0
+        kg = length_m * math.pi * r_m * r_m * STEEL_DENSITY
+        row = res['rebar'].setdefault((lvl, dia), [0, 0.0, 0.0])
+        row[0] += bars
+        row[1] += length_m
+        row[2] += kg
+        return
+
+    lvl = _level_name(e)
+    cat = _u(e.Category.Name)
+    typ = _type_name(e)
+    vol = _volume_m3(e)
+    dens = _density(e)
+    mname = _material_name(e)
+    is_steel = (dens is not None and dens >= STEEL_MIN_DENSITY) or (
+        dens is None and (u'钢' in mname or u'steel' in mname.lower()))
+    if is_steel:
+        d = dens if (dens is not None and dens >= STEEL_MIN_DENSITY) else STEEL_DENSITY
+        row = res['steel'].setdefault((lvl, cat, typ), [0, 0.0, 0.0])
+        row[0] += 1
+        row[1] += vol
+        row[2] += vol * d  # kg，导出时再换算成 t
+    else:
+        row = res['conc'].setdefault((lvl, cat, typ), [0, 0.0])
+        row[0] += 1
+        row[1] += vol
 
 
 # ============================================================
@@ -485,6 +500,8 @@ def main():
             forms.alert(u"没有找到可统计的构件（梁、柱、墙、基础、楼板、钢筋）。", title=TITLE)
             return
         res = _quantities(elems)
+        if res is None:
+            return          # 用户取消了统计（只读，没有改模型）
         tables, summary = _table_rows(res)
         if res['skipped']:
             forms.alert(u'有 %d 个构件读取失败，已跳过。' % res['skipped'], title=TITLE)

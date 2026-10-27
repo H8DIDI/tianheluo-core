@@ -13,6 +13,7 @@ from pyrevit import revit, DB, UI, forms
 # 图纸名前缀来自项目配置（文档\KaifaTools\井大样配置.json），默认「井大样_」
 # @include _shared/well_config.py
 # @include _shared/settings_ui.py
+# @include _shared/well_config_ui.py
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]
 import io
@@ -2672,6 +2673,8 @@ def open_settings():
 
 
 def main():
+    if not wcfg_first_run(u'一键井大样标注'):   # 这台电脑第一次用井大样插件：先确认项目配置
+        return
     pb0 = [None]
     try:
         _apply_settings()

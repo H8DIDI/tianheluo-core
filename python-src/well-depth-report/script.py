@@ -35,6 +35,7 @@ DEFAULTS = {
 
 # @include _shared/xlsx_lite.py
 # @include _shared/well_config.py
+# @include _shared/settings_ui.py
 
 
 def load():
@@ -108,7 +109,39 @@ def stats(vals):
             len(set(round(x, 3) for x in v)), len(vals) - len(v)]
 
 
+def open_settings():
+    """图形化设置：井深参数名、深井阈值、不统计的族。保存返回 True。"""
+    cur = load()
+    fields = [
+        {'key': 'params', 'label': '井深参数名（按顺序找）', 'kind': 'list',
+         'hint': '逗号分隔。每口井按顺序找第一个有值的参数作为井深。'},
+        {'key': 'deep_m', 'label': '深井阈值 (m)', 'kind': 'num', 'min': 0, 'max': 100,
+         'hint': '井深达到这个值的井在报表里标为深井。'},
+        {'key': 'family_exclude', 'label': '不统计的族（族名含）', 'kind': 'list',
+         'hint': '逗号分隔。族名含这些字的构件不统计，如井盖、爬梯。'},
+    ]
+    res = su_fields_dialog(TITLE + ' · 设置', '改完点保存，下次统计生效。设置文件：' + SETTINGS, fields, cur, DEFAULTS,
+                           extra_buttons=[('用记事本打开文件', lambda: su_open_file(SETTINGS))], width=680, height=380)
+    if res is None:
+        return False
+    out = dict(DEFAULTS)
+    out.update(cur)
+    out.update(res)
+    if not os.path.isdir(DOC_DIR):
+        os.makedirs(DOC_DIR)
+    with io.open(SETTINGS, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(out, ensure_ascii=False, indent=2))
+    return True
+
+
 def main():
+    pick = forms.CommandSwitchWindow.show(['生成井深统计报表', '⚙ 设置…'], message=TITLE)
+    if not pick:
+        return
+    if pick.startswith('⚙'):
+        if open_settings():
+            forms.alert('设置已保存。再点一次本插件生成报表。', title=TITLE)
+        return
     s = load()
     names = [n for n in s['params'] if n]
     sel = [doc.GetElement(i) for i in uidoc.Selection.GetElementIds()]

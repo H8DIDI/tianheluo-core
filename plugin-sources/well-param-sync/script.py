@@ -24,7 +24,7 @@ import json
 # 图形化「设置」窗口：每个参数一行（中文名、输入框/下拉框/勾选、单位和说明），保存、恢复默认、取消。
 # 用法：su_fields_dialog(标题, 说明, 字段列表, 当前值, 默认值) -> 新值字典 或 None（取消）。
 # 字段 dict：key、label、kind（header 分组标题 / num 数字 / text 文本 / list 逗号分隔的列表 / choice 下拉（只能选）/
-#           combo 下拉（可选可手填）/ bool 勾选 / palette 颜色列表「R,G,B; R,G,B」）、hint 说明、
+#           combo 下拉（可选可手填）/ bool 勾选 / palette 颜色列表「R,G,B; R,G,B」/ lines 多行文本，每行一项，rows 行高）、hint 说明、
 #           choices [(值, 显示文字), ...]、min、max、int（数字取整）。
 import re as _su_re
 import clr as _su_clr
@@ -51,6 +51,8 @@ def _su_to_text(fld, val):
     kind = fld.get(u"kind", u"text")
     if kind == u"list":
         return u", ".join(val or [])
+    if kind == u"lines":
+        return u"\r\n".join(val or [])
     if kind == u"palette":
         return u"; ".join(u"%d,%d,%d" % tuple(c[:3]) for c in (val or []))
     if kind == u"num":
@@ -115,13 +117,23 @@ def su_fields_dialog(title, intro, fields, values, defaults=None, extra_buttons=
             c.Text = fld.get(u"bool_text", u"启用")
             c.Location = _SUD.Point(264, y + 2)
             c.Size = _SUD.Size(width - 310, 22)
+        elif kind == u"lines":
+            c = _SUW.TextBox()
+            c.Multiline = True
+            c.ScrollBars = _SUW.ScrollBars.Both
+            c.WordWrap = False
+            c.AcceptsReturn = True
+            c.Font = _SUD.Font(u"Consolas", 9.0)
+            rows = int(fld.get(u"rows", 6))
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, rows * 18 + 8)
         else:
             c = _SUW.TextBox()
             c.Location = _SUD.Point(264, y)
             c.Size = _SUD.Size(width - 310, 24)
         panel.Controls.Add(c)
         ctrls[key] = c
-        y += 30
+        y += (int(fld.get(u"rows", 6)) * 18 + 14) if kind == u"lines" else 30
         if fld.get(u"hint"):
             h = _SUW.Label()
             h.Text = fld[u"hint"]
@@ -180,6 +192,8 @@ def su_fields_dialog(title, intro, fields, values, defaults=None, extra_buttons=
             return int(round(v)) if fld.get(u"int") else v
         if kind == u"list":
             return _su_split(txt)
+        if kind == u"lines":
+            return [x.strip() for x in (c.Text or u"").splitlines() if x.strip()]
         if kind == u"palette":
             out = []
             for part in [x.strip() for x in _su_re.split(u"[;；\n\r]+", txt) if x.strip()]:

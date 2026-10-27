@@ -18,6 +18,8 @@ clr.AddReference('RevitAPI')
 from Autodesk.Revit import DB
 from pyrevit import revit, forms
 
+# @include _shared/settings_ui.py
+
 doc = revit.doc
 TITLE = '族类型清洗合并'
 RULES = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
@@ -82,7 +84,77 @@ def count_instances(sym):
     return DB.FilteredElementCollector(doc).WherePasses(DB.FamilyInstanceFilter(doc, sym.Id)).GetElementCount()
 
 
+def save_rules(families, strips):
+    d = dict(DEFAULT)
+    try:
+        if os.path.exists(RULES):
+            with io.open(RULES, 'r', encoding='utf-8-sig') as f:
+                d.update(json.load(f))
+    except Exception:
+        pass
+    d['families'] = families
+    d['strip'] = strips
+    dd = os.path.dirname(RULES)
+    if not os.path.isdir(dd):
+        os.makedirs(dd)
+    with io.open(RULES, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(d, ensure_ascii=False, indent=2))
+
+
+def open_settings():
+    """图形化编辑清洗规则。保存返回 True。"""
+    rules = load_rules()
+    fields = [
+        {'key': 'families', 'label': '要处理的族 = 类型名前缀', 'kind': 'lines', 'rows': 10,
+         'hint': '每行一个族：族名 = 这个族的类型名应有的前缀。类型名以别的族的前缀开头时会纠正过来，如 EM1- → EM2-。'},
+        {'key': 'strip', 'label': '类型名替换（正则）', 'kind': 'lines', 'rows': 4,
+         'hint': '每行一条：查找的正则 => 替换为（可留空）。默认一条把「…(L)x…(W)x深度」末尾的深度去掉。'},
+    ]
+    def flat(r):
+        return {'families': ['%s = %s' % (k, v) for k, v in sorted(r['families'].items())],
+                'strip': ['%s => %s' % (x.get('pattern', ''), x.get('repl', '')) for x in r['strip']]}
+    vals = flat(rules)
+    while True:
+        res = su_fields_dialog(TITLE + ' · 规则设置', '改完点保存，下次清洗按新规则。规则文件：' + RULES, fields, vals,
+                               flat({'families': DEFAULT['families'], 'strip': DEFAULT['strip']}),
+                               extra_buttons=[('用记事本打开文件', lambda: su_open_file(RULES))], width=720, height=520)
+        if res is None:
+            return False
+        try:
+            fams = {}
+            for ln in res['families']:
+                if '=' not in ln:
+                    raise ValueError('族这一行缺少「=」：%s（格式：族名 = 前缀）' % ln)
+                k, v = ln.split('=', 1)
+                if not k.strip() or not v.strip():
+                    raise ValueError('族这一行不完整：%s' % ln)
+                fams[k.strip()] = v.strip()
+            strips = []
+            for ln in res['strip']:
+                pat, _, rep = ln.partition('=>')
+                pat = pat.strip()
+                re.compile(pat)
+                strips.append({'pattern': pat, 'repl': rep.strip()})
+        except ValueError as ex:
+            forms.alert('%s' % ex, title=TITLE)
+            vals = res
+            continue
+        except re.error as ex:
+            forms.alert('正则写得不对：%s' % ex, title=TITLE)
+            vals = res
+            continue
+        save_rules(fams, strips)
+        return True
+
+
 def main():
+    pick = forms.CommandSwitchWindow.show(['按当前规则清洗合并', '⚙ 规则设置…'], message=TITLE)
+    if not pick:
+        return
+    if pick.startswith('⚙'):
+        if open_settings():
+            forms.alert('规则已保存。再点一次本插件开始清洗。', title=TITLE)
+        return
     rules = load_rules()
     work = plan(rules)
     if not work:

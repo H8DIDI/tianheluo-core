@@ -28,6 +28,8 @@ uidoc = revit.uidoc
 TITLE = u"一键图纸归类与图框编号"
 # 图纸名前缀、图号前缀、井编号系列都来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
 # @include _shared/well_config.py
+# @include _shared/settings_ui.py
+# @include _shared/well_config_ui.py
 WCFG = wcfg_load()
 SHEET_PREFIX_NAME = WCFG[u"sheet_name_prefix"]
 DEFAULT_PREFIX = WCFG[u"sheet_number_prefix"]
@@ -421,11 +423,16 @@ def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
     tb_map = _titleblock_by_sheet()
     done = 0
     fails = []
+    total = 2 * len(plan)
+    pb = forms.ProgressBar(title=u"正在归类图纸…（点取消可停止，已做的全部撤回）", cancellable=True)
     t = DB.Transaction(doc, u"图纸归类与图框编号")
     t.Start()
     try:
         temp_ok = []
-        for name, sid, sysname, new_no, new_name in plan:
+        for i, (name, sid, sysname, new_no, new_name) in enumerate(plan):
+            pb.update_progress(i, total)
+            if pb.cancelled:
+                raise _Cancelled()
             st = DB.SubTransaction(doc)
             st.Start()
             try:
@@ -447,7 +454,10 @@ def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
                 if st.HasStarted() and not st.HasEnded():
                     st.RollBack()
                 fails.append(u"%s：%s" % (name, ex))
-        for name, sid, new_no, new_name, old in temp_ok:
+        for j, (name, sid, new_no, new_name, old) in enumerate(temp_ok):
+            pb.update_progress(len(plan) + j, total)
+            if pb.cancelled:
+                raise _Cancelled()
             st = DB.SubTransaction(doc)
             st.Start()
             try:
@@ -466,7 +476,17 @@ def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
         if t.HasStarted() and not t.HasEnded():
             t.RollBack()
         raise ex
+    finally:
+        try:
+            pb.close()
+        except Exception:
+            pass
     return done, fails
+
+
+class _Cancelled(Exception):
+    """用户在进度条上点了取消：整个事务回滚，模型不改。"""
+    pass
 
 
 def _sheet_info():
@@ -1021,6 +1041,8 @@ def browser_steps_text():
 
 
 def main():
+    if not wcfg_first_run(u'一键图纸归类与图框编号'):   # 这台电脑第一次用井大样插件：先确认项目配置
+        return
     try:
         if not _sheets_wanted():
             forms.alert(u"模型里没有图纸。", title=TITLE)
@@ -1039,7 +1061,11 @@ def main():
             if not ok:
                 set_system = False
                 notes.append(u"「图纸系统」参数没能添加（%s），本次只改图号和图框，项目浏览器分组需要这个参数。" % why)
-        done, fails = apply_plan(plan, tb_type, keep_tb=(tb_type is None), set_system=set_system)
+        try:
+            done, fails = apply_plan(plan, tb_type, keep_tb=(tb_type is None), set_system=set_system)
+        except _Cancelled:
+            forms.alert(u"已取消，图纸没有任何改动。", title=TITLE)
+            return
         lines = [u"已处理 %d 张图纸，共 %d 张。" % (done, len(plan))]
         lines += notes
         if fails:

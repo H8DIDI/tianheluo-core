@@ -97,17 +97,27 @@ def apply_plan(plan):
     tg = DB.TransactionGroup(doc, '井图号重编')
     tg.Start()
     cur = [None]
+    total = 2 * len(changes)
+    pb = forms.ProgressBar(title='正在重编图号…（点取消可停止，全部撤回）', cancellable=True) if len(changes) > 30 else None
+
+    def tick(i):
+        if pb is not None and i % 10 == 0:
+            pb.update_progress(i, total)
+            if pb.cancelled:
+                raise Exception('已取消，图号没有任何改动。')
     try:
         t1 = DB.Transaction(doc, '临时图号')
         cur[0] = t1
         t1.Start()
-        for key, old, new, sysname, mark in changes:
+        for i, (key, old, new, sysname, mark) in enumerate(changes):
+            tick(i)
             plan['rows'][key]['sheet'].SheetNumber = 'TMP{}'.format(key)      # 图号里不能有 { } [ ] | ; < > ? ` ~
         t1.Commit()
         t2 = DB.Transaction(doc, '正式图号')
         cur[0] = t2
         t2.Start()
-        for key, old, new, sysname, mark in changes:
+        for i, (key, old, new, sysname, mark) in enumerate(changes):
+            tick(len(changes) + i)
             plan['rows'][key]['sheet'].SheetNumber = new
         t2.Commit()
         tg.Assimilate()
@@ -124,6 +134,12 @@ def apply_plan(plan):
         except Exception:
             pass
         return 0, str(ex)
+    finally:
+        if pb is not None:
+            try:
+                pb.close()
+            except Exception:
+                pass
 
 
 def _rules_from_controls(grid, t_digits, t_regex, t_markers, base):

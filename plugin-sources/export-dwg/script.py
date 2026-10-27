@@ -76,6 +76,8 @@ WCFG_DEFAULTS = {
 }
 
 _WCFG_CACHE = [None]
+# 本次运行之前配置文件还不存在（第一次在这台电脑上用井大样插件）。wcfg_load 会写出默认文件，所以要在调用它之前记下来。
+WCFG_FIRST_RUN = not _wc_os.path.exists(WCFG_FILE)
 
 
 def _wcfg_merge(base, extra):

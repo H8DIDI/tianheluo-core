@@ -38,6 +38,8 @@ FT_MM = 304.8
 
 # 图纸名前缀、图号前缀、井编号系列来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
 # @include _shared/well_config.py
+# @include _shared/settings_ui.py
+# @include _shared/well_config_ui.py
 # @include _shared/sheet_blocks.py
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]      # 默认「井大样_」
@@ -907,6 +909,8 @@ def _renumber_pairs(doc, pairs):
 
 
 def main():
+    if not wcfg_first_run(u'一键井展开图'):   # 这台电脑第一次用井大样插件：先确认项目配置
+        return
     try:
         global doc, uidoc
         doc = revit.doc
