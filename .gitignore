@@ -1,7 +1,7 @@
 # 编译产物与临时文件
 bin/
 obj/
-_deploytest/
+*_deploytest/
 *.user
 .vs/
 
@@ -21,3 +21,7 @@ _e2e/
 # python bytecode caches
 __pycache__/
 *.pyc
+
+# 根目录下的临时数据/报表（如核对 CSV），不进仓库
+/*.csv
+/*.xlsx
