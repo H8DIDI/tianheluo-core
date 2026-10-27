@@ -2,7 +2,9 @@
 __title__ = '一键导出图纸DWG/PDF'
 __doc__ = ('批量导出图纸为 DWG / PDF：井大样按系列一键选，也能导项目浏览器里选中的图纸、全部图纸或手动勾选。\n'
            'DWG 每 20 张一批导出（比逐张快），导出前检查没有图框的图纸，文件名按图号去重不再互相覆盖，可只补导缺的；\n'
-           '可选 AutoCAD 后台补 logo、瘦身（PurgeAll）；PDF 可合并成一个或每张一个。每次在文件夹里留一份导出清单。')
+           '可选 AutoCAD 后台补 logo、瘦身（PurgeAll）；PDF 可合并成一个或每张一个。每次在文件夹里留一份导出清单。\n'
+           '坐标：导出图纸时 DWG 按图纸尺寸摆放（没有测量坐标，Revit 本身如此）；导出视图按所选坐标（默认共享坐标）。'
+           '可勾选「图纸里的平面视图另导一份带坐标的 DWG」，同时拿到出图用和对坐标用的两份文件。')
 
 import os
 import re
@@ -780,13 +782,18 @@ BATCH = 20
 SETTINGS = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
                         u'KaifaTools', u'导出图纸设置.json')
 NAME_MODES = [(u'name', u'图名（同名的自动加图号区分）'), (u'num_name', u'图号_图名'), (u'num', u'图号')]
+# 坐标：Revit 导出「图纸」时 DWG 永远按图纸尺寸摆放（与导出设置无关，没有测量坐标）；只有导出「视图」才带坐标。
+# 视图用哪种坐标由这里决定，不再悄悄跟随所选的导出设置（以前「有时有坐标、有时没有」就是这个原因）。
+COORD_MODES = [(u'shared', u'共享坐标（测量坐标，和总图/CAD 底图对得上）'), (u'internal', u'项目内部坐标'),
+               (u'setup', u'按所选导出设置')]
+COORD_TEXT = {u'shared': u'共享坐标', u'internal': u'项目内部坐标', u'setup': u'按导出设置'}
 
 
 def _load_settings():
     s = {u'folder': os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop), u'所有井大样图纸导出'),
          u'dwg': True, u'pdf_merge': False, u'pdf_each': False, u'logo': True, u'slim': False,
          u'name_mode': u'name', u'skip_existing': False, u'setup': DWG_SETUP_NAME,
-         u'big_medium': True, u'big_hide_cad': False}
+         u'big_medium': True, u'big_hide_cad': False, u'coords': u'shared', u'coord_copy': False}
     try:
         with io.open(SETTINGS, 'r', encoding='utf-8') as f:
             s.update(_json.load(f))
@@ -942,6 +949,12 @@ def _dialog(s, items):
     label(u'DWG 导出设置', True); y[0] += 22
     setups = [u'（Revit 默认设置）'] + sorted([x.Name for x in DB.FilteredElementCollector(doc).OfClass(DB.ExportDWGSettings)])
     cb_setup = combo(setups, setups.index(s[u'setup']) if s[u'setup'] in setups else 0)
+    label(u'坐标', True); y[0] += 22
+    cb_coord = combo([t for _k, t in COORD_MODES], [k for k, _t in COORD_MODES].index(s.get(u'coords', u'shared')) if s.get(u'coords', u'shared') in [k for k, _t in COORD_MODES] else 0)
+    lab = WF.Label(); lab.Text = u'导出「图纸」时 DWG 按图纸尺寸摆放，没有测量坐标（Revit 本身如此）；导出「视图」才带上面选的坐标。'
+    lab.ForeColor = SD.Color.FromArgb(110, 110, 110); lab.Location = SD.Point(28, y[0] - 4); lab.Size = SD.Size(W - 44, 34); f.Controls.Add(lab); y[0] += 32
+    c_copy = check(u'图纸里的平面视图另导一份带坐标的 DWG（不带图框，文件名后加「_坐标」）', s.get(u'coord_copy', False))
+    y[0] += 6
     label(u'文件名', True); y[0] += 22
     cb_name = combo([t for _k, t in NAME_MODES], [k for k, _t in NAME_MODES].index(s[u'name_mode']) if s[u'name_mode'] in [k for k, _t in NAME_MODES] else 0)
     c_skip = check(u'只补导文件夹里还没有的（上次中断、或只想补几张时用；默认全部覆盖重导）', s[u'skip_existing'])
@@ -966,7 +979,8 @@ def _dialog(s, items):
     s.update({u'dwg': c_dwg.Checked, u'logo': c_logo.Checked, u'slim': c_slim.Checked, u'pdf_merge': c_pm.Checked,
               u'pdf_each': c_pe.Checked, u'setup': setups[cb_setup.SelectedIndex], u'name_mode': NAME_MODES[cb_name.SelectedIndex][0],
               u'skip_existing': c_skip.Checked, u'folder': t_dir.Text.strip(),
-              u'big_medium': c_med.Checked, u'big_hide_cad': c_cad.Checked})
+              u'big_medium': c_med.Checked, u'big_hide_cad': c_cad.Checked,
+              u'coords': COORD_MODES[cb_coord.SelectedIndex][0], u'coord_copy': c_copy.Checked})
     return s, cb_scope.SelectedIndex
 
 
@@ -988,6 +1002,11 @@ def _dwg_options(s):
     if opt is None:
         opt = DB.DWGExportOptions()
     opt.MergedViews = True               # 不导出成独立的外部参照文件
+    mode = s.get(u'coords', u'shared')
+    if mode == u'shared':
+        opt.SharedCoords = True
+    elif mode == u'internal':
+        opt.SharedCoords = False
     try:
         opt.PreserveCoincidentLines = False
         opt.HideUnreferenceViewTags = True
@@ -1207,14 +1226,54 @@ def _export_pdf_each(sheets, folder, stems):
     return u'PDF（每张一个）已导出 %d / %d 张：%s' % (n, len(sheets), pdf_dir)
 
 
+_PLAN_TYPES = (DB.ViewType.FloorPlan, DB.ViewType.CeilingPlan, DB.ViewType.AreaPlan, DB.ViewType.EngineeringPlan)
+
+
+def _plan_views_on(sheets):
+    """图纸上放着的平面视图：[(图纸, 视图)]。"""
+    out = []
+    for sh in sheets:
+        for vid in sh.GetAllPlacedViews():
+            v = doc.GetElement(vid)
+            if v is not None and not v.IsTemplate and v.ViewType in _PLAN_TYPES:
+                out.append((sh, v))
+    return out
+
+
+def _export_coord_copies(sheets, folder, stems, s, pb, report, slim):
+    """把图纸上的平面视图按共享坐标另导一份（不带图框），文件名「图纸文件名_坐标」，同一张图纸有多个平面时再加视图名。"""
+    pairs = _plan_views_on(sheets)
+    cnt = {}
+    for sh, v in pairs:
+        cnt[sh.Id.Value] = cnt.get(sh.Id.Value, 0) + 1
+    opt = _dwg_options(dict(s, coords=u'shared'))
+    done = []
+    for sh, v in pairs:
+        if pb.cancelled:
+            break
+        stem = stems[sh.Id.Value] + u'_坐标'
+        if cnt[sh.Id.Value] > 1:
+            stem += u'_' + _safe_name(v.Name)
+        sub = []
+        done += _export_dwg_batches([v], folder, {v.Id.Value: stem}, opt, pb, sub, slim)
+        for x, fn, size, res in sub:
+            report.append((x, fn, size, res, u'共享坐标（%s 的平面）' % (sh.SheetNumber or u'')))
+    return done
+
+
+_REPORT_COORD = [u'shared']
+
+
 def _write_report(folder, report):
     path = os.path.join(folder, u'导出清单.csv')
     try:
         with io.open(path, 'w', encoding='utf-8-sig') as f:
-            f.write(u'图号,图名,文件,大小(MB),结果\r\n')
-            for x, fn, size, res in report:
-                f.write(u'%s,%s,%s,%.2f,%s\r\n' % ((getattr(x, 'SheetNumber', None) or u'（视图）').replace(u',', u' '), (x.Name or u'').replace(u',', u' '),
-                                                  fn.replace(u',', u' '), size / 1048576.0, res.replace(u',', u' ')))
+            f.write(u'图号,图名,文件,大小(MB),结果,坐标\r\n')
+            for r in report:
+                x, fn, size, res = r[:4]
+                coord = r[4] if len(r) > 4 else (u'按图纸尺寸（无测量坐标）' if isinstance(x, DB.ViewSheet) else COORD_TEXT.get(_REPORT_COORD[0], u''))
+                f.write(u'%s,%s,%s,%.2f,%s,%s\r\n' % ((getattr(x, 'SheetNumber', None) or u'（视图）').replace(u',', u' '), (x.Name or u'').replace(u',', u' '),
+                                                     fn.replace(u',', u' '), size / 1048576.0, res.replace(u',', u' '), coord.replace(u',', u' ')))
     except Exception:
         return u''
     return path
@@ -1286,6 +1345,8 @@ def main():
 
         t_start = _time.time()
         exported = []
+        coord_files = []
+        _REPORT_COORD[0] = s.get(u'coords', u'shared')
         if (s[u'dwg'] or s[u'slim']) and dwg_targets:
             opt = _dwg_options(s)
             with forms.ProgressBar(title=u'正在导出 DWG（共 %d 张，每批 %d 张）…' % (len(dwg_targets), BATCH), cancellable=True) as pb:
@@ -1297,6 +1358,9 @@ def main():
                     exported = _export_dwg_batches(_sh, folder, stems, opt, pb, report, _sl) if _sh else []
                     for _v in _vw:     # 视图逐个导（Revit 批量导视图的文件名不好对回去）
                         exported += _export_dwg_batches([_v], folder, stems, opt, pb, report, _sl)
+                    if s.get(u'coord_copy') and _sh and s[u'dwg']:
+                        # 坐标副本不带图框，不进 logo/瘦身后处理
+                        coord_files[:] = _export_coord_copies(_sh, folder, stems, s, pb, report, _sl)
                 finally:
                     _auto_dialogs(False)
                     _slim_end(list(_PENDING_UNDO))   # 保险：中途取消或出错也一定还原
@@ -1324,7 +1388,7 @@ def main():
 
         _auto_dialogs(False)
         rep = _write_report(folder, report)
-        ok_n = len([r for r in report if r[3].startswith(u'成功')])
+        ok_n = len([r for r in report if r[3].startswith(u'成功') and len(r) < 5])
         fail = [r for r in report if r[3].startswith(u'失败')]
         size = sum(r[2] for r in report if r[3].startswith(u'成功'))
         msg = u'导出完成：%s\n\n' % folder
@@ -1335,6 +1399,13 @@ def main():
                 msg += u'• 文件夹里已有、跳过 %d 张\n' % skipped
             if fail:
                 msg += u'• 失败 %d 张：\n' % len(fail) + u''.join(u'    %s %s：%s\n' % (getattr(r[0], 'SheetNumber', u''), r[0].Name, r[3]) for r in fail[:8])
+        n_sheet = len([x for x in dwg_targets if isinstance(x, DB.ViewSheet)]) if (s[u'dwg'] or s[u'slim']) else 0
+        if n_sheet:
+            msg += u'• 图纸导出的 DWG 按图纸尺寸摆放，没有测量坐标（Revit 本身如此）\n'
+        if coord_files:
+            msg += u'• 另导了 %d 个带共享坐标的平面 DWG（文件名带「_坐标」，不带图框）\n' % len(coord_files)
+        if len(dwg_targets) > n_sheet and (s[u'dwg'] or s[u'slim']):
+            msg += u'• 视图导出的 DWG 坐标：%s\n' % COORD_TEXT.get(s.get(u'coords', u'shared'), u'')
         if post_msg:
             msg += u'• %s\n' % post_msg
         for m in pdf_msgs:

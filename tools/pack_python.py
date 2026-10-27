@@ -9,7 +9,7 @@ OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
 VERSION_OVERRIDE = {"well-sheets": "0.5.11", "well-annotate": "0.3.36", "well-config": "0.1.0", "well-zone": "0.1.4", "well-sheet-no": "0.1.6", "well-sheet-fit": "0.1.2", "well-spec-table": "0.1.4", "well-param-sync": "0.1.1", "well-family-guard": "0.1.1", "family-param-dim": "0.1.1", "pile-cushion": "0.4.0", "pile-cleanup": "0.2.0",
-                    "quantity-export": "0.2.2", "rebar-cage": "0.2.1", "sheet-organize": "0.6.5", "export-dwg": "0.4.6",
+                    "quantity-export": "0.2.2", "rebar-cage": "0.2.1", "sheet-organize": "0.6.5", "export-dwg": "0.4.7",
                     "export-nwc": "0.2.0", "well-number": "0.2.0", "well-clear-marks": "0.1.2", "elv-merge": "0.2.1",
                     "control-points": "0.1.0", "well-depth-report": "0.1.5"}
 # 商店里显示的名字改过的插件（文件夹名不变，图标照旧从原文件夹取）

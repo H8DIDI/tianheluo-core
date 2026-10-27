@@ -166,8 +166,7 @@ def main():
         print("  通过： tests/test_apply_update.py")
         r = run([sys.executable, "-W", "ignore", "tests/test_python_plugins.py"], quiet=True)
         if "全部通过" not in r.stdout:
-            sys.exit("Python 插件离线检查未通过
-" + r.stdout[-1500:])
+            sys.exit("Python 插件离线检查未通过\n" + r.stdout[-1500:])
         print("  通过： tests/test_python_plugins.py")
     print("== 3/5 发布前检查 ==")
     errs = check_release(allow)
