@@ -26,7 +26,7 @@ def main():
     if not selected_ids:
         try:
             picked_elements = uidoc.Selection.PickElementsByRectangle(
-                "【Antigravity】请在平面图中拉框框选需要清除【标记】的井："
+                "请在平面图中拉框框选需要清除【标记】的井："
             )
             if picked_elements:
                 selected_ids = [e.Id for e in picked_elements]
@@ -57,7 +57,7 @@ def main():
     if not target_elements:
         forms.alert(
             "选中的图元中没有需要清空的【标记】值（可能标记本就为空，或选中的不是井）。",
-            title="Antigravity 提示"
+            title="一键清除井标记"
         )
         return
 
@@ -91,7 +91,7 @@ def main():
     msg += "• 其他所有参数、尺寸及模型图元均完好无损！\n\n"
     msg += "(提示: 如需恢复，可在 Revit 中直接按 Ctrl + Z 撤销)"
 
-    forms.alert(msg, title="Antigravity 专属工具")
+    forms.alert(msg, title="一键清除井标记")
 
 
 if __name__ == '__main__':

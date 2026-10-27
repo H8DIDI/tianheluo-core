@@ -1,0 +1,1014 @@
+# -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+__title__ = '井分区\n标记'
+__author__ = 'didi'
+__doc__ = ('给井分区：在视图里框选一批井，写入「分区」参数（可新建参数，如 分区、施工批次），整次可 Ctrl+Z 撤销。\n'
+           '窗口里列出所有已写入的分区和井数，每个分区一个勾：去掉勾，这个分区的井在当前视图里就不显示；每个分区有自己的颜色，'
+           '点「当前视图配色」就在当前视图里按分区着色（用视图过滤器，只作用当前视图，不改井本身，删掉过滤器即可还原）。\n'
+           '写入前先预览（共几口井、其中几口已有分区会被覆盖）。「生成明细表」按分区分组排序，每个分区带井数小计。\n'
+           '井按「常规模型 + 有标记」识别。')
+
+import io
+import os
+import json
+import traceback
+import clr
+import System
+clr.AddReference('RevitAPI')
+clr.AddReference('RevitAPIUI')
+clr.AddReference('System.Windows.Forms')
+clr.AddReference('System.Drawing')
+from System.Collections.Generic import List
+from Autodesk.Revit import DB
+from Autodesk.Revit.UI.Selection import ISelectionFilter
+from pyrevit import revit, forms
+import System.Windows.Forms as WF
+import System.Drawing as SD
+
+# ---- settings_ui（天河落共用片段，打包时内联进脚本）-----------------------------
+# 图形化「设置」窗口：每个参数一行（中文名、输入框/下拉框/勾选、单位和说明），保存、恢复默认、取消。
+# 用法：su_fields_dialog(标题, 说明, 字段列表, 当前值, 默认值) -> 新值字典 或 None（取消）。
+# 字段 dict：key、label、kind（header 分组标题 / num 数字 / text 文本 / list 逗号分隔的列表 / choice 下拉（只能选）/
+#           combo 下拉（可选可手填）/ bool 勾选 / palette 颜色列表「R,G,B; R,G,B」）、hint 说明、
+#           choices [(值, 显示文字), ...]、min、max、int（数字取整）。
+import re as _su_re
+import clr as _su_clr
+_su_clr.AddReference('System.Windows.Forms')
+_su_clr.AddReference('System.Drawing')
+import System.Windows.Forms as _SUW
+import System.Drawing as _SUD
+import System.Diagnostics as _SUDG
+
+
+def su_open_file(path):
+    """用记事本打开设置文件。"""
+    try:
+        _SUDG.Process.Start(u"notepad.exe", path)
+    except Exception:
+        pass
+
+
+def _su_split(text):
+    return [x.strip() for x in _su_re.split(u"[,，;；\\n\\r]+", text or u"") if x.strip()]
+
+
+def _su_to_text(fld, val):
+    kind = fld.get(u"kind", u"text")
+    if kind == u"list":
+        return u", ".join(val or [])
+    if kind == u"palette":
+        return u"; ".join(u"%d,%d,%d" % tuple(c[:3]) for c in (val or []))
+    if kind == u"num":
+        try:
+            v = float(val)
+            return (u"%d" % v) if v == int(v) else (u"%g" % v)
+        except Exception:
+            return u"" if val is None else u"%s" % val
+    return u"" if val is None else u"%s" % val
+
+
+def su_fields_dialog(title, intro, fields, values, defaults=None, extra_buttons=None, width=680, height=640):
+    """弹出设置窗口。extra_buttons: [(按钮文字, 回调)]，回调不带参数（如「用记事本打开文件」）。返回新值 dict 或 None。"""
+    f = _SUW.Form()
+    f.Text = title
+    f.Font = _SUD.Font(u"Microsoft YaHei UI", 9.0)
+    f.StartPosition = _SUW.FormStartPosition.CenterScreen
+    f.FormBorderStyle = _SUW.FormBorderStyle.FixedDialog
+    f.MaximizeBox = False
+    f.MinimizeBox = False
+    f.ClientSize = _SUD.Size(width, height)
+    lb = _SUW.Label()
+    lb.Text = intro
+    lb.Location = _SUD.Point(14, 10)
+    lb.Size = _SUD.Size(width - 28, 44)
+    f.Controls.Add(lb)
+    panel = _SUW.Panel()
+    panel.Location = _SUD.Point(10, 58)
+    panel.Size = _SUD.Size(width - 20, height - 58 - 54)
+    panel.AutoScroll = True
+    panel.BorderStyle = _SUW.BorderStyle.FixedSingle
+    f.Controls.Add(panel)
+
+    ctrls = {}
+    y = 8
+    for fld in fields:
+        kind = fld.get(u"kind", u"text")
+        if kind == u"header":
+            l = _SUW.Label()
+            l.Text = fld[u"label"]
+            l.Font = _SUD.Font(f.Font, _SUD.FontStyle.Bold)
+            l.Location = _SUD.Point(6, y + 6)
+            l.Size = _SUD.Size(width - 60, 22)
+            panel.Controls.Add(l)
+            y += 34
+            continue
+        l = _SUW.Label()
+        l.Text = fld[u"label"]
+        l.Location = _SUD.Point(6, y + 3)
+        l.Size = _SUD.Size(250, 34)
+        panel.Controls.Add(l)
+        key = fld[u"key"]
+        if kind in (u"choice", u"combo"):
+            c = _SUW.ComboBox()
+            c.DropDownStyle = _SUW.ComboBoxStyle.DropDownList if kind == u"choice" else _SUW.ComboBoxStyle.DropDown
+            for _v, _t in fld.get(u"choices", []):
+                c.Items.Add(_t)
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, 24)
+        elif kind == u"bool":
+            c = _SUW.CheckBox()
+            c.Text = fld.get(u"bool_text", u"启用")
+            c.Location = _SUD.Point(264, y + 2)
+            c.Size = _SUD.Size(width - 310, 22)
+        else:
+            c = _SUW.TextBox()
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, 24)
+        panel.Controls.Add(c)
+        ctrls[key] = c
+        y += 30
+        if fld.get(u"hint"):
+            h = _SUW.Label()
+            h.Text = fld[u"hint"]
+            h.ForeColor = _SUD.Color.FromArgb(110, 110, 110)
+            h.Location = _SUD.Point(264, y - 2)
+            h.Size = _SUD.Size(width - 310, 34)
+            panel.Controls.Add(h)
+            y += 36
+        y += 6
+
+    def put(fld, val):
+        c = ctrls.get(fld[u"key"])
+        if c is None:
+            return
+        kind = fld.get(u"kind", u"text")
+        if kind == u"bool":
+            c.Checked = bool(val)
+        elif kind in (u"choice", u"combo"):
+            chs = fld.get(u"choices", [])
+            idx = [i for i, (v, t) in enumerate(chs) if v == val]
+            if idx:
+                c.SelectedIndex = idx[0]
+            elif kind == u"combo":
+                c.Text = u"" if val is None else u"%s" % val
+            elif chs:
+                c.SelectedIndex = 0
+        else:
+            c.Text = _su_to_text(fld, val)
+
+    def get(fld):
+        """读控件的值并校验；不合格抛 ValueError(说明)。"""
+        c = ctrls[fld[u"key"]]
+        kind = fld.get(u"kind", u"text")
+        name = fld[u"label"]
+        if kind == u"bool":
+            return bool(c.Checked)
+        if kind == u"choice":
+            chs = fld.get(u"choices", [])
+            return chs[c.SelectedIndex][0] if 0 <= c.SelectedIndex < len(chs) else None
+        if kind == u"combo":
+            txt = (c.Text or u"").strip()
+            for v, t in fld.get(u"choices", []):
+                if t == txt:
+                    return v
+            return txt
+        txt = (c.Text or u"").strip()
+        if kind == u"num":
+            try:
+                v = float(txt)
+            except Exception:
+                raise ValueError(u"「%s」要填数字。" % name)
+            if fld.get(u"min") is not None and v < fld[u"min"]:
+                raise ValueError(u"「%s」不能小于 %s。" % (name, fld[u"min"]))
+            if fld.get(u"max") is not None and v > fld[u"max"]:
+                raise ValueError(u"「%s」不能大于 %s。" % (name, fld[u"max"]))
+            return int(round(v)) if fld.get(u"int") else v
+        if kind == u"list":
+            return _su_split(txt)
+        if kind == u"palette":
+            out = []
+            for part in [x.strip() for x in _su_re.split(u"[;；\n\r]+", txt) if x.strip()]:
+                nums = [x for x in _su_re.split(u"[ ,]+", part) if x]
+                try:
+                    rgb = [int(x) for x in nums[:3]]
+                except Exception:
+                    rgb = []
+                if len(rgb) != 3 or any(n < 0 or n > 255 for n in rgb):
+                    raise ValueError(u"「%s」里「%s」不是有效的颜色，格式是 R,G,B（0–255），多个颜色用分号隔开。" % (name, part))
+                out.append(rgb)
+            if not out:
+                raise ValueError(u"「%s」至少要有一个颜色。" % name)
+            return out
+        if fld.get(u"required") and not txt:
+            raise ValueError(u"「%s」不能为空。" % name)
+        return txt
+
+    for fld in fields:
+        if fld.get(u"kind") != u"header":
+            put(fld, values.get(fld[u"key"]))
+
+    result = {u"v": None}
+    b_ok = _SUW.Button()
+    b_ok.Text = u"保存"
+    b_ok.Name = u"su_ok"
+    b_ok.Location = _SUD.Point(width - 200, height - 44)
+    b_ok.Size = _SUD.Size(88, 30)
+    b_ca = _SUW.Button()
+    b_ca.Text = u"取消"
+    b_ca.Name = u"su_cancel"
+    b_ca.Location = _SUD.Point(width - 100, height - 44)
+    b_ca.Size = _SUD.Size(88, 30)
+    f.Controls.Add(b_ok)
+    f.Controls.Add(b_ca)
+    f.CancelButton = b_ca
+    bx = 14
+    if defaults:
+        b_def = _SUW.Button()
+        b_def.Text = u"恢复默认"
+        b_def.Name = u"su_default"
+        b_def.Location = _SUD.Point(bx, height - 44)
+        b_def.Size = _SUD.Size(88, 30)
+        f.Controls.Add(b_def)
+        bx += 96
+
+        def _on_def(s, e):
+            for fld in fields:
+                if fld.get(u"kind") != u"header" and fld[u"key"] in defaults:
+                    put(fld, defaults[fld[u"key"]])
+        b_def.Click += _on_def
+    for text, cb in (extra_buttons or []):
+        b = _SUW.Button()
+        b.Text = text
+        b.Location = _SUD.Point(bx, height - 44)
+        b.Size = _SUD.Size(130, 30)
+        f.Controls.Add(b)
+        bx += 138
+        b.Click += (lambda s, e, cb=cb: cb())
+
+    def _on_ok(s, e):
+        out = {}
+        try:
+            for fld in fields:
+                if fld.get(u"kind") != u"header":
+                    out[fld[u"key"]] = get(fld)
+        except ValueError as ex:
+            _SUW.MessageBox.Show(u"%s" % ex, title)
+            return
+        result[u"v"] = out
+        f.Close()
+    b_ok.Click += _on_ok
+    b_ca.Click += (lambda s, e: f.Close())
+    f.ShowDialog()
+    return result[u"v"]
+
+doc = revit.doc
+uidoc = revit.uidoc
+TITLE = '井分区标记'
+GEN = DB.BuiltInCategory.OST_GenericModel
+CFG_PATH = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
+                        'KaifaTools', '井分区配置.json')
+UNASSIGNED = '未分区'
+FILTER_PREFIX = '井分区_'
+SCHED_PREFIX = '井分区明细表_'
+GROUP_NAME = '井分区'
+MARK_PARAM = ''
+DEFAULT_PARAM = '分区'
+PALETTE = [(230, 57, 70), (42, 157, 143), (69, 123, 157), (244, 162, 97), (131, 56, 236),
+           (6, 214, 160), (255, 190, 11), (251, 86, 7), (58, 134, 255), (141, 153, 174)]
+FACTORY_PALETTE = list(PALETTE)
+BAD_CHARS = set('{}[]|;<>?`~\\:"')
+
+
+# ============================================================
+# 配置（颜色、上次用的参数）
+# ============================================================
+
+def default_cfg():
+    return {
+        '说明': ('井分区标记的设置。well_category=井所在的类别（Revit 内部类别名，如 OST_GenericModel）；mark_parameter=井号参数名（空=Revit 自带的「标记」，'
+                '只有这个参数有值的才算井）；default_param_name=新建参数时默认的参数名；unassigned_label=窗口里「没有分区」那一行的名字；'
+                'filter_prefix=视图过滤器名字的前缀；schedule_prefix=明细表名字的前缀；param_group_name=新建参数时用的共享参数组名；'
+                'palette=新分区自动取色的调色板（RGB）；colors=每个分区的颜色（程序维护，也可以手改）。'),
+        'well_category': 'OST_GenericModel',
+        'mark_parameter': '',
+        'default_param_name': '分区',
+        'unassigned_label': '未分区',
+        'filter_prefix': '井分区_',
+        'schedule_prefix': '井分区明细表_',
+        'param_group_name': '井分区',
+        'palette': [list(c) for c in FACTORY_PALETTE],
+        'colors': {},
+        'param': '',
+    }
+
+
+def load_cfg():
+    """读设置文件并补全缺的项；文件不存在就写出一份默认的（方便你直接打开改）。"""
+    c = default_cfg()
+    existed = os.path.isfile(CFG_PATH)
+    try:
+        with io.open(CFG_PATH, 'r', encoding='utf-8') as f:
+            u = json.load(f)
+        if isinstance(u, dict):
+            for k, v in u.items():
+                if k != '说明':
+                    c[k] = v
+    except Exception:
+        pass
+    if not isinstance(c.get('colors'), dict):
+        c['colors'] = {}
+    if not existed:
+        save_cfg(c)
+    return c
+
+
+def apply_cfg(c):
+    """把设置应用到脚本里的名称、类别、调色板。某项写错就沿用默认。"""
+    global GEN, UNASSIGNED, PALETTE, FILTER_PREFIX, SCHED_PREFIX, GROUP_NAME, MARK_PARAM, DEFAULT_PARAM
+    cat = getattr(DB.BuiltInCategory, str(c.get('well_category') or ''), None)
+    if cat is not None:
+        GEN = cat
+    MARK_PARAM = (c.get('mark_parameter') or '').strip()
+    UNASSIGNED = c.get('unassigned_label') or UNASSIGNED
+    FILTER_PREFIX = c.get('filter_prefix') or FILTER_PREFIX
+    SCHED_PREFIX = c.get('schedule_prefix') or SCHED_PREFIX
+    GROUP_NAME = c.get('param_group_name') or GROUP_NAME
+    DEFAULT_PARAM = c.get('default_param_name') or DEFAULT_PARAM
+    try:
+        pal = [tuple(int(x) for x in p3[:3]) for p3 in c.get('palette') or []]
+        if pal:
+            PALETTE = pal
+    except Exception:
+        pass
+
+
+def save_cfg(c):
+    try:
+        d = os.path.dirname(CFG_PATH)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        txt = json.dumps(c, ensure_ascii=False, indent=1)
+        if not isinstance(txt, type('')):
+            txt = txt.decode('utf-8')
+        with io.open(CFG_PATH, 'w', encoding='utf-8') as f:
+            f.write(txt)
+    except Exception:
+        pass
+
+
+_CAT_CHOICES = [('OST_GenericModel', '常规模型'), ('OST_StructuralFraming', '结构框架'), ('OST_ElectricalEquipment', '电气设备'),
+                ('OST_MechanicalEquipment', '机械设备'), ('OST_PipeFitting', '管件'), ('OST_Conduit', '线管')]
+
+
+def zone_fields():
+    return [
+        {'kind': 'header', 'label': '什么算「井」'},
+        {'key': 'well_category', 'label': '井所在的类别', 'kind': 'combo', 'choices': _CAT_CHOICES,
+         'hint': '可以直接填 Revit 内部类别名，如 OST_GenericModel。'},
+        {'key': 'mark_parameter', 'label': '井号参数名', 'kind': 'text',
+         'hint': '留空 = Revit 自带的「标记」。只有这个参数有值的构件才算井。'},
+        {'kind': 'header', 'label': '名称'},
+        {'key': 'default_param_name', 'label': '新建参数时默认的参数名', 'kind': 'text', 'required': True},
+        {'key': 'unassigned_label', 'label': '「没有分区」那一行的名字', 'kind': 'text', 'required': True},
+        {'key': 'filter_prefix', 'label': '视图过滤器名称前缀', 'kind': 'text', 'required': True,
+         'hint': '每个分区在当前视图里建一个过滤器，名字以此开头。要还原视图，删掉这些过滤器。'},
+        {'key': 'schedule_prefix', 'label': '明细表名称前缀', 'kind': 'text', 'required': True},
+        {'key': 'param_group_name', 'label': '新建参数用的共享参数组名', 'kind': 'text', 'required': True},
+        {'kind': 'header', 'label': '颜色'},
+        {'key': 'palette', 'label': '新分区自动取色的调色板', 'kind': 'palette',
+         'hint': '每个颜色写 R,G,B（0–255），多个颜色用分号隔开，如 230,57,70; 42,157,143。已有分区的颜色不受影响。'},
+    ]
+
+
+def color_of(cfg, pname, value):
+    """分区颜色：配置里有就用，没有按已有颜色数顺序取调色板里的下一个并记下来。"""
+    key = pname + '|' + value
+    if key not in cfg['colors']:
+        used = len([k for k in cfg['colors'] if k.startswith(pname + '|')])
+        cfg['colors'][key] = list(PALETTE[used % len(PALETTE)])
+    return tuple(cfg['colors'][key])
+
+
+# ============================================================
+# 参数
+# ============================================================
+
+def _idv(eid):
+    try:
+        return int(eid.Value)
+    except Exception:
+        return int(eid.IntegerValue)
+
+
+def _is_text_param_on_generic(defn, binding):
+    try:
+        if not isinstance(binding, DB.InstanceBinding):
+            return False
+        ok = False
+        for c in binding.Categories:
+            if _idv(c.Id) == int(GEN):
+                ok = True
+        if not ok:
+            return False
+        return defn.GetDataType() == DB.SpecTypeId.String.Text
+    except Exception:
+        return False
+
+
+def list_params():
+    """项目里绑定到「常规模型」实例的文字参数名。"""
+    out = []
+    it = doc.ParameterBindings.ForwardIterator()
+    while it.MoveNext():
+        try:
+            if _is_text_param_on_generic(it.Key, it.Current):
+                out.append(it.Key.Name)
+        except Exception:
+            continue
+    return sorted(set(out))
+
+
+def param_id(name):
+    for p in DB.FilteredElementCollector(doc).OfClass(DB.ParameterElement).ToElements():
+        try:
+            if p.GetDefinition().Name == name:
+                return p.Id
+        except Exception:
+            continue
+    return None
+
+
+def create_param(name):
+    """新建「常规模型」实例文字参数（共享参数，写临时共享参数文件，用完还原用户原来的共享参数文件路径）。"""
+    import tempfile
+    import uuid
+    app = doc.Application
+    old = app.SharedParametersFilename
+    tmp = os.path.join(tempfile.gettempdir(), 'thl_well_zone_sp.txt')
+    guid = str(uuid.uuid4())
+    text = ('# This is a Revit shared parameter file.\n# Do not edit manually.\n'
+            '*META\tVERSION\tMINVERSION\nMETA\t2\t1\n*GROUP\tID\tNAME\nGROUP\t1\t{}\n'
+            '*PARAM\tGUID\tNAME\tDATATYPE\tDATACATEGORY\tGROUP\tVISIBLE\tDESCRIPTION\tUSERMODIFIABLE\tHIDEWHENNOVALUE\n'
+            'PARAM\t{}\t{}\tTEXT\t\t1\t1\t\t1\t0\n').format(GROUP_NAME, guid, name)
+    with io.open(tmp, 'w', encoding='utf-16', newline='\n') as f:       # 共享参数文件必须 UTF-16 + LF
+        f.write(text)
+    t = DB.Transaction(doc, '新建分区参数')
+    t.Start()
+    try:
+        app.SharedParametersFilename = tmp
+        sp = app.OpenSharedParameterFile()
+        d = sp.Groups.get_Item(GROUP_NAME).Definitions.get_Item(name)
+        cats = app.Create.NewCategorySet()
+        cats.Insert(doc.Settings.Categories.get_Item(GEN))
+        doc.ParameterBindings.Insert(d, app.Create.NewInstanceBinding(cats), DB.GroupTypeId.Data)
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+    finally:
+        try:
+            app.SharedParametersFilename = old
+        except Exception:
+            pass
+
+
+# ============================================================
+# 井与分区
+# ============================================================
+
+def _mark(e):
+    try:
+        p = e.LookupParameter(MARK_PARAM) if MARK_PARAM else e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+        return (p.AsString() or '').strip() if p else ''
+    except Exception:
+        return ''
+
+
+def mark_pid():
+    """井号参数的 ElementId：设置里没指定就是 Revit 自带的「标记」。"""
+    if MARK_PARAM:
+        pid = param_id(MARK_PARAM)
+        if pid is not None:
+            return pid
+    return DB.ElementId(DB.BuiltInParameter.ALL_MODEL_MARK)
+
+
+def all_wells():
+    """全部井：常规模型实例且有标记。只扫一次、不做视图级查询。"""
+    out = []
+    for e in DB.FilteredElementCollector(doc).OfCategory(GEN).WhereElementIsNotElementType().ToElements():
+        if _mark(e):
+            out.append(e)
+    return out
+
+
+def zone_of(e, pname):
+    try:
+        p = e.LookupParameter(pname)
+        if p is not None and p.StorageType == DB.StorageType.String:
+            return (p.AsString() or '').strip()
+    except Exception:
+        pass
+    return ''
+
+
+def zone_counts(wells, pname):
+    cnt = {}
+    for e in wells:
+        v = zone_of(e, pname)
+        cnt[v] = cnt.get(v, 0) + 1
+    return cnt
+
+
+class _WellFilter(ISelectionFilter):
+    def AllowElement(self, e):
+        try:
+            return e.Category is not None and _idv(e.Category.Id) == int(GEN) and bool(_mark(e))
+        except Exception:
+            return False
+
+    def AllowReference(self, r, p):
+        return False
+
+
+def write_zone(elems, pname, value):
+    """把分区值写进这批井；整次一个事务（一次 Ctrl+Z）。返回(写入数, 跳过数)。"""
+    t = DB.Transaction(doc, '井分区标记：{} = {}'.format(pname, value))
+    t.Start()
+    done = skipped = 0
+    try:
+        for e in elems:
+            p = e.LookupParameter(pname)
+            if p is None or p.IsReadOnly or p.StorageType != DB.StorageType.String:
+                skipped += 1
+                continue
+            p.Set(value)
+            done += 1
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+    return done, skipped
+
+
+# ============================================================
+# 当前视图：过滤器显隐 + 配色
+# ============================================================
+
+def _safe_name(s):
+    return ''.join('_' if ch in BAD_CHARS else ch for ch in s)
+
+
+def filter_name(pname, value):
+    return '{}{}_{}'.format(FILTER_PREFIX, _safe_name(pname), _safe_name(value or UNASSIGNED))
+
+
+def existing_filters():
+    return dict((f.Name, f) for f in DB.FilteredElementCollector(doc).OfClass(DB.ParameterFilterElement).ToElements())
+
+
+def ensure_filter(pname, value, flts):
+    """取（没有就建）这个分区的视图过滤器。未分区 = 参数没有值且有标记。"""
+    nm = filter_name(pname, value)
+    if nm in flts:
+        return flts[nm]
+    pid = param_id(pname)
+    mark_id = mark_pid()
+    has_mark = DB.ElementParameterFilter(DB.ParameterFilterRuleFactory.CreateHasValueParameterRule(mark_id))
+    if value:
+        rule_f = DB.ElementParameterFilter(DB.ParameterFilterRuleFactory.CreateEqualsRule(pid, value))
+    else:
+        rule_f = DB.ElementParameterFilter(DB.ParameterFilterRuleFactory.CreateHasNoValueParameterRule(pid))
+    both = DB.LogicalAndFilter(has_mark, rule_f)
+    cats = List[DB.ElementId]()
+    cats.Add(DB.ElementId(GEN))
+    f = DB.ParameterFilterElement.Create(doc, nm, cats, both)
+    flts[nm] = f
+    return f
+
+
+def _solid_fill_id():
+    for fp in DB.FilteredElementCollector(doc).OfClass(DB.FillPatternElement).ToElements():
+        try:
+            pat = fp.GetFillPattern()
+            if pat.IsSolidFill and pat.Target == DB.FillPatternTarget.Drafting:
+                return fp.Id
+        except Exception:
+            continue
+    return DB.ElementId.InvalidElementId
+
+
+def view_ok(v):
+    """当前视图能不能挂过滤器：要是图形视图，且没有被视图样板接管过滤器。"""
+    if v is None or isinstance(v, (DB.ViewSheet, DB.ViewSchedule)):
+        return False, '请先切换到一个平面/立面/三维视图再用显隐和配色（当前是图纸或明细表）。'
+    try:
+        if v.ViewTemplateId != DB.ElementId.InvalidElementId:
+            return False, '当前视图套了视图样板，过滤器由样板控制，改不动。请换一个没套样板的视图，或先在视图属性里把样板设为「无」。'
+    except Exception:
+        pass
+    return True, ''
+
+
+def apply_view(pname, zones, cfg, only=None):
+    """zones: {分区值: 是否显示}。只作用当前视图：加过滤器、设颜色、设可见性。only 指定时只处理这一个分区。"""
+    v = uidoc.ActiveView
+    ok, why = view_ok(v)
+    if not ok:
+        return why
+    t = DB.Transaction(doc, '井分区：当前视图显隐与配色')
+    t.Start()
+    try:
+        flts = existing_filters()
+        solid = _solid_fill_id()
+        have = set(_idv(i) for i in v.GetFilters())
+        for val, show in zones.items():
+            if only is not None and val != only:
+                continue
+            f = ensure_filter(pname, val, flts)
+            fid = _idv(f.Id)
+            if fid not in have:
+                v.AddFilter(f.Id)
+                have.add(fid)
+            r, g, b = color_of(cfg, pname, val) if val else (150, 150, 150)
+            col = DB.Color(r, g, b)
+            og = DB.OverrideGraphicSettings()
+            og.SetProjectionLineColor(col)
+            og.SetCutLineColor(col)
+            if solid != DB.ElementId.InvalidElementId:
+                og.SetSurfaceForegroundPatternId(solid)
+                og.SetSurfaceForegroundPatternColor(col)
+                og.SetCutForegroundPatternId(solid)
+                og.SetCutForegroundPatternColor(col)
+            v.SetFilterOverrides(f.Id, og)
+            v.SetFilterVisibility(f.Id, bool(show))
+        t.Commit()
+    except Exception as ex:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        return '当前视图设置失败：{}'.format(ex)
+    try:
+        uidoc.RefreshActiveView()
+    except Exception:
+        pass
+    return ''
+
+
+# ============================================================
+# 明细表
+# ============================================================
+
+def make_schedule(pname):
+    sch_name = '{}{}'.format(SCHED_PREFIX, _safe_name(pname))
+    names = set(v.Name for v in DB.FilteredElementCollector(doc).OfClass(DB.ViewSchedule).ToElements())
+    nm, k = sch_name, 1
+    while nm in names:
+        k += 1
+        nm = '{}_{}'.format(sch_name, k)
+    t = DB.Transaction(doc, '生成井分区明细表')
+    t.Start()
+    try:
+        sch = DB.ViewSchedule.CreateSchedule(doc, DB.ElementId(GEN))
+        sch.Name = nm
+        d = sch.Definition
+        want_zone = param_id(pname)
+        mark_pid_ = mark_pid()
+        fam_pid = DB.ElementId(DB.BuiltInParameter.ELEM_FAMILY_AND_TYPE_PARAM)
+        pick = {}
+        for sf in d.GetSchedulableFields():
+            try:
+                pid = sf.ParameterId
+                if pid == mark_pid_ and 'mark' not in pick:
+                    pick['mark'] = sf
+                elif pid == fam_pid and 'fam' not in pick:
+                    pick['fam'] = sf
+                elif want_zone is not None and pid == want_zone and 'zone' not in pick:
+                    pick['zone'] = sf
+            except Exception:
+                continue
+        fields = {}
+        for key in ('zone', 'mark', 'fam'):
+            if key in pick:
+                fields[key] = d.AddField(pick[key])
+        if 'zone' not in fields or 'mark' not in fields:
+            raise Exception('明细表里找不到「标记」或「{}」字段'.format(pname))
+        # 只列有标记的构件（过滤掉没标记的常规模型）
+        d.AddFilter(DB.ScheduleFilter(fields['mark'].FieldId, DB.ScheduleFilterType.HasValue))
+        g = DB.ScheduleSortGroupField(fields['zone'].FieldId, DB.ScheduleSortOrder.Ascending)
+        g.ShowHeader = True
+        g.ShowFooter = True
+        g.ShowFooterCount = True
+        g.ShowFooterTitle = True
+        g.ShowBlankLine = False
+        d.AddSortGroupField(g)
+        d.AddSortGroupField(DB.ScheduleSortGroupField(fields['mark'].FieldId, DB.ScheduleSortOrder.Ascending))
+        d.IsItemized = True
+        t.Commit()
+        return nm, ''
+    except Exception as ex:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        return None, str(ex)
+
+
+# ============================================================
+# 窗口
+# ============================================================
+
+def ask_text(title, prompt, default=''):
+    f = WF.Form()
+    f.Text = title
+    f.Font = SD.Font('Microsoft YaHei UI', 9.0)
+    f.StartPosition = WF.FormStartPosition.CenterParent
+    f.FormBorderStyle = WF.FormBorderStyle.FixedDialog
+    f.MaximizeBox = False
+    f.MinimizeBox = False
+    f.ClientSize = SD.Size(360, 110)
+    l = WF.Label(); l.Text = prompt; l.Location = SD.Point(14, 12); l.Size = SD.Size(330, 20)
+    t = WF.TextBox(); t.Text = default; t.Location = SD.Point(14, 38); t.Size = SD.Size(330, 24)
+    ok = WF.Button(); ok.Text = '确定'; ok.DialogResult = WF.DialogResult.OK; ok.Location = SD.Point(172, 72); ok.Size = SD.Size(80, 28)
+    ca = WF.Button(); ca.Text = '取消'; ca.DialogResult = WF.DialogResult.Cancel; ca.Location = SD.Point(264, 72); ca.Size = SD.Size(80, 28)
+    for c in (l, t, ok, ca):
+        f.Controls.Add(c)
+    f.AcceptButton = ok
+    f.CancelButton = ca
+    if f.ShowDialog() != WF.DialogResult.OK:
+        return None
+    return (t.Text or '').strip()
+
+
+def valid_name(s):
+    return bool(s) and not any(ch in BAD_CHARS for ch in s)
+
+
+def main_dialog(st):
+    """主窗口。返回动作：'pick' 去框选 / 'close' 关闭。st 是跨次保存的状态。"""
+    cfg = st['cfg']
+    wells = all_wells()
+    params = list_params()
+    if st.get('param') not in params:
+        st['param'] = cfg.get('param') if cfg.get('param') in params else (params[0] if params else '')
+
+    f = WF.Form()
+    f.Text = TITLE
+    f.Font = SD.Font('Microsoft YaHei UI', 9.0)
+    f.StartPosition = WF.FormStartPosition.CenterScreen
+    f.FormBorderStyle = WF.FormBorderStyle.FixedDialog
+    f.MaximizeBox = False
+    f.MinimizeBox = False
+    f.ClientSize = SD.Size(520, 560)
+    result = {'act': 'close'}
+    busy = [True]
+    ready = [False]   # 窗口真正显示之后才响应勾选：显示前 WinForms 会为已勾选的行补发「勾选变化」事件，不能当成用户点击
+
+    def lab(t, x, y, w=300, bold=False):
+        l = WF.Label(); l.Text = t; l.Location = SD.Point(x, y); l.Size = SD.Size(w, 20)
+        if bold:
+            l.Font = SD.Font(f.Font, SD.FontStyle.Bold)
+        f.Controls.Add(l)
+        return l
+
+    lab('分区参数', 16, 12, bold=True)
+    cb_par = WF.ComboBox(); cb_par.DropDownStyle = WF.ComboBoxStyle.DropDownList
+    for p in params:
+        cb_par.Items.Add(p)
+    cb_par.Location = SD.Point(16, 36); cb_par.Size = SD.Size(300, 24)
+    if st['param'] in params:
+        cb_par.SelectedIndex = params.index(st['param'])
+    f.Controls.Add(cb_par)
+    b_new = WF.Button(); b_new.Text = '新建参数…'; b_new.Location = SD.Point(326, 34); b_new.Size = SD.Size(110, 28)
+    f.Controls.Add(b_new)
+    b_cfg = WF.Button(); b_cfg.Text = '设置…'; b_cfg.Location = SD.Point(442, 34); b_cfg.Size = SD.Size(62, 28)
+    f.Controls.Add(b_cfg)
+
+    lab('分区名（要写入这批井的值）', 16, 72, bold=True)
+    cb_val = WF.ComboBox(); cb_val.DropDownStyle = WF.ComboBoxStyle.DropDown
+    cb_val.Location = SD.Point(16, 96); cb_val.Size = SD.Size(300, 24)
+    f.Controls.Add(cb_val)
+    b_pick = WF.Button(); b_pick.Text = '框选井并写入'; b_pick.Location = SD.Point(326, 94); b_pick.Size = SD.Size(110, 28)
+    f.Controls.Add(b_pick)
+
+    lab('已有分区（勾选 = 在当前视图显示）', 16, 134, 400, True)
+    lv = WF.ListView()
+    lv.View = WF.View.Details
+    lv.CheckBoxes = True
+    lv.FullRowSelect = True
+    lv.HideSelection = False
+    lv.Location = SD.Point(16, 158); lv.Size = SD.Size(488, 290)
+    lv.Columns.Add('分区', 280)
+    lv.Columns.Add('井数', 80)
+    lv.Columns.Add('颜色', 100)
+    f.Controls.Add(lv)
+
+    info = lab('', 16, 454, 488)
+    info.Size = SD.Size(488, 40)
+    info.ForeColor = SD.Color.FromArgb(90, 90, 90)
+
+    b_color = WF.Button(); b_color.Text = '改所选分区颜色'; b_color.Location = SD.Point(16, 500); b_color.Size = SD.Size(110, 30)
+    b_apply = WF.Button(); b_apply.Text = '当前视图配色'; b_apply.Location = SD.Point(134, 500); b_apply.Size = SD.Size(110, 30)
+    b_sch = WF.Button(); b_sch.Text = '生成明细表'; b_sch.Location = SD.Point(252, 500); b_sch.Size = SD.Size(110, 30)
+    b_close = WF.Button(); b_close.Text = '关闭'; b_close.Location = SD.Point(394, 500); b_close.Size = SD.Size(110, 30)
+    for b in (b_color, b_apply, b_sch, b_close):
+        f.Controls.Add(b)
+    f.CancelButton = b_close
+
+    counts = {}
+
+    def refresh():
+        busy[0] = True
+        lv.Items.Clear()
+        cb_val.Items.Clear()
+        pname = st['param']
+        counts.clear()
+        if pname:
+            counts.update(zone_counts(wells, pname))
+        keys = sorted([k for k in counts if k], key=lambda s: s)
+        order = ([''] if counts.get('', 0) else []) + keys
+        for k in order:
+            it = WF.ListViewItem(k or UNASSIGNED)
+            it.Tag = k
+            it.Checked = bool(st['show'].get(k, True))
+            it.SubItems.Add(str(counts[k]))
+            it.SubItems.Add('')
+            if k:
+                r, g, b = color_of(cfg, pname, k)
+                it.SubItems[2].Text = '■ {},{},{}'.format(r, g, b)
+                it.ForeColor = SD.Color.FromArgb(r, g, b)
+            lv.Items.Add(it)
+            if k:
+                cb_val.Items.Add(k)
+        if st.get('value'):
+            cb_val.Text = st['value']
+        tot = len(wells)
+        un = counts.get('', 0)
+        info.Text = ((st.pop('note', '') + '\n') if st.get('note') else '') + '共 {} 口井（常规模型且有标记），已分区 {} 口，未分区 {} 口。'.format(tot, tot - un, un)
+        busy[0] = not ready[0]
+
+    def on_shown(s, e):
+        ready[0] = True
+        busy[0] = False
+
+    def on_par(s, e):
+        if cb_par.SelectedIndex >= 0:
+            st['param'] = cb_par.SelectedItem
+            cfg['param'] = st['param']
+            save_cfg(cfg)
+            refresh()
+
+    def on_new(s, e):
+        nm = ask_text('新建分区参数', '参数名（如：分区、施工批次）', DEFAULT_PARAM)
+        if not nm:
+            return
+        if not valid_name(nm):
+            forms.alert('参数名不能为空，也不能含 {} [] | ; < > ? ` ~ \\ : "', title=TITLE)
+            return
+        if nm in params:
+            forms.alert('已经有这个参数了，直接在上面的下拉框里选。', title=TITLE)
+            return
+        if param_id(nm) is not None:
+            forms.alert('项目里已有同名参数「{}」，但它没有绑定到常规模型的实例文字参数上。请换个名字。'.format(nm), title=TITLE)
+            return
+        try:
+            create_param(nm)
+        except Exception as ex:
+            forms.alert('新建参数失败：\n{}'.format(ex), title=TITLE)
+            return
+        st['param'] = nm
+        cfg['param'] = nm
+        save_cfg(cfg)
+        result['act'] = 'reopen'
+        f.Close()
+
+    def on_pick(s, e):
+        if not st['param']:
+            forms.alert('请先新建一个分区参数。', title=TITLE)
+            return
+        v = (cb_val.Text or '').strip()
+        if not valid_name(v):
+            forms.alert('请先填写分区名（不能为空，也不能含 {} [] | ; < > ? ` ~ \\ : "）。', title=TITLE)
+            return
+        st['value'] = v
+        result['act'] = 'pick'
+        f.Close()
+
+    def on_check(s, e):
+        if busy[0] or not ready[0] or not lv.Focused:    # 只响应用户在列表里的点击
+            return
+        k = e.Item.Tag
+        st['show'][k] = bool(e.Item.Checked)
+        msg = apply_view(st['param'], {k: bool(e.Item.Checked)}, cfg, only=k)
+        save_cfg(cfg)
+        if msg:
+            busy[0] = True
+            e.Item.Checked = not e.Item.Checked
+            st['show'][k] = bool(e.Item.Checked)
+            busy[0] = False
+            info.Text = msg
+
+    def on_color(s, e):
+        if lv.SelectedItems.Count == 0 or not lv.SelectedItems[0].Tag:
+            info.Text = '先在列表里选中一个分区（未分区没有颜色）。'
+            return
+        k = lv.SelectedItems[0].Tag
+        cur = color_of(cfg, st['param'], k)
+        d = WF.ColorDialog()
+        d.Color = SD.Color.FromArgb(cur[0], cur[1], cur[2])
+        d.FullOpen = True
+        if d.ShowDialog() == WF.DialogResult.OK:
+            cfg['colors'][st['param'] + '|' + k] = [d.Color.R, d.Color.G, d.Color.B]
+            save_cfg(cfg)
+            refresh()
+
+    def on_apply(s, e):
+        zones = {}
+        for it in lv.Items:
+            zones[it.Tag] = bool(it.Checked)
+        msg = apply_view(st['param'], zones, cfg)
+        save_cfg(cfg)
+        info.Text = msg or '已在当前视图按分区着色（视图过滤器，名称以「' + FILTER_PREFIX + '」开头；删掉这些过滤器即可还原）。'
+
+    def on_sch(s, e):
+        if not st['param']:
+            return
+        nm, err = make_schedule(st['param'])
+        info.Text = ('已生成明细表「{}」，在项目浏览器的明细表/数量里。'.format(nm)) if nm else '生成明细表失败：{}'.format(err)
+
+    cb_par.SelectedIndexChanged += on_par
+    b_new.Click += on_new
+    def on_cfg(s, e):
+        keys = [f_['key'] for f_ in zone_fields() if f_.get('key')]
+        defs = default_cfg()
+        res = su_fields_dialog('井分区标记 设置',
+                               '改完点保存立即生效。「恢复默认」只改窗口里的值，点保存才生效。',
+                               zone_fields(), dict((k, cfg.get(k)) for k in keys), dict((k, defs[k]) for k in keys),
+                               extra_buttons=[('用记事本打开文件', lambda: (save_cfg(cfg), su_open_file(CFG_PATH)))])
+        if res is None:
+            return
+        cfg.update(res)
+        save_cfg(cfg)
+        apply_cfg(cfg)
+        wells[:] = all_wells()
+        params[:] = list_params()
+        refresh()
+        info.Text = '设置已保存并生效。' + info.Text
+    b_cfg.Click += on_cfg
+    b_pick.Click += on_pick
+    lv.ItemChecked += on_check
+    b_color.Click += on_color
+    b_apply.Click += on_apply
+    b_sch.Click += on_sch
+    b_close.Click += lambda s, e: f.Close()
+    f.Shown += on_shown
+    refresh()
+    f.ShowDialog()
+    save_cfg(cfg)
+    return result['act']
+
+
+def pick_and_write(st):
+    pname, value = st['param'], st['value']
+    try:
+        sel = list(uidoc.Selection.PickElementsByRectangle(_WellFilter(), '框选要写入「{} = {}」的井，框完按 Finish'.format(pname, value)))
+    except Exception:
+        return '已取消框选。'
+    wells = [e for e in sel if _mark(e)]
+    if not wells:
+        return '框里没有井（常规模型且有标记）。'
+    over = [e for e in wells if zone_of(e, pname) and zone_of(e, pname) != value]
+    same = [e for e in wells if zone_of(e, pname) == value]
+    msg = '将给 {} 口井写入「{} = {}」。'.format(len(wells), pname, value)
+    if over:
+        msg += '\n其中 {} 口原来已有别的分区，会被覆盖。'.format(len(over))
+    if same:
+        msg += '\n其中 {} 口本来就是这个分区。'.format(len(same))
+    if WF.MessageBox.Show(msg + '\n\n确定写入吗？', TITLE, WF.MessageBoxButtons.OKCancel, WF.MessageBoxIcon.Question) != WF.DialogResult.OK:
+        return '已取消，没有写入。'
+    done, skipped = write_zone(wells, pname, value)
+    return '已写入 {} 口井{}。'.format(done, '，{} 口没有这个参数或只读而跳过'.format(skipped) if skipped else '')
+
+
+def main():
+    try:
+        _cfg = load_cfg()
+        apply_cfg(_cfg)
+        st = {'cfg': _cfg, 'param': '', 'value': '', 'show': {}}
+        note = ''
+        guard = 0
+        while guard < 200:
+            guard += 1
+            act = main_dialog(st)
+            if act == 'pick':
+                note = pick_and_write(st)
+                st['note'] = note
+                continue
+            if act == 'reopen':
+                continue
+            break
+    except Exception as ex:
+        forms.alert('发生错误：\n{}\n\n{}'.format(ex, traceback.format_exc()), title=TITLE)
+
+
+if __name__ == '__main__':
+    main()

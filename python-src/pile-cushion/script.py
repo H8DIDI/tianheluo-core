@@ -2062,7 +2062,7 @@ def build_report(stats, r, log_path):
     if cov:
         lines.append(u"")
         lines.append(u"缺漏检测（按组：应布置 / 完整 / 缺漏）：")
-        for k in GROUP_ORDER + [UNCLASSIFIED]:
+        for k in _group_order() + [UNCLASSIFIED]:
             if k not in cov:
                 continue
             g = cov[k]
@@ -2157,12 +2157,73 @@ def set_pile_filter_hidden(hide):
     return done, fails
 
 
-# 分组（分系统）：按这个顺序列出；归不进任何组的放在最后「未归类」
-GROUP_ORDER = [
-    u'结构框架的排管', u'雨水井的涵箱', u'污水管道', u'其他系统的管道',
-    u'雨水井', u'污水井', u'强电井', u'弱电井', u'低压电井', u'电信井', u'路灯',
-]
+# 分组（分系统）：规则来自 文档\KaifaTools\松木桩分组规则.json（第一次运行时写出默认规则，与原来写死的判断一样）。
+# 换项目只改这个文件：每条规则 = 组名 + 适用类别 + 关键字，按顺序判断，先命中的算；都不命中进「未归类」。
 UNCLASSIFIED = u'未归类'
+GROUP_RULES_FILE = os.path.join(RULES_DIR, u"松木桩分组规则.json")
+_WELLS = [u'常规模型', u'结构基础']
+DEFAULT_GROUP_RULES = {
+    u"说明": (u"按顺序判断，先命中的算。categories=适用的 Revit 类别名（空=全部）；"
+            u"any=族名/类型名/名称/系统名里含其中任一关键字（不分大小写）；family_any=只看族名；type_any=只看类型名；"
+            u"regex=对全部名称做正则查找；type_regex=类型名开头的正则。一条规则里写了多个条件，任一条件满足就算命中；"
+            u"一个条件都不写=该类别全部命中。order=分组列表的显示顺序。"),
+    u"order": [u'结构框架的排管', u'雨水井的涵箱', u'污水管道', u'其他系统的管道',
+               u'雨水井', u'污水井', u'强电井', u'弱电井', u'低压电井', u'电信井', u'路灯'],
+    u"rules": [
+        {u"group": u"路灯", u"categories": [u"照明设备"], u"any": [u"LAMP", u"POLE", u"路灯"]},
+        {u"group": u"污水管道", u"categories": [u"管道"], u"any": [u"污水"]},
+        {u"group": u"其他系统的管道", u"categories": [u"管道"]},
+        {u"group": u"电信井", u"categories": _WELLS, u"any": [u"电信", u"TELCO"]},
+        {u"group": u"低压电井", u"categories": _WELLS, u"any": [u"低压", u"ELE-LV"]},
+        {u"group": u"强电井", u"categories": _WELLS, u"any": [u"强电"], u"regex": u"(?<![A-Za-z])EM\\d"},
+        {u"group": u"弱电井", u"categories": _WELLS, u"any": [u"ELV", u"弱电"]},
+        {u"group": u"雨水井", u"categories": _WELLS, u"any": [u"雨水井"]},
+        {u"group": u"污水井", u"categories": _WELLS, u"any": [u"污水井", u"排水井"]},
+        {u"group": u"雨水井的涵箱", u"categories": [u"结构框架"], u"family_any": [u"雨水沟"],
+         u"type_regex": u"BX\\d", u"any": [u"涵"]},
+        {u"group": u"结构框架的排管", u"categories": [u"结构框架"], u"any": [u"排管"],
+         u"type_any": [u"WAY"], u"family_any": [u"孔"]},
+    ],
+}
+_GROUP_CFG = [None]
+
+
+def load_group_rules():
+    if _GROUP_CFG[0] is not None:
+        return _GROUP_CFG[0]
+    cfg = DEFAULT_GROUP_RULES
+    try:
+        if os.path.exists(GROUP_RULES_FILE):
+            with open(GROUP_RULES_FILE, 'rb') as f:
+                data = json.loads(f.read().decode('utf-8-sig'))
+            if isinstance(data.get(u"rules"), list) and data[u"rules"]:
+                cfg = {u"order": data.get(u"order") or DEFAULT_GROUP_RULES[u"order"], u"rules": data[u"rules"]}
+        else:
+            if not os.path.isdir(RULES_DIR):
+                os.makedirs(RULES_DIR)
+            with open(GROUP_RULES_FILE, 'wb') as f:
+                f.write(json.dumps(DEFAULT_GROUP_RULES, ensure_ascii=False, indent=2).encode('utf-8'))
+    except Exception:
+        cfg = DEFAULT_GROUP_RULES
+    rules = []
+    for r in cfg[u"rules"]:
+        try:
+            rr = dict(r)
+            rr[u"_re"] = re.compile(rr[u"regex"]) if rr.get(u"regex") else None
+            rr[u"_tre"] = re.compile(rr[u"type_regex"]) if rr.get(u"type_regex") else None
+            rules.append(rr)
+        except Exception:
+            continue
+    order = list(cfg[u"order"])
+    for rr in rules:
+        if rr.get(u"group") and rr[u"group"] not in order:
+            order.append(rr[u"group"])
+    _GROUP_CFG[0] = {u"order": order, u"rules": rules}
+    return _GROUP_CFG[0]
+
+
+def _group_order():
+    return load_group_rules()[u"order"]
 
 
 def _system_name(e):
@@ -2185,45 +2246,44 @@ def _family_label(e):
     return _u(get_fam_name(e) or u'')
 
 
-# 井只在常规模型、结构基础里找（线管等同类别的其它构件不当井）
-_WELL_CATS = (u'常规模型', u'结构基础')
-# 强电井的族名是 ELE-EM1-I、ELE-EM2-L 这类：EM 后面紧跟数字
-_EM_RE = re.compile(r'(?<![A-Za-z])EM\d')
+def _rule_hit(rr, cat, fam, typ, text):
+    cats = rr.get(u"categories") or []
+    if cats and cat not in cats:
+        return False
+    up = text.upper()
+    conds = 0
+    for kw in rr.get(u"any") or []:
+        conds += 1
+        if kw.upper() in up:
+            return True
+    for kw in rr.get(u"family_any") or []:
+        conds += 1
+        if kw.upper() in fam.upper():
+            return True
+    for kw in rr.get(u"type_any") or []:
+        conds += 1
+        if kw.upper() in typ.upper():
+            return True
+    if rr.get(u"_re") is not None:
+        conds += 1
+        if rr[u"_re"].search(text):
+            return True
+    if rr.get(u"_tre") is not None:
+        conds += 1
+        if rr[u"_tre"].match(typ.strip().upper()):
+            return True
+    return conds == 0
 
 
 def _classify_group(e):
-    """按这个模型的实际命名判断属于哪一组；归不进去返回 None（进「未归类」）。
-    强电=EM1/EM2，弱电=ELV，电信=TELCO，低压=ELE-LV/低压拉线井，雨水井=雨水井族，
-    排水井(MH)=污水井（待确认），BX 或雨水沟=雨水井的涵箱（待确认），
-    结构框架里带 WAY/排管/孔的=排管，照明设备 LAMP POLE=路灯。"""
+    """按分组规则文件判断属于哪一组；归不进去返回 None（进「未归类」）。"""
     cat = _u(e.Category.Name) if e.Category else u''
     fam = _family_label(e)
     typ = _u(get_type_name(e) or u'')
     text = u' '.join([cat, fam, typ, _u(get_elem_name(e) or u''), _system_name(e)])
-    up = text.upper()
-    if cat == u'照明设备':
-        return u'路灯' if (u'LAMP' in up or u'POLE' in up or u'路灯' in text) else None
-    if cat == u'管道':
-        return u'污水管道' if u'污水' in text else u'其他系统的管道'
-    if cat in _WELL_CATS:
-        if u'电信' in text or u'TELCO' in up:
-            return u'电信井'
-        if u'低压' in text or u'ELE-LV' in up:
-            return u'低压电井'
-        if _EM_RE.search(text) or u'强电' in text:
-            return u'强电井'
-        if u'ELV' in up or u'弱电' in text:
-            return u'弱电井'
-        if u'雨水井' in text:
-            return u'雨水井'
-        if u'污水井' in text or u'排水井' in text:
-            return u'污水井'
-        return None
-    if cat == u'结构框架':
-        if u'雨水沟' in fam or re.match(r'BX\d', typ.strip().upper()) or u'涵' in text:
-            return u'雨水井的涵箱'
-        if u'排管' in text or u'WAY' in typ.upper() or u'孔' in fam:
-            return u'结构框架的排管'
+    for rr in load_group_rules()[u"rules"]:
+        if _rule_hit(rr, cat, fam, typ, text):
+            return rr.get(u"group") or None
     return None
 
 
@@ -2239,7 +2299,7 @@ def _choose_groups(targets):
             nm = _family_label(el) or _u(get_type_name(el) or u'')
             if nm and nm not in g['names']:
                 g['names'].append(nm)
-    names = [k for k in GROUP_ORDER + [UNCLASSIFIED] if k in groups]
+    names = [k for k in _group_order() + [UNCLASSIFIED] if k in groups]
     if len(names) <= 1:
         return targets
     labels = {}

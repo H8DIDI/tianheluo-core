@@ -2,172 +2,130 @@
 """
 一键清理重复松木桩与垫层
 ================================================================
-功能描述:
-  扫描全项目中因重复框选或重复布置而导致空间重叠的松木桩与垫层，
-  自动识别多余图元并一键安全清理，恢复纯净模型与准确工程量。
+扫描全项目中因重复框选或重复布置而空间重叠的松木桩与垫层，
+每处位置只保留一套（保留最早生成的那个），其余的删除。整次可 Ctrl+Z 撤销。
 """
 
 __title__ = "清理重复\n松木桩垫层"
-__author__ = "Antigravity Assistant"
+__author__ = "didi"
+__doc__ = ("扫描全项目重复布置、空间完全重合的松木桩与垫层（坐标 5 mm / 外包框 10 mm 内算重合），\n"
+           "每处只保留最早生成的一套，其余删除。先列出数量再确认，整次可 Ctrl+Z 撤销。\n"
+           "只认「一键布置松木桩垫层」生成的图元（备注含「宿主」），以及族名含「松木桩 / Φ75 / 井垫层」的族。")
 
-import sys
 import traceback
 import clr
-import System
 clr.AddReference('RevitAPI')
-clr.AddReference('RevitAPIUI')
-from Autodesk.Revit import DB
 from System.Collections.Generic import List
-from pyrevit import revit, DB, UI, forms
+from pyrevit import revit, DB, forms
 
 doc = revit.doc
-uidoc = revit.uidoc
+TITLE = u"清理重复松木桩垫层"
+APP_ID = "PinePileCushionPlugin"     # 一键布置松木桩垫层 生成的垫层（DirectShape）的标识
+PILE_KEYS = (u"松木桩", u"Φ75")
+PAD_FAMILY_KEYS = (u"市政_井垫层", u"井垫层")
+
+
+def _eid(x):
+    try:
+        return x.Value
+    except Exception:
+        return x.IntegerValue
+
+
+def _comment(e):
+    try:
+        p = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+        return (p.AsString() or u"") if p is not None else u""
+    except Exception:
+        return u""
+
+
+def _type_text(inst):
+    out = []
+    try:
+        sym = inst.Symbol
+        out.append(sym.FamilyName or u"")
+        out.append(sym.Name or u"")
+    except Exception:
+        pass
+    return u" ".join(out)
+
+
+def _key_pt(p, step):
+    return (round(p.X * 304.8 / step), round(p.Y * 304.8 / step), round(p.Z * 304.8 / step))
+
+
+def _dups(groups):
+    """每组按 Id 从小到大，保留第一个（最早生成的），其余为重复。"""
+    out = []
+    for ids in groups.values():
+        if len(ids) > 1:
+            ids.sort(key=_eid)
+            out.extend(ids[1:])
+    return out
+
+
+def scan():
+    piles, pads, fampads = {}, {}, {}
+    n_piles = 0
+    for inst in DB.FilteredElementCollector(doc).OfClass(DB.FamilyInstance)\
+            .OfCategory(DB.BuiltInCategory.OST_StructuralFoundation):
+        txt = _type_text(inst)
+        com = _comment(inst)
+        loc = getattr(inst, "Location", None)
+        if not isinstance(loc, DB.LocationPoint):
+            continue
+        is_pile = any(k in txt for k in PILE_KEYS) or (u"宿主" in com and u"松木桩" in com)
+        is_pad = any(k in txt for k in PAD_FAMILY_KEYS) or (u"宿主" in com and u"垫层" in com)
+        if is_pile:
+            n_piles += 1
+            piles.setdefault(_key_pt(loc.Point, 5.0), []).append(inst.Id)
+        elif is_pad:
+            # 井垫层按外包框比：同一插入点但尺寸不同（不同井）的不算重复
+            bb = inst.get_BoundingBox(None)
+            key = (_key_pt(bb.Min, 10.0) + _key_pt(bb.Max, 10.0)) if bb is not None else _key_pt(loc.Point, 10.0)
+            fampads.setdefault(key, []).append(inst.Id)
+    for ds in DB.FilteredElementCollector(doc).OfClass(DB.DirectShape)\
+            .OfCategory(DB.BuiltInCategory.OST_StructuralFoundation):
+        if not (ds.ApplicationId == APP_ID or u"垫层" in (ds.Name or u"") or
+                (u"宿主" in _comment(ds) and u"垫层" in _comment(ds))):
+            continue
+        bb = ds.get_BoundingBox(None)
+        if bb is None:
+            continue
+        pads.setdefault(_key_pt(bb.Min, 10.0) + _key_pt(bb.Max, 10.0), []).append(ds.Id)
+    return n_piles, _dups(piles), _dups(pads), _dups(fampads)
 
 
 def main():
     try:
-        # 1. 扫描重合的松木桩 (坐标重叠容差 5mm 内)
-        col_piles = DB.FilteredElementCollector(doc)\
-            .OfClass(DB.FamilyInstance)\
-            .OfCategory(DB.BuiltInCategory.OST_StructuralFoundation)
-
-        piles_by_coord = {}
-        total_piles = 0
-
-        for inst in col_piles:
-            fn = ""
-            try:
-                p = inst.Symbol.get_Parameter(DB.BuiltInParameter.SYMBOL_NAME_PARAM)
-                fn = p.AsString() if p else ""
-            except Exception:
-                pass
-            if not fn:
-                try:
-                    fn = inst.Symbol.Name
-                except Exception:
-                    pass
-            
-            if "松木桩" in fn or "Φ75" in fn:
-                total_piles += 1
-                loc = inst.Location.Point
-                ckey = (
-                    round(loc.X * 304.8 / 5.0) * 5.0,
-                    round(loc.Y * 304.8 / 5.0) * 5.0,
-                    round(loc.Z * 304.8 / 5.0) * 5.0
-                )
-                if ckey not in piles_by_coord:
-                    piles_by_coord[ckey] = []
-                piles_by_coord[ckey].append(inst.Id)
-
-        pile_dups = []
-        for ckey, id_list in piles_by_coord.items():
-            if len(id_list) > 1:
-                for eid in id_list[1:]:
-                    pile_dups.append(eid)
-
-        # 2. 扫描重叠的 DirectShape 垫层 (外包框容差 10mm 内)
-        col_ds = DB.FilteredElementCollector(doc)\
-            .OfClass(DB.DirectShape)\
-            .OfCategory(DB.BuiltInCategory.OST_StructuralFoundation)
-
-        ds_by_bb = {}
-        for ds in col_ds:
-            if ds.ApplicationId == "PinePileCushionPlugin" or "垫层" in (ds.Name or ""):
-                bb = ds.get_BoundingBox(None)
-                if bb:
-                    key = (
-                        round(bb.Min.X * 304.8 / 10.0) * 10.0,
-                        round(bb.Min.Y * 304.8 / 10.0) * 10.0,
-                        round(bb.Min.Z * 304.8 / 10.0) * 10.0,
-                        round(bb.Max.X * 304.8 / 10.0) * 10.0,
-                        round(bb.Max.Y * 304.8 / 10.0) * 10.0,
-                        round(bb.Max.Z * 304.8 / 10.0) * 10.0
-                    )
-                else:
-                    key = ds.Id.Value
-                if key not in ds_by_bb:
-                    ds_by_bb[key] = []
-                ds_by_bb[key].append(ds.Id)
-
-        ds_dups = []
-        for key, id_list in ds_by_bb.items():
-            if len(id_list) > 1:
-                for eid in id_list[1:]:
-                    ds_dups.append(eid)
-
-        # 3. 扫描重叠的 市政_井垫层
-        col_fampad = DB.FilteredElementCollector(doc)\
-            .OfClass(DB.FamilyInstance)\
-            .OfCategory(DB.BuiltInCategory.OST_StructuralFoundation)
-
-        fampad_by_coord = {}
-        for inst in col_fampad:
-            fn = ""
-            try:
-                p = inst.Symbol.get_Parameter(DB.BuiltInParameter.ALL_MODEL_FAMILY_NAME)
-                fn = p.AsString() if p else ""
-            except Exception:
-                pass
-            if "市政_井垫层" in fn or "井垫层" in fn:
-                loc = inst.Location.Point
-                ckey = (
-                    round(loc.X * 304.8 / 10.0) * 10.0,
-                    round(loc.Y * 304.8 / 10.0) * 10.0,
-                    round(loc.Z * 304.8 / 10.0) * 10.0
-                )
-                if ckey not in fampad_by_coord:
-                    fampad_by_coord[ckey] = []
-                fampad_by_coord[ckey].append(inst.Id)
-
-        fampad_dups = []
-        for key, id_list in fampad_by_coord.items():
-            if len(id_list) > 1:
-                for eid in id_list[1:]:
-                    fampad_dups.append(eid)
-
-        total_dups = len(pile_dups) + len(ds_dups) + len(fampad_dups)
-
-        if total_dups == 0:
-            forms.alert(
-                "✅ 模型非常纯净！\n\n"
-                "经全模型空间坐标与外包几何比对，未发现任何重复重叠的松木桩或垫层。\n"
-                "• 现有松木桩：{} 根 (均为独立位置)".format(total_piles),
-                title="清理重复松木桩垫层"
-            )
+        n_piles, pile_dups, ds_dups, fampad_dups = scan()
+        total = len(pile_dups) + len(ds_dups) + len(fampad_dups)
+        if total == 0:
+            forms.alert(u"没有发现重复重合的松木桩或垫层。\n\n现有松木桩 {} 根，位置都不重复。".format(n_piles), title=TITLE)
             return
-
-        # 4. 提示确认
-        prompt_msg = (
-            "🔍 全模型重复图元扫描结果：\n\n"
-            "• 重复重合松木桩：{} 根\n"
-            "• 重复重叠 DirectShape 垫层：{} 块\n"
-            "• 重复重叠族垫层：{} 块\n\n"
-            "共检测到 {} 个完全空间重合的冗余图元！\n"
-            "点击“确认立即清理”，系统将仅保留每处位置的 1 套有效图元，安全删除多余重合图元。"
-        ).format(len(pile_dups), len(ds_dups), len(fampad_dups), total_dups)
-
-        res = forms.alert(prompt_msg, title="清理重复松木桩垫层", ok=True, cancel=True)
-        if not res:
+        msg = (u"扫描结果：\n\n"
+               u"• 重合的松木桩：{} 根（共 {} 根）\n"
+               u"• 重合的垫层（DirectShape）：{} 块\n"
+               u"• 重合的井垫层族：{} 块\n\n"
+               u"每处位置只保留最早生成的一套，删除其余 {} 个图元。整次可以 Ctrl+Z 撤销。\n\n确定清理？"
+               ).format(len(pile_dups), n_piles, len(ds_dups), len(fampad_dups), total)
+        # 注意：天河落宿主里 ok+cancel 只会显示「取消」，确认框必须用 yes/no
+        if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
             return
-
-        # 5. 执行清理事务
-        t = DB.Transaction(doc, "一键清理重复松木桩与垫层")
+        t = DB.Transaction(doc, u"清理重复松木桩与垫层")
         t.Start()
-        all_del = pile_dups + ds_dups + fampad_dups
-        doc.Delete(List[DB.ElementId](all_del))
-        t.Commit()
-
-        forms.alert(
-            "🎉 重复图元清理完成！\n\n"
-            "• 已删除重复松木桩：{} 根\n"
-            "• 已删除重复垫层：{} 块\n"
-            "• 累计清除冗余图元：{} 个\n\n"
-            "模型基础工程量已精准校准！".format(len(pile_dups), len(ds_dups) + len(fampad_dups), total_dups),
-            title="清理完成"
-        )
-
+        try:
+            doc.Delete(List[DB.ElementId](pile_dups + ds_dups + fampad_dups))
+            t.Commit()
+        except Exception:
+            if t.HasStarted() and not t.HasEnded():
+                t.RollBack()
+            raise
+        forms.alert(u"清理完成：删除重复松木桩 {} 根、重复垫层 {} 块，共 {} 个图元。".format(
+            len(pile_dups), len(ds_dups) + len(fampad_dups), total), title=TITLE)
     except Exception as e:
-        forms.alert("清理过程发生异常:\n" + str(e) + "\n\n" + traceback.format_exc(), title="报错追踪")
+        forms.alert(u"清理出错，模型未改动：\n" + str(e) + u"\n\n" + traceback.format_exc(), title=TITLE)
 
 
 if __name__ == '__main__':

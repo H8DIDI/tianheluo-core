@@ -35,6 +35,411 @@ import json as _json
 import os as _os
 
 FT_MM = 304.8
+
+# 图纸名前缀、图号前缀、井编号系列来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
+# ---- well_config（天河落共用片段，打包时内联进脚本）-----------------------------
+# 井大样系列插件（一键井展开图 / 一键井大样标注 / 图纸归类与图框编号 / 导出井大样DWG）共用的项目配置。
+# 配置文件：文档\KaifaTools\井大样配置.json。第一次运行时自动写出一份默认配置（与原来写死的规则完全一样），
+# 换项目时只改这个文件：图纸名前缀、图号前缀、井编号系列（前缀 → 系统名 → 系统代码）、图框 logo 位置。
+import io as _wc_io
+import os as _wc_os
+import json as _wc_json
+import re as _wc_re
+
+WCFG_FILE = _wc_os.path.join(
+    __import__('System').Environment.GetFolderPath(__import__('System').Environment.SpecialFolder.MyDocuments),
+    u"KaifaTools", u"井大样配置.json")
+
+WCFG_DEFAULTS = {
+    u"说明": (u"井大样系列插件的项目配置。改完保存，下次点插件生效；删掉这个文件会恢复默认。"
+            u"series 里每一项是一个井编号系列：prefix=井号前缀（井号形如 AA-01、T-068、室内-A-01，前缀后面可以有一个 -，再跟数字），"
+            u"system=系统名（写进图纸的「图纸系统」参数、用来归类），code=系统代码（图号模板里的 {系统码}），label=菜单里显示的名字。"
+            u"顺序就是菜单和排序的顺序；匹配时长的前缀优先（AA 先于 A）。"),
+    u"sheet_name_prefix": u"井大样_",
+    u"sheet_number_prefix": u"AG-",
+    u"indoor_prefix": u"室内-",
+    u"system_param": u"图纸系统",
+    u"series": [
+        {u"prefix": u"室内-A", u"system": u"室内强电井", u"code": u"NQ", u"label": u"室内-A- 强电井"},
+        {u"prefix": u"室内-T", u"system": u"室内通信井", u"code": u"NT", u"label": u"室内-T- 通信井"},
+        {u"prefix": u"室内-E", u"system": u"室内弱电井", u"code": u"NR", u"label": u"室内-E- 弱电井"},
+        {u"prefix": u"室内-L", u"system": u"室内低压拉线井", u"code": u"ND", u"label": u"室内-L- 低压拉线井"},
+        {u"prefix": u"AA", u"system": u"强电井", u"code": u"QD", u"label": u"AA- 强电特型井"},
+        {u"prefix": u"A", u"system": u"强电井", u"code": u"QD", u"label": u"A- 强电井"},
+        {u"prefix": u"BB", u"system": u"弱电井", u"code": u"RD", u"label": u"BB- 弱电特型井"},
+        {u"prefix": u"B", u"system": u"弱电井", u"code": u"RD", u"label": u"B- 弱电井"},
+        {u"prefix": u"T", u"system": u"通信井", u"code": u"TX", u"label": u"T- 通信井"},
+        {u"prefix": u"L", u"system": u"低压拉线井", u"code": u"DY", u"label": u"L- 低压拉线井"},
+        {u"prefix": u"E", u"system": u"预制井", u"code": u"YZ", u"label": u"E- 预制井"},
+        {u"prefix": u"Y", u"system": u"雨水井", u"code": u"YS", u"label": u"Y- 雨水井"},
+    ],
+    u"other": {u"system": u"其他", u"code": u"QT"},
+    # 图名模板（按井号前缀，长前缀优先）：{井号} 换成井号，如 T-001。没有模板的井沿用「井大样_」前缀。
+    # 图纸集合（按井号前缀）：新图放进对应的图纸集合，便于按集合导出 PDF。名字须与项目里的图纸集合一致。
+    u"sheet_collection_by_prefix": {
+        u"AA": u"275KV井大样", u"BB": u"275KV井大样", u"A": u"11KV井大样", u"B": u"11KV井大样",
+        u"E": u"ELV井大样", u"L": u"LV井大样", u"T": u"TELCO井大样",
+    },
+    u"sheet_name_templates": {
+        u"AA": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"BB": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"A": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"B": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"E": u"BTP-IF1 ELV-{井号} Detail Drawing",
+        u"L": u"BTP-IF1 Lv-{井号} Detail Drawing",
+        u"T": u"BTP-IF1 Telco-{井号} Detail Drawing",
+    },
+    u"logo": {u"enabled": True, u"file": u"frame_logo.jpg", u"x0": 736.54, u"y0": 141.10, u"w": 91.49,
+              u"说明": u"导出 DWG 后补插的图框 logo：x0/y0 = logo 左下角在 Layout1 里的坐标，w = 宽度（按 A1 横向图框标定）。换图框要改；enabled=false 不补 logo。"},
+}
+
+_WCFG_CACHE = [None]
+
+
+def _wcfg_merge(base, extra):
+    out = dict(base)
+    for k, v in (extra or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _wcfg_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def wcfg_load(write_default=True):
+    """读项目配置（缺的项用默认值补齐）。文件不存在时写出默认配置，方便用户找到并修改。"""
+    if _WCFG_CACHE[0] is not None:
+        return _WCFG_CACHE[0]
+    cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    try:
+        if _wc_os.path.exists(WCFG_FILE):
+            with _wc_io.open(WCFG_FILE, 'r', encoding='utf-8-sig') as f:
+                cfg = _wcfg_merge(cfg, _wc_json.load(f))
+        elif write_default:
+            d = _wc_os.path.dirname(WCFG_FILE)
+            if not _wc_os.path.isdir(d):
+                _wc_os.makedirs(d)
+            with _wc_io.open(WCFG_FILE, 'w', encoding='utf-8') as f:
+                f.write(_wc_json.dumps(WCFG_DEFAULTS, ensure_ascii=False, indent=2))
+    except Exception:
+        cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    # series 至少要有 prefix
+    good = []
+    for s in cfg.get(u"series") or []:
+        try:
+            p = (s.get(u"prefix") or u"").strip()
+        except Exception:
+            continue
+        if not p:
+            continue
+        s = dict(s)
+        s[u"prefix"] = p
+        s.setdefault(u"system", p)
+        s.setdefault(u"code", p)
+        s.setdefault(u"label", p + u"-")
+        good.append(s)
+    cfg[u"series"] = good or list(WCFG_DEFAULTS[u"series"])
+    _WCFG_CACHE[0] = cfg
+    return cfg
+
+
+def wcfg_series_of(mark, cfg=None, strict=False):
+    """井号属于哪个系列：前缀（长的优先）后面可以有一个 -，必须紧跟数字。认不出返回 None。
+    strict=True 时前缀后面必须是「-数字」（井的标记用这个：雨水井的 A1、BB24 这类不带 - 的不算强电/弱电井）。"""
+    cfg = cfg or wcfg_load()
+    m = (mark or u"").strip()
+    for s in sorted(cfg[u"series"], key=lambda x: -len(x[u"prefix"])):
+        p = s[u"prefix"]
+        if m.startswith(p):
+            rest = m[len(p):]
+            if rest[:1] == u"-":
+                rest = rest[1:]
+            elif strict:
+                continue
+            if rest[:1].isdigit():
+                return s
+    return None
+
+
+def wcfg_series_index(s, cfg=None):
+    cfg = cfg or wcfg_load()
+    for i, x in enumerate(cfg[u"series"]):
+        if x is s:
+            return i
+    return len(cfg[u"series"])
+
+
+def wcfg_natural_key(text):
+    out = []
+    for tok in _wc_re.split(r'(\d+)', text or u''):
+        out.append((0, int(tok), u'') if tok.isdigit() else (1, 0, tok.lower()))
+    return out
+
+
+def wcfg_well_sort_key(mark, cfg=None, strict=True):
+    """先按系列在配置里的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
+    s = wcfg_series_of(mark, cfg, strict)
+    return (wcfg_series_index(s, cfg) if s is not None else 9999, wcfg_natural_key(mark))
+
+
+def wcfg_sheet_name(mark, cfg=None):
+    """井号 → 图名（按配置里的图名模板）。没有对应模板时返回 None，调用方沿用「井大样_」前缀。
+    模板前缀按长度从长到短匹配，且前缀后面必须紧跟 "-"（AA-04 不会误判成 A 系列）。"""
+    cfg = cfg or wcfg_load()
+    tpls = cfg.get(u"sheet_name_templates") or {}
+    m = (mark or u"").strip()
+    for key in sorted(tpls.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return tpls[key].replace(u"{井号}", m)
+    return None
+# ---- well_config 结束 ----------------------------------------------------------
+
+
+def wcfg_collection_name(mark, cfg=None):
+    """井号 → 图纸集合名（按配置 sheet_collection_by_prefix，长前缀优先，前缀后紧跟 -）。没有对应返回 None。"""
+    cfg = cfg or wcfg_load()
+    maps = cfg.get(u"sheet_collection_by_prefix") or {}
+    m = (mark or u"").strip()
+    for key in sorted(maps.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return maps[key]
+    return None
+
+
+# ---- 井位置缓存（井没动就不重新生成）：Documents\KaifaTools\井大样位置缓存.json ----
+def wcfg_cache_path():
+    return _wc_os.path.join(_wc_os.path.dirname(WCFG_FILE), u"井大样位置缓存.json")
+
+
+def wcfg_cache_load():
+    """读位置缓存：{井号: {bbox, sheet_id, name, number}}。文件不存在或坏了返回空。"""
+    try:
+        with _wc_io.open(wcfg_cache_path(), 'r', encoding='utf-8-sig') as f:
+            d = _wc_json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def wcfg_cache_save(d):
+    """先把内容转成文字，转成功才写文件（避免转换失败时把旧缓存清成空文件）。"""
+    try:
+        txt = _wc_json.dumps(d, ensure_ascii=False, indent=1)
+    except Exception:
+        return
+    try:
+        p = wcfg_cache_path()
+        dd = _wc_os.path.dirname(p)
+        if not _wc_os.path.isdir(dd):
+            _wc_os.makedirs(dd)
+        with _wc_io.open(p, 'w', encoding='utf-8') as f:
+            f.write(txt)
+    except Exception:
+        pass
+
+# ---- sheet_blocks（天河落共用片段，打包时内联进脚本）-----------------------------
+# 井大样图号的「号段」规则：每个系统占一段图号，新图从本系统号段里取下一个空号，图号发出后不再跟着井号顺序变。
+# 配置文件：文档\KaifaTools\井图号号段.json。第一次运行时自动写出默认值；改完保存，下次点插件生效；删掉文件恢复默认。
+import io as _sb_io
+import os as _sb_os
+import json as _sb_json
+import re as _sb_re
+
+SB_FILE = _sb_os.path.join(
+    __import__('System').Environment.GetFolderPath(__import__('System').Environment.SpecialFolder.MyDocuments),
+    u"KaifaTools", u"井图号号段.json")
+
+SB_DEFAULTS = {
+    u"说明": (u"井大样图号号段。blocks 里每一项是一个系统：start/end=图号范围（含），prefixes=归这个系统的井号前缀（按这个顺序排，"
+            u"如 A 排在 B 前面）。只有井号形如 前缀-数字（如 T-022、A-098-1）的图纸才会按号段编号；"
+            u"室内井、雨水井、MH、QBJ 等不在 prefixes 里的图纸不动。digits=图号位数。"
+            u"mark_regex=从图名里认井号的正则，必须有三个括号：前缀、数字、可选的后缀数字（如 T-022、A-098-1）；换项目的井号写法不同，改这里。"
+            u"not_drawn_markers=井号前面紧挨着这些文字的，一律当作不编号的井（如「室内-T-01」）。"),
+    u"digits": 4,
+    u"mark_regex": u"(?<![A-Za-z])([A-Za-z]{1,2})-(\\d+)(?:-(\\d+))?",
+    u"not_drawn_markers": [u"室内-"],
+    u"blocks": [
+        {u"name": u"11KV", u"start": 1, u"end": 699, u"prefixes": [u"A", u"B"]},
+        {u"name": u"275KV", u"start": 700, u"end": 999, u"prefixes": [u"AA", u"BB"]},
+        {u"name": u"ELV", u"start": 1001, u"end": 1999, u"prefixes": [u"E"]},
+        {u"name": u"TELCO", u"start": 2001, u"end": 2999, u"prefixes": [u"T"]},
+        {u"name": u"LV", u"start": 3001, u"end": 3999, u"prefixes": [u"L"]},
+    ],
+}
+
+_SB_MARK_RE = _sb_re.compile(u"(?<![A-Za-z])([A-Za-z]{1,2})-(\\d+)(?:-(\\d+))?")
+
+
+def sb_load():
+    """读号段规则；没有文件就写一份默认的。读不懂时用默认值。"""
+    try:
+        if (not _sb_os.path.isfile(SB_FILE)) or _sb_os.path.getsize(SB_FILE) == 0:      # 没有文件、或文件是空的（写坏了）：重写一份默认的
+            d = _sb_os.path.dirname(SB_FILE)
+            if not _sb_os.path.isdir(d):
+                _sb_os.makedirs(d)
+            txt = _sb_json.dumps(SB_DEFAULTS, ensure_ascii=False, indent=1)
+            if not isinstance(txt, type(u"")):
+                txt = txt.decode("utf-8")
+            with _sb_io.open(SB_FILE, "w", encoding="utf-8") as f:
+                f.write(txt)
+            return SB_DEFAULTS
+        with _sb_io.open(SB_FILE, "r", encoding="utf-8") as f:
+            cfg = _sb_json.load(f)
+        if isinstance(cfg, dict) and cfg.get(u"blocks"):
+            cfg.setdefault(u"digits", 4)
+            for _k in (u"mark_regex", u"not_drawn_markers"):
+                cfg.setdefault(_k, SB_DEFAULTS[_k])
+            return cfg
+    except Exception:
+        pass
+    return SB_DEFAULTS
+
+
+_SB_RE_CACHE = {}
+
+
+def _sb_regex(rules):
+    pat = (rules or {}).get(u"mark_regex") or SB_DEFAULTS[u"mark_regex"]
+    r = _SB_RE_CACHE.get(pat)
+    if r is None:
+        try:
+            r = _sb_re.compile(pat)
+            if r.groups < 2:
+                raise ValueError(u"mark_regex 至少要有前缀、数字两个括号")
+        except Exception:
+            r = _sb_re.compile(SB_DEFAULTS[u"mark_regex"])
+        _SB_RE_CACHE[pat] = r
+    return r
+
+
+def sb_save(cfg):
+    """把号段规则写回设置文件（图形化设置窗口用）。"""
+    d = _sb_os.path.dirname(SB_FILE)
+    if not _sb_os.path.isdir(d):
+        _sb_os.makedirs(d)
+    out = dict(cfg)
+    out.setdefault(u"说明", SB_DEFAULTS[u"说明"])
+    txt = _sb_json.dumps(out, ensure_ascii=False, indent=1)
+    if not isinstance(txt, type(u"")):
+        txt = txt.decode("utf-8")
+    with _sb_io.open(SB_FILE, "w", encoding="utf-8") as f:
+        f.write(txt)
+
+
+def sb_parse_mark(text, rules=None):
+    """从图名/井号里取井号，返回 (前缀, 数字, 后缀或0, 井号原文)；取不到返回 None。取最后一个匹配（图名里井号在后面）。
+    井号前面紧挨着 not_drawn_markers 里的文字（默认「室内-」）时，前缀变成「文字+前缀」，不属于任何号段。"""
+    text = text or u""
+    last = None
+    for m in _sb_regex(rules).finditer(text):
+        last = m
+    if last is None:
+        return None
+    g = last.groups()
+    pre, num = g[0], g[1]
+    suf = g[2] if len(g) > 2 else None
+    mark = u"%s-%s" % (pre, num) + (u"-%s" % suf if suf else u"")
+    markers = (rules or SB_DEFAULTS).get(u"not_drawn_markers", SB_DEFAULTS[u"not_drawn_markers"]) or []
+    for mk in markers:
+        if mk and text[max(0, last.start() - len(mk)):last.start()] == mk:
+            return (mk + pre, int(num), int(suf) if suf else 0, mk + mark)
+    return (pre, int(num), int(suf) if suf else 0, mark)
+
+
+def sb_block_of(prefix, rules):
+    """前缀属于哪个号段，返回 block dict；不在任何号段返回 None。前缀按字母大小写忽略。"""
+    p = (prefix or u"").upper()
+    for b in rules[u"blocks"]:
+        if p in [x.upper() for x in b[u"prefixes"]]:
+            return b
+    return None
+
+
+def sb_order_key(parsed, block):
+    """同一号段里的顺序：先按前缀在 prefixes 里的顺序，再按井号数字，再按后缀。"""
+    pres = [x.upper() for x in block[u"prefixes"]]
+    return (pres.index(parsed[0].upper()), parsed[1], parsed[2])
+
+
+def sb_fmt(n, rules):
+    d = int(rules.get(u"digits", 4) or 0)
+    return (u"%0*d" % (d, n)) if d > 0 else (u"%d" % n)
+
+
+def sb_plan(rows, rules, other_numbers=None):
+    """按号段重编。rows: [{'key':任意, 'old':旧图号文字, 'name':图名或井号}]；other_numbers: 不参与重编的图纸已占用的图号集合。
+    返回 dict：
+      changes  [(key, 旧号, 新号, 系统名, 井号)]，只含号变了的；
+      same     [(key, 旧号, 系统名, 井号)]，号本来就对的；
+      skipped  [(key, 旧号, 原因)]，不在号段规则里的、或放不下的；
+      warnings [文字]；
+      summary  {系统名: (张数, 起, 止, 容量)}。"""
+    other = set(other_numbers or [])
+    groups = {}
+    skipped = []
+    for r in rows:
+        parsed = sb_parse_mark(r.get("name"), rules)
+        blk = sb_block_of(parsed[0], rules) if parsed else None
+        if blk is None:
+            skipped.append((r["key"], r.get("old"), u"井号不在号段规则里（室内井、雨水井等），不动" if parsed else u"图名里认不出井号，不动"))
+            continue
+        groups.setdefault(blk[u"name"], (blk, []))[1].append((sb_order_key(parsed, blk), r.get("old") or u"", r, parsed))
+    changes, same, warnings, summary = [], [], [], {}
+    for bname, (blk, items) in groups.items():
+        items.sort(key=lambda t: (t[0], t[1]))
+        cap = blk[u"end"] - blk[u"start"] + 1
+        n = blk[u"start"]
+        used = 0
+        marks_seen = {}
+        for key, old, r, parsed in items:
+            marks_seen[parsed[3]] = marks_seen.get(parsed[3], 0) + 1
+            while sb_fmt(n, rules) in other and n <= blk[u"end"]:
+                n += 1
+            if n > blk[u"end"]:
+                skipped.append((r["key"], old, u"%s 号段（%d–%d）已用完，放不下" % (bname, blk[u"start"], blk[u"end"])))
+                continue
+            new = sb_fmt(n, rules)
+            n += 1
+            used += 1
+            if new == old:
+                same.append((r["key"], old, bname, parsed[3]))
+            else:
+                changes.append((r["key"], old, new, bname, parsed[3]))
+        dups = [m for m, c in marks_seen.items() if c > 1]
+        if dups:
+            warnings.append(u"%s：%d 口井有不止一张图纸（例如 %s），都会各占一个号。" % (bname, len(dups), dups[0]))
+        if len(items) > cap:
+            warnings.append(u"%s：图纸 %d 张，号段只有 %d 个号，放不下。请改大 %s 的号段。" % (bname, len(items), cap, bname))
+        summary[bname] = (used, blk[u"start"], blk[u"start"] + max(used, 1) - 1, cap)
+    return {"changes": changes, "same": same, "skipped": skipped, "warnings": warnings, "summary": summary}
+
+
+def sb_next_number(mark, rules, occupied):
+    """新图纸的图号：取这口井所在号段里「已用最大号 + 1」（没有就取号段起点），并记入 occupied（已占用的整数集合）。
+    返回 (图号文字, 提示)；提示为空表示正常。井号不在任何号段、或号段满了时，图号接在所有号段之后，并返回提示。"""
+    parsed = sb_parse_mark(mark, rules)
+    blk = sb_block_of(parsed[0], rules) if parsed else None
+    last_end = max(b[u"end"] for b in rules[u"blocks"])
+    if blk is not None:
+        in_blk = [x for x in occupied if blk[u"start"] <= x <= blk[u"end"]]
+        n = (max(in_blk) + 1) if in_blk else blk[u"start"]
+        while n in occupied:
+            n += 1
+        if n <= blk[u"end"]:
+            occupied.add(n)
+            return sb_fmt(n, rules), u""
+        warn = u"%s 号段（%d–%d）已用完，%s 的图号接在所有号段之后。" % (blk[u"name"], blk[u"start"], blk[u"end"], mark)
+    else:
+        warn = u"%s 不在号段规则里，图号接在所有号段之后。" % mark
+    after = [x for x in occupied if x > last_end]
+    n = (max(after) + 1) if after else last_end + 1
+    occupied.add(n)
+    return sb_fmt(n, rules), warn
+
+WCFG = wcfg_load()
+WS_PREFIX = WCFG[u"sheet_name_prefix"]      # 默认「井大样_」
+WS_NUMPRE = WCFG[u"sheet_number_prefix"]    # 默认「AG-」
+WS_INDOOR = WCFG[u"indoor_prefix"]          # 默认「室内-」
 RULES_PATH = _os.path.join(
     System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), "KaifaTools", "井展开图规则.json")
 DEFAULT_RULES = {
@@ -617,11 +1022,297 @@ def _old_detail_candidates(doc):
     return out
 
 
+def _mark_of(elem):
+    """井的 Mark（井号，如 AA-01）。取不到返回空串。"""
+    p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+    return p.AsString().strip() if (p and p.AsString()) else ""
+
+
+def _near_collector(doc, elem, category, margin_ft=25.0):
+    """井周围 margin_ft 范围内、指定类别的未定义类型图元。用空间过滤器（只扫描附近，不扫全模型）。"""
+    bb = elem.get_BoundingBox(None)
+    if bb is None:
+        return DB.FilteredElementCollector(doc).OfCategory(category).WhereElementIsNotElementType()
+    ol = DB.Outline(DB.XYZ(bb.Min.X - margin_ft, bb.Min.Y - margin_ft, bb.Min.Z - margin_ft),
+                    DB.XYZ(bb.Max.X + margin_ft, bb.Max.Y + margin_ft, bb.Max.Z + margin_ft))
+    return DB.FilteredElementCollector(doc).WherePasses(DB.BoundingBoxIntersectsFilter(ol)).OfCategory(category).WhereElementIsNotElementType()
+
+
+def _view_world_range(view):
+    """视图裁剪框在世界坐标里的范围 (x0,x1, y0,y1, z0,z1)。只做几何计算，不触发视图重算。"""
+    cb = view.CropBox
+    T = cb.Transform
+    xs, ys, zs = [], [], []
+    for a in (cb.Min.X, cb.Max.X):
+        for b in (cb.Min.Y, cb.Max.Y):
+            for c in (cb.Min.Z, cb.Max.Z):
+                p = T.OfPoint(DB.XYZ(a, b, c))
+                xs.append(p.X)
+                ys.append(p.Y)
+                zs.append(p.Z)
+    return (min(xs), max(xs), min(ys), max(ys), min(zs), max(zs))
+
+
+def _bb_hits(bb, r):
+    """包围盒 bb 是否与世界范围 r 相交（几何判断）。"""
+    return not (bb.Max.X < r[0] or bb.Min.X > r[1] or bb.Max.Y < r[2] or bb.Min.Y > r[3]
+                or bb.Max.Z < r[4] or bb.Min.Z > r[5])
+
+
+def _scan_existing_sheets(doc):
+    """扫描模型里已有的「井大样_」图纸，返回 {井号: [(图纸 ElementId, 图纸上的视图 ElementId 列表), ...]}。
+    历史图纸可能已被改过图纸名/图号（例如 图纸名=井大样_LV-L-026、图号=LV-L-026，
+    而井的 Mark 其实是 L-026），单靠图纸名匹配不到。因此两个键都登记：
+      1) 优先用图纸上视图名里的 "AG-<井编号>-<4位随机>" 反推井编号；
+      2) 图纸名 "井大样_" 之后的后缀。
+    「重新生成即替换」和「出图进度」共用这一份索引。"""
+    stale_sheets = {}
+    try:
+        _vp_by_sheet = {}
+        for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
+            try:
+                _vp_by_sheet.setdefault(_vp.OwnerViewId.Value, []).append(_vp.ViewId)
+            except:
+                pass
+        for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
+            try:
+                _nm = _s.Name or ""
+                # 图名以「井大样_」开头，或图名按模板改过（如 BTP-IF1 Telco-T-001 Detail Drawing）
+                # 但图上视图名带 AG-井号-xxxx 的，都算井大样图（否则重新生成时旧图删不掉，会重复）
+                _is_prefix = _nm.startswith(WS_PREFIX)
+                _suffix = _nm[len(WS_PREFIX):] if _is_prefix else None
+                _kids = _vp_by_sheet.get(_s.Id.Value, [])
+                _tag = None
+                for _vid in _kids:
+                    _vv = doc.GetElement(_vid)
+                    if not (_vv and _vv.Name):
+                        continue
+                    _parts = _vv.Name.split("_", 1)
+                    if len(_parts) != 2 or not _parts[1].startswith(WS_NUMPRE):
+                        continue
+                    _seg = _parts[1].split("-")
+                    if len(_seg) >= 3:
+                        _tag = "-".join(_seg[1:-1])
+                    break
+                _keys = []
+                if _tag and _tag not in _keys:
+                    _keys.append(_tag)
+                if _suffix and _suffix not in _keys:
+                    _keys.append(_suffix)
+                if not _keys:
+                    continue
+                for _k in _keys:
+                    stale_sheets.setdefault(_k, []).append((_s.Id, _kids))
+            except:
+                pass
+    except:
+        pass
+    return stale_sheets
+
+
+def _well_sort_key(mk):
+    """井的排序：先按配置里系列的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
+    return wcfg_well_sort_key(mk, WCFG)
+
+
+# 向导每个范围的井号判断，打开向导时按配置和模型里实际有的井生成（见 _build_range_menu）
+_WELL_GROUP_PRED = {}
+
+
+def _build_range_menu(wells):
+    """批量出图向导的范围菜单：按配置里的系列和模型里实际有的井生成，数量实时统计。
+    返回 (选项文字列表, 清理选项的标签)。选项的判断条件登记在 _WELL_GROUP_PRED。"""
+    marks = [_mark_of(w) for w in wells]
+    outdoor = lambda m: not m.startswith(WS_INDOOR)
+    items = []
+    first3 = sorted([m for m in marks if outdoor(m)] or marks, key=_well_sort_key)[:3]
+    if first3:
+        items.append((u'先行测试：生成前 3 座井（{}）'.format(u'、'.join(first3)),
+                      (lambda f3: (lambda m: m in f3))(set(first3))))
+    n_out = len([m for m in marks if outdoor(m)])
+    n_in = len(marks) - n_out
+    for sr in WCFG[u"series"]:
+        if sr[u"prefix"].startswith(WS_INDOOR):
+            continue
+        pred = (lambda x: (lambda m: wcfg_series_of(m, WCFG, True) is x))(sr)
+        n = len([m for m in marks if pred(m)])
+        if n:
+            items.append((u'{} 全系列（共 {} 座）'.format(sr[u"label"], n), pred))
+    if n_out:
+        items.append((u'全量 {} 座室外井排队连续生成'.format(n_out), outdoor))
+    for sr in WCFG[u"series"]:
+        if not sr[u"prefix"].startswith(WS_INDOOR):
+            continue
+        pred = (lambda x: (lambda m: wcfg_series_of(m, WCFG, True) is x))(sr)
+        n = len([m for m in marks if pred(m)])
+        if n:
+            items.append((u'{} 全系列（共 {} 座）'.format(sr[u"label"], n), pred))
+    if n_in:
+        items.append((u'全量 {} 座室内井排队连续生成'.format(n_in), lambda m: m.startswith(WS_INDOOR)))
+    items.append((u'全模型 {} 座井全量排队连续生成'.format(len(marks)), lambda m: True))
+    _WELL_GROUP_PRED.clear()
+    opts = []
+    for i, (text, pred) in enumerate(items):
+        tag = u'【{}】'.format(i + 1)
+        _WELL_GROUP_PRED[tag] = pred
+        opts.append(tag + text)
+    clean_tag = u'【{}】'.format(len(items) + 1)
+    opts.append(clean_tag + u'清理全部井大样图纸与视图（只清理，不出图）')
+    return opts, clean_tag
+
+
+def _status_label(opt, wells, built):
+    """在向导的范围选项后面加上「[已出 X / 共 Y]」。"""
+    tag = opt.split("】")[0] + "】"
+    pred = _WELL_GROUP_PRED.get(tag)
+    if pred is None:
+        return opt
+    sel = [_mark_of(w) for w in wells if pred(_mark_of(w))]
+    done = len([m for m in sel if m in built])
+    return opt + "  [已出 %d / 共 %d]" % (done, len(sel))
+
+
+class _WellRow(object):
+    def __init__(self, well, label):
+        self.well = well
+        self.label = label
+
+
+class _WellStatusOption(forms.TemplateListItem):
+    @property
+    def name(self):
+        return self.item.label
+
+
+def _pick_well_status(wells, built):
+    """出图进度：列出全部井，标明已出图（及图纸张数）或未出图，只生成勾选的井。返回所选井的列表。"""
+    rows = []
+    for w in sorted(wells, key=lambda e: _well_sort_key(_mark_of(e))):
+        mk = _mark_of(w)
+        n = len(set(sid.Value for sid, _kids in built.get(mk, [])))
+        label = ("[已出 %d张] %s" % (n, mk)) if n else ("[未出]     %s" % mk)
+        rows.append(_WellRow(w, label))
+    n_done = len([r for r in rows if r.label.startswith("[已出")])
+    picked = forms.SelectFromList.show(
+        [_WellStatusOption(r) for r in rows],
+        title="出图进度：已出 {} 座，未出 {} 座（勾选要生成的井）".format(n_done, len(rows) - n_done),
+        button_name="生成所选井", multiselect=True)
+    if not picked:
+        return []
+    if not isinstance(picked, (list, tuple)):
+        picked = [picked]
+    return [getattr(r, "well", r) for r in picked]
+
+
+# 耗时记录（测速用）：_pt_mark(名称) 把「上一个标记到现在」的时间记到上一个名称下
+_PT = {}
+_PT_STATE = {'name': None, 't': None}
+
+
+def _pt_mark(name):
+    import time as _tm
+    now = _tm.time()
+    if _PT_STATE['name'] is not None:
+        _PT[_PT_STATE['name']] = _PT.get(_PT_STATE['name'], 0.0) + (now - _PT_STATE['t'])
+    _PT_STATE['name'] = name
+    _PT_STATE['t'] = now
+
+
+# 平面视图快速新建：复制同一标高上已有的井大样平面（裁剪框已打开），复制约 0.35 秒；
+# 直接新建再打开裁剪框，Revit 要整体重算该平面，实测每口井约 45 秒。复制失败时退回新建。
+_PLAN_SRC = {}
+
+
+def _create_plan_view(doc, plan_type_id, level_id):
+    if not _PLAN_SRC.get('_built'):
+        _PLAN_SRC['_built'] = True
+        for _v in DB.FilteredElementCollector(doc).OfClass(DB.ViewPlan).ToElements():
+            try:
+                if _v.IsTemplate or u'_AG-' not in (_v.Name or u'') or not _v.CropBoxActive or _v.GenLevel is None:
+                    continue
+                _k = _v.GenLevel.Id.Value
+                if _k not in _PLAN_SRC:
+                    _PLAN_SRC[_k] = _v.Id
+            except:
+                pass
+    _src_id = _PLAN_SRC.get(level_id.Value)
+    if _src_id is not None:
+        try:
+            _src = doc.GetElement(_src_id)
+            if _src is not None:
+                _new = doc.GetElement(_src.Duplicate(DB.ViewDuplicateOption.Duplicate))
+                if _new is not None and str(_new.ViewType) == 'FloorPlan':
+                    return _new
+        except:
+            pass
+    return DB.ViewPlan.Create(doc, plan_type_id, level_id)
+
+
+_SHEET_COLL_IDS = {}
+
+
+def _set_sheet_collection(doc, sheet, mark):
+    """把图纸放进配置里对应的图纸集合（按井号前缀）；找不到集合或参数不可写时跳过，不影响出图。"""
+    try:
+        _name = wcfg_collection_name(mark, WCFG)
+        if not _name:
+            return
+        if _name not in _SHEET_COLL_IDS:
+            _SHEET_COLL_IDS[_name] = None
+            for _c in DB.FilteredElementCollector(doc).OfClass(DB.SheetCollection).ToElements():
+                if _c.Name == _name:
+                    _SHEET_COLL_IDS[_name] = _c.Id
+                    break
+        _cid = _SHEET_COLL_IDS.get(_name)
+        if _cid is None:
+            return
+        _p = sheet.get_Parameter(DB.BuiltInParameter.SHEET_COLLECTION)
+        if _p is not None and not _p.IsReadOnly:
+            _p.Set(_cid)
+    except:
+        pass
+
+
+def _bbox_key(elem):
+    """井的包围盒（英尺，取到 0.01 ft），用来判断井有没有动。"""
+    bb = elem.get_BoundingBox(None)
+    if bb is None:
+        return None
+    return [round(bb.Min.X, 2), round(bb.Min.Y, 2), round(bb.Min.Z, 2),
+            round(bb.Max.X, 2), round(bb.Max.Y, 2), round(bb.Max.Z, 2)]
+
+
+def _renumber_pairs(doc, pairs):
+    """替换过的图纸改回原来的图号（旧图已删除、事务已提交之后才能做）。号已被占用的跳过，不影响出图。"""
+    if not pairs:
+        return
+    t2 = DB.Transaction(doc, u"恢复原图号")
+    t2.Start()
+    try:
+        used = set(x.SheetNumber for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements())
+        for _sid, _old_no in pairs:
+            _sh = doc.GetElement(DB.ElementId(_sid))
+            if _sh is None or _old_no in used:
+                continue
+            used.discard(_sh.SheetNumber)
+            _sh.SheetNumber = _old_no
+            used.add(_old_no)
+        t2.Commit()
+    except:
+        if t2.HasStarted() and not t2.HasEnded():
+            t2.RollBack()
+
+
 def main():
     try:
         global doc, uidoc
         doc = revit.doc
         uidoc = revit.uidoc
+        # 位置缓存：本次运行读一次；未动的井（包围盒没变、图纸还在）可直接跳过
+        _pos_cache = wcfg_cache_load()
+        _only_moved = [False]
+        _skipped_unmoved = [0]
+        _renumber_later = []
         # 读取视图中用户的预选构件：选中井后直接生成；未选中时进入批量出图向导
         try:
             selected_ids = list(uidoc.Selection.GetElementIds())
@@ -638,26 +1329,21 @@ def main():
                 if e and e.Category and e.Category.Id.Value == int(DB.BuiltInCategory.OST_GenericModel):
                     valid_elems.append(e)
 
+        picked_from_status = False
         if not valid_elems:
             # 未在视图中手动选井时，弹出向导选择生成范围
-            menu_opts = [
-                '【1】先行测试：生成前 3 座样板井 (AA-01 ~ AA-03)',
-                '【2】AA- 强电井全系列 (AA-01 ~ AA-22, 共22座)',
-                '【3】BB- 弱电井全系列 (BB-01 ~ BB-24, 共24座)',
-                '【4】A- 强电井全系列 (A-01 ~ A-127, 共127座)',
-                '【5】B- 弱电井全系列 (B-01 ~ B-126, 共126座)',
-                '【6】T- 通信井全系列 (T-001 ~ T-196, 共196座)',
-                '【7】L- 低压拉线井全系列 (L-001 ~ L-166, 共166座)',
-                '【8】E- 预制井全系列 (E-001 ~ E-163, 共163座)',
-                '【9】全量 824 座室外井排队连续生成',
-                '【10】室内-A- 强电井全系列 (室内-A-01 ~ 室内-A-42, 共42座)',
-                '【11】室内-T- 通信井全系列 (室内-T-01 ~ 室内-T-41, 共41座)',
-                '【12】室内-E- 弱电井全系列 (室内-E-01 ~ 室内-E-23, 共23座)',
-                '【13】室内-L- 低压拉线井全系列 (室内-L-01 ~ 室内-L-17, 共17座)',
-                '【14】全量 123 座室内井排队连续生成',
-                '【15】全模型 947 座井 (824室外 + 123室内) 全量排队连续生成',
-                '【16】清理全部井大样图纸与视图（只清理，不出图）'
-            ]
+            def get_mark(elem):
+                p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+                return p.AsString().strip() if (p and p.AsString()) else ""
+
+            wells_with_mark = [e for e in all_model_wells if get_mark(e) and get_mark(e) != "室内"]
+            try:
+                built_map = _scan_existing_sheets(doc)
+            except:
+                built_map = {}
+            menu_opts, _clean_tag = _build_range_menu(wells_with_mark)
+            menu_opts = [_status_label(o, wells_with_mark, built_map) for o in menu_opts]
+            menu_opts.insert(0, '【0】出图进度：看哪些井已出图、哪些没有（勾选未出的井直接生成）')
             choice = forms.SelectFromList.show(
                 menu_opts,
                 title='一键井展开图 - 批量出图向导',
@@ -665,17 +1351,18 @@ def main():
             if not choice:
                 return
 
-            if '【16】' in choice:
+            _tag = choice.split('】')[0] + '】'
+            if _tag == _clean_tag:
                 # 独立清理：不动井，只把模型中所有「井大样_」图纸连同其平面/剖面视图删掉。
                 # 专门用来清掉那批"对应井已不存在（Mark 改过或井已删）"的老图纸，
                 # 这类图纸在生成流程里不会被逐井替换命中。
                 _cnt_before = len([s for s in DB.FilteredElementCollector(doc)
                                    .OfClass(DB.ViewSheet).ToElements()
-                                   if (s.Name or "").startswith("井大样_")])
+                                   if (s.Name or "").startswith(WS_PREFIX)])
                 _det = _old_detail_candidates(doc)
                 _ok = forms.alert(
                     '将删除模型中全部「井大样_」图纸及其视图（当前共 {} 张），以及老旧井大样详图视图 {} 个，操作不可撤销。\n'
-                    '注意：若要用新剖面框重做全部井，请先执行本清理，再运行【1】~【15】生成；\n'
+                    '注意：若要用新剖面框重做全部井，请先执行本清理，再用上面的范围生成；\n'
                     '刚生成完的新图也会被本项删掉。\n确定继续？'.format(_cnt_before, len(_det)),
                     title='清理井大样图纸', ok=False, yes=True, no=True)
                 if _ok:
@@ -692,7 +1379,7 @@ def main():
                                 pass
                         for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
                             try:
-                                if not (_s.Name or "").startswith("井大样_"):
+                                if not (_s.Name or "").startswith(WS_PREFIX):
                                     continue
                                 _kids = _vp_by_sheet.get(_s.Id.Value, [])
                                 doc.Delete(_s.Id)
@@ -726,7 +1413,7 @@ def main():
                                 _is_agy = False
                                 for _pre in ("平面_", "南_", "北_", "西_", "东_"):
                                     if _nm.startswith(_pre):
-                                        _is_agy = _nm[len(_pre):].startswith("AG-")
+                                        _is_agy = _nm[len(_pre):].startswith(WS_NUMPRE)
                                         break
                                 if not _is_agy:
                                     continue
@@ -755,60 +1442,42 @@ def main():
                                 title='清理结果')
                 return
 
-            def get_mark(elem):
-                p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
-                return p.AsString().strip() if (p and p.AsString()) else ""
-
-            wells_with_mark = [e for e in all_model_wells if get_mark(e) and get_mark(e) != "室内"]
-
-            if '【1】' in choice:
-                targets = ["AA-01", "AA-02", "AA-03"]
-                valid_elems = [e for e in wells_with_mark if get_mark(e) in targets]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【2】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("AA-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【3】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("BB-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【4】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("A-") and not get_mark(e).startswith("AA-")]
-                valid_elems.sort(key=lambda e: (len(get_mark(e)), get_mark(e)))
-            elif '【5】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("B-") and not get_mark(e).startswith("BB-")]
-                valid_elems.sort(key=lambda e: (len(get_mark(e)), get_mark(e)))
-            elif '【6】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("T-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【7】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("L-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【8】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("E-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【9】' in choice:
-                valid_elems = [e for e in wells_with_mark if not get_mark(e).startswith("室内-")]
-            elif '【10】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-A-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【11】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-T-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【12】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-E-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【13】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-L-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【14】' in choice:
-                valid_elems = [e for e in wells_with_mark if get_mark(e).startswith("室内-")]
-                valid_elems.sort(key=lambda e: get_mark(e))
-            elif '【15】' in choice:
-                valid_elems = wells_with_mark
+            if _tag == '【0】':
+                picked_from_status = True
+                valid_elems = _pick_well_status(wells_with_mark, built_map)
+                if not valid_elems:
+                    return
+            else:
+                _pred = _WELL_GROUP_PRED.get(_tag)
+                if _pred is None:
+                    return
+                valid_elems = [e for e in wells_with_mark if _pred(get_mark(e))]
+                valid_elems.sort(key=lambda e: _well_sort_key(get_mark(e)))
 
         if not valid_elems:
             forms.alert('未找到符合条件的预制井！', title='错误')
             return
+
+        # 出过图的井默认跳过，避免重复出图；从「出图进度」里勾选的井不再追问
+        if not picked_from_status:
+            try:
+                built_now = _scan_existing_sheets(doc)
+            except:
+                built_now = {}
+            done_ids = set(e.Id.Value for e in valid_elems if _mark_of(e) in built_now)
+            if done_ids:
+                skip_choice = forms.CommandSwitchWindow.show(
+                    ['跳过已出图的，只生成未出的（推荐）', '只重做移动过的（未动的跳过，最快）', '全部重做（替换已有图纸）'],
+                    message='所选 {} 座里有 {} 座已经出过图。'.format(len(valid_elems), len(done_ids)))
+                if not skip_choice:
+                    return
+                if '移动过' in skip_choice:
+                    _only_moved[0] = True
+                elif '跳过' in skip_choice:
+                    valid_elems = [e for e in valid_elems if e.Id.Value not in done_ids]
+                    if not valid_elems:
+                        forms.alert('所选的井都已出过图，没有需要生成的。', title='一键井展开图')
+                        return
 
         # 规则与预览：按选中井的真实尺寸实时看排版效果，保存后用新规则生成
         try:
@@ -991,52 +1660,9 @@ def main():
             except:
                 master_view = None
 
-            # ---- 预扫描（只做一次）：建立「井编号 -> 该井既有井大样图纸」索引 ----
-            # 历史图纸可能已被改过图纸名/图号（例如 图纸名=井大样_LV-L-026、图号=LV-L-026，
-            # 而井的 Mark 其实是 L-026），单靠图纸名匹配不到。因此：
-            #   1) 优先用图纸上视图名里的 "AG-<井编号>-<4位随机>" 反推井编号；
-            #   2) 取不到时退回用图纸名 "井大样_" 之后的后缀。
-            stale_sheets = {}
-            try:
-                _vp_by_sheet = {}
-                for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
-                    try:
-                        _vp_by_sheet.setdefault(_vp.OwnerViewId.Value, []).append(_vp.ViewId)
-                    except:
-                        pass
-                for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
-                    try:
-                        _nm = _s.Name or ""
-                        if not _nm.startswith("井大样_"):
-                            continue
-                        _suffix = _nm[len("井大样_"):]
-                        _kids = _vp_by_sheet.get(_s.Id.Value, [])
-                        _tag = None
-                        for _vid in _kids:
-                            _vv = doc.GetElement(_vid)
-                            if not (_vv and _vv.Name):
-                                continue
-                            _parts = _vv.Name.split("_", 1)
-                            if len(_parts) != 2 or not _parts[1].startswith("AG-"):
-                                continue
-                            _seg = _parts[1].split("-")
-                            if len(_seg) >= 3:
-                                _tag = "-".join(_seg[1:-1])
-                            break
-                        # 双键索引：视图名反推的 tag 与图纸名后缀都登记。
-                        # 井 Mark 可能写作 "L-151"，也可能写作 "LV-L-151"（图纸被改过名），
-                        # 两个键都挂上才能都命中；重复时第二次删除会被 try 吞掉，不影响计数。
-                        _keys = []
-                        if _tag and _tag not in _keys:
-                            _keys.append(_tag)
-                        if _suffix not in _keys:
-                            _keys.append(_suffix)
-                        for _k in _keys:
-                            stale_sheets.setdefault(_k, []).append((_s.Id, _kids))
-                    except:
-                        pass
-            except:
-                pass
+            # ---- 预扫描（只做一次）：建立「井编号 -> 该井既有井大样图纸」索引，见 _scan_existing_sheets ----
+            _pt_mark('setup_scan')
+            stale_sheets = _scan_existing_sheets(doc)
 
             # 游离视图索引：视图名形如 北_AG-<井号>-<4位随机码>。图纸被删、视图却留着时，这些视图不在上面的图纸索引里，
             # 会一直堆积。这里按井号把所有这类视图登记下来，重新生成这口井之前先全部删掉。
@@ -1049,7 +1675,7 @@ def main():
                         _nm = _v.Name or ""
                         _dir = None
                         for _pre in ("平面", "南", "北", "西", "东"):
-                            if _nm.startswith(_pre + "_AG-"):
+                            if _nm.startswith(_pre + "_" + WS_NUMPRE):
                                 _dir = _pre
                                 break
                         if _dir is None:
@@ -1067,6 +1693,33 @@ def main():
             for _did, _dnm, _dmk in _old_detail_candidates(doc):
                 if _dmk:
                     old_views.setdefault(_dmk, []).append(_did)
+
+            _num_next = [None]
+            _reuse_num = {}
+
+            _num_occ = [None]
+            _num_warn = []
+            _sb_rules = sb_load()
+
+            def _new_sheet_number(mark, self_id=None):
+                """下一个图号：从这口井所在系统的号段里取下一个空号（号段见 文档/KaifaTools/井图号号段.json），
+                井号不在任何号段、或号段用完时接在所有号段之后并提示。只扫描一次模型。"""
+                if _num_occ[0] is None:
+                    _occ = set()
+                    for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
+                        try:
+                            if self_id is not None and _s.Id.Value == self_id:
+                                continue          # 刚新建的这张图纸，Revit 给它的默认编号不算占用
+                            _sn = (_s.SheetNumber or "").strip()
+                            if _sn.isdigit():
+                                _occ.add(int(_sn))
+                        except:
+                            pass
+                    _num_occ[0] = _occ
+                _n, _w = sb_next_number(mark or "", _sb_rules, _num_occ[0])
+                if _w and _w not in _num_warn:
+                    _num_warn.append(_w)
+                return _n
 
             pb = forms.ProgressBar(title='正在批量生成井大样图... ({value}/{max_value})', cancellable=True)
             for idx, elem in enumerate(valid_elems):
@@ -1105,6 +1758,14 @@ def main():
                     # 「重新生成即替换」：按预扫描索引清掉这口井既有的井大样图纸，
                     # 连同落在该图纸上的平面/东南西北剖面视图一起删除，再由下面重建。
                     # 出图之前先删掉这口井以前出过的视图（包括已经没有图纸的游离视图），再建新的。
+                    # 只重做移动过的：井包围盒没变、缓存里记的图纸还在，就跳过（不重算、不新建视图）
+                    if _only_moved[0]:
+                        _ent = _pos_cache.get(base_name)
+                        if _ent is not None and _ent.get('bbox') == _bbox_key(elem):
+                            _sh = doc.GetElement(DB.ElementId(int(_ent.get('sheet_id', -1))))
+                            if _sh is not None and (_sh.Name or u'') == _ent.get('name'):
+                                _skipped_unmoved[0] += 1
+                                continue
                     for _oid in old_views.pop(base_name, []):
                         try:
                             _ov = doc.GetElement(_oid)
@@ -1116,6 +1777,10 @@ def main():
 
                     for _sid, _kids in stale_sheets.get(base_name, []):
                         try:
+                            # 记下旧图的图号，新图沿用（替换后图号不空缺、不往后跳）
+                            _old_sheet = doc.GetElement(_sid)
+                            if _old_sheet is not None and (_old_sheet.SheetNumber or "").strip().isdigit():
+                                _reuse_num[base_name] = _old_sheet.SheetNumber.strip()
                             doc.Delete(_sid)
                             for _vid in _kids:
                                 try:
@@ -1128,6 +1793,7 @@ def main():
                         except:
                             pass
 
+                    _pt_mark('sheet_create')
                     # 1. 新建图纸（无图框模式用 InvalidElementId；不在图纸加入标题栏实例）
                     if selected_tb is not None:
                         sheet = DB.ViewSheet.Create(doc, selected_tb.Id)
@@ -1136,8 +1802,22 @@ def main():
 
                     rand_suffix = System.Guid.NewGuid().ToString()[:4]
 
-                    sheet.Name = "井大样_" + base_name
-                    sheet.SheetNumber = "AG-" + base_name + "-" + rand_suffix
+                    # 图名：按配置里的图名模板（如 BTP-IF1 Telco-T-001 Detail Drawing）；没有模板沿用「井大样_」前缀
+                    sheet.Name = wcfg_sheet_name(base_name, WCFG) or (WS_PREFIX + base_name)
+                    # 图号：接着现有的最大数字图号往后排（0001、0002…），不再用 AG-井号-随机码
+                    # 旧图号不能在删除旧图的同一事务里立即给新图（Revit 会报「图纸编号已在使用中」）：
+                    # 先用新号，事务提交后再改回旧号（见 _renumber_pairs）
+                    _old_no = _reuse_num.pop(base_name, None)
+                    if _old_no:
+                        # 替换旧图：先挂一个不会重复的临时号，提交后改回旧号（旧号不占用号段里的新号）
+                        sheet.SheetNumber = "TMP" + rand_suffix + str(len(_renumber_later))
+                        _renumber_later.append((sheet.Id.Value, _old_no))
+                    else:
+                        sheet.SheetNumber = _new_sheet_number(base_name, sheet.Id.Value)
+                    # 图纸集合：按井号系列放进对应的图纸集合（11KV/275KV/ELV/LV/TELCO），便于按集合导出 PDF
+                    _set_sheet_collection(doc, sheet, base_name)
+                    _pos_cache[base_name] = {'bbox': _bbox_key(elem), 'sheet_id': int(sheet.Id.Value),
+                                             'name': sheet.Name, 'number': sheet.SheetNumber}
                     for param_name in ["专业", "所属专业"]:
                         try:
                             sp = sheet.LookupParameter(param_name)
@@ -1157,6 +1837,7 @@ def main():
                     if not bbox:
                         continue
 
+                    _pt_mark('geometry')
                     # 1. Z 轴标高与高度：直接由构件 BBox.Min.Z / Max.Z 确定（100% 精确吻合实体，绝无符号线虚高）
                     center_z = (bbox.Min.Z + bbox.Max.Z) / 2.0
                     pit_dz = (bbox.Max.Z - bbox.Min.Z) / 2.0
@@ -1221,6 +1902,7 @@ def main():
                     face_out = R_FACE_OUT  # 剖切面外移（规则）
                     face_depth = R_FACE_DEPTH  # 剖面框厚度（规则）
 
+                    _pt_mark('plan_view')
                     # ============================================
                     # 2. 生成平面图 (ViewPlan)
                     # ============================================
@@ -1232,8 +1914,10 @@ def main():
                         level_id = levels[0].Id if levels else DB.ElementId.InvalidElementId
 
                     if plan_type_id != DB.ElementId.InvalidElementId and level_id != DB.ElementId.InvalidElementId:
-                        view_plan = DB.ViewPlan.Create(doc, plan_type_id, level_id)
+                        view_plan = _create_plan_view(doc, plan_type_id, level_id)
+                        _pt_mark('plan_after_create')
                         view_plan.CropBoxActive = True
+                        _pt_mark('plan_after_cropbox_active')
                         view_plan.CropBoxVisible = False
 
                         crop = DB.BoundingBoxXYZ()
@@ -1244,11 +1928,13 @@ def main():
                                           center.Y + pit_dy + offset,
                                           center.Z + pit_dz + offset)
                         view_plan.CropBox = crop
+                        _pt_mark('plan_after_crop')
 
                         # 视图范围按标高的“相对项目基点高程”换算（ProjectElevation）。
                         # 用 Elevation 时，本项目 0.00 标高的 Elevation 是 4390 m，偏移被算成 -4383 m，
                         # 平面视图范围落在井之外，平面空白。井的几何与 ProjectElevation 同一坐标系。
                         level_elev = doc.GetElement(level_id).ProjectElevation
+                        _pt_mark('plan_before_range')
                         view_range = view_plan.GetViewRange()
                         # 剖切面置于井顶之上：井整体落在剖切面以下，平面图以俯视投影
                         # 完整显示井身（含顶面轮廓）。原来 Cut 放在井中心高度，Revit
@@ -1272,13 +1958,16 @@ def main():
                         sbox.Transform = t
                         sbox.Min = DB.XYZ(-pit_dx - offset, -pit_dy - offset, -pit_dz - offset)
                         sbox.Max = DB.XYZ(pit_dx + offset, pit_dy + offset, pit_dz + offset)
+                        # 立面用详图视图（同 T-005 的做法，深度穿过井，能看到内壁与颜色）；项目里没有详图类型时才用剖面
                         if detail_type_id != DB.ElementId.InvalidElementId:
                             view_plan = DB.ViewSection.CreateDetail(doc, detail_type_id, sbox)
                         else:
                             view_plan = DB.ViewSection.CreateSection(doc, section_type_id, sbox)
 
-                    view_plan.Name = "{}_{}".format("平面", sheet.SheetNumber)
+                    # 视图名带井号（平面_AG-井号-随机码），「重新生成即替换」靠它认出这口井的旧视图
+                    view_plan.Name = "{}_{}{}-{}".format("平面", WS_NUMPRE, base_name, rand_suffix)
 
+                    _pt_mark('section_views')
                     # ============================================
                     # 3. 生成四个立面剖面视图
                     # ============================================
@@ -1305,7 +1994,7 @@ def main():
                             v = DB.ViewSection.CreateDetail(doc, detail_type_id, sbox)
                         else:
                             v = DB.ViewSection.CreateSection(doc, section_type_id, sbox)
-                        v.Name = "{}_{}".format(name_suffix, sheet.SheetNumber)
+                        v.Name = "{}_{}{}-{}".format(name_suffix, WS_NUMPRE, base_name, rand_suffix)
                         return v
 
                     # 实测(Revit 2026)：View.ViewDirection == CropBox.Transform.BasisZ == -输入BasisZ，
@@ -1368,6 +2057,11 @@ def main():
                             # 没选平面样板时，平面套「详图」样板（项目里的标准图就是这样做的：平面也用井大样详图样板），
                             # 再没有就用勾选的第一个样板；不留成没套样板的平面
                             tid = chosen_templates.get('Detail') or (picked_template_ids[0] if picked_template_ids else None)
+                        if tid is None and template_key in ('Section', 'Detail'):
+                            # 立面（剖面/详图）没选到同类型样板时：用另一类立面样板，再没有就用勾选的第一个样板。
+                            # 之前线上版只认同类型，用户选的是「详图」样板而立面是剖面时，立面一个样板都套不上
+                            tid = chosen_templates.get('Detail' if template_key == 'Section' else 'Section') or (
+                                picked_template_ids[0] if picked_template_ids else None)
                         if tid is None:
                             continue
                         try:
@@ -1383,10 +2077,34 @@ def main():
                                 except:
                                     continue
 
+                    _pt_mark('style')
                     # ============================================
                     # 4. 统一设置视图样式 & 隐藏轴网、标高、剖面标记
                     # ============================================
+                    # 整口井只扫描一次模型：别的井、剖面标记的包围盒。后面每个视图只做几何判断，
+                    # 不再逐个视图做视图级查询（那样每个新视图都要先重算，是出图慢的主要原因）
+                    _others_bb = []
+                    _viewers_bb = []
+                    try:
+                        _own_mark0 = _mark_of(elem)
+                        for _e in _near_collector(doc, elem, DB.BuiltInCategory.OST_GenericModel):
+                            if _e.Id == elem.Id or not _mark_of(_e) or _mark_of(_e) == _own_mark0:
+                                continue
+                            _b = _e.get_BoundingBox(None)
+                            if _b is not None:
+                                _others_bb.append((_e.Id, _b))
+                        for _e in _near_collector(doc, elem, DB.BuiltInCategory.OST_Viewers):
+                            _b = _e.get_BoundingBox(None)
+                            if _b is not None:
+                                _viewers_bb.append((_e.Id, _b))
+                    except:
+                        pass
                     for v in all_views:
+                        # 不显示裁剪框（详图视图自带的矩形框）；裁剪框本身仍然生效，只是不画出来
+                        try:
+                            v.CropBoxVisible = False
+                        except:
+                            pass
                         # 视图套用样板后，被样板接管的 Scale/DisplayStyle/DetailLevel 再赋值
                         # 会抛 "DisplayStyle cannot be modified."（journal 实证 line 597），
                         # 导致每口井都被判失败、最后"没有图纸生成成功"。逐项保护，让样板说话。
@@ -1402,21 +2120,37 @@ def main():
                             v.DetailLevel = DB.ViewDetailLevel.Fine
                         except:
                             pass
+                        # 只留本井：视图范围内别的井（邻井）一律隐藏，本井保持显示（不论邻井离多近）
+                        _rng = None
+                        try:
+                            _rng = _view_world_range(v)
+                        except:
+                            _rng = None
+                        if _rng is not None:
+                            try:
+                                _nb_ids = [_i for _i, _b in _others_bb if _bb_hits(_b, _rng)]
+                                if _nb_ids:
+                                    v.HideElements(System.Collections.Generic.List[DB.ElementId](_nb_ids))
+                            except:
+                                pass
                         # 隐藏轴网与标高
                         for cat in ([DB.BuiltInCategory.OST_Grids, DB.BuiltInCategory.OST_Levels] if R_HIDE else []):
                             try:
                                 v.SetCategoryHidden(DB.ElementId(cat), True)
                             except:
                                 pass
-                        # 强力隐藏视图中的所有剖面标记/轴号标签 (OST_Viewers)
-                        try:
-                            viewers = [e.Id for e in DB.FilteredElementCollector(doc, v.Id)
-                                       .OfCategory(DB.BuiltInCategory.OST_Viewers).ToElements()
-                                       if e.CanBeHidden(v)]
-                            if viewers:
-                                v.HideElements(System.Collections.Generic.List[DB.ElementId](viewers))
-                        except:
-                            pass
+                        # 强力隐藏视图范围内的剖面标记/轴号标签 (OST_Viewers)：几何判断，逐个兜底
+                        if _rng is not None:
+                            _vw_ids = [_i for _i, _b in _viewers_bb if _bb_hits(_b, _rng)]
+                            if _vw_ids:
+                                try:
+                                    v.HideElements(System.Collections.Generic.List[DB.ElementId](_vw_ids))
+                                except:
+                                    for _i in _vw_ids:
+                                        try:
+                                            v.HideElements(System.Collections.Generic.List[DB.ElementId]([_i]))
+                                        except:
+                                            pass
                         # 自动归类至“井大样”子规程与专业，彻底隔离不影响其他专业
                         for param_name in ["子规程", "所属专业"]:
                             try:
@@ -1426,6 +2160,7 @@ def main():
                             except:
                                 pass
 
+                    _pt_mark('style_extra')
                     # ============================================
                     # 4.1 隐藏剖面取样标记等注释残留 + 复制主视图过滤器（井外观专业配色）
                     # ============================================
@@ -1447,6 +2182,7 @@ def main():
                                 pass
 
 
+                    _pt_mark('layout')
                     # ============================================
                     # 6. 排版到图纸
                     # ============================================
@@ -1463,16 +2199,27 @@ def main():
                     spacing_x = R_SPACING_X
                     spacing_y = R_SPACING_Y
 
-                    DB.Viewport.Create(doc, sheet.Id, view_plan.Id,
-                                       DB.XYZ(tb_center_x, tb_center_y, 0))
-                    DB.Viewport.Create(doc, sheet.Id, view_front.Id,
-                                       DB.XYZ(tb_center_x, tb_center_y - spacing_y, 0))
-                    DB.Viewport.Create(doc, sheet.Id, view_back.Id,
-                                       DB.XYZ(tb_center_x, tb_center_y + spacing_y, 0))
-                    DB.Viewport.Create(doc, sheet.Id, view_left.Id,
-                                       DB.XYZ(tb_center_x - spacing_x, tb_center_y, 0))
-                    DB.Viewport.Create(doc, sheet.Id, view_right.Id,
-                                       DB.XYZ(tb_center_x + spacing_x, tb_center_y, 0))
+                    _vps_new = [
+                        (DB.Viewport.Create(doc, sheet.Id, view_plan.Id, DB.XYZ(tb_center_x, tb_center_y, 0)), view_plan, (tb_center_x, tb_center_y)),
+                        (DB.Viewport.Create(doc, sheet.Id, view_front.Id, DB.XYZ(tb_center_x, tb_center_y - spacing_y, 0)), view_front, (tb_center_x, tb_center_y - spacing_y)),
+                        (DB.Viewport.Create(doc, sheet.Id, view_back.Id, DB.XYZ(tb_center_x, tb_center_y + spacing_y, 0)), view_back, (tb_center_x, tb_center_y + spacing_y)),
+                        (DB.Viewport.Create(doc, sheet.Id, view_left.Id, DB.XYZ(tb_center_x - spacing_x, tb_center_y, 0)), view_left, (tb_center_x - spacing_x, tb_center_y)),
+                        (DB.Viewport.Create(doc, sheet.Id, view_right.Id, DB.XYZ(tb_center_x + spacing_x, tb_center_y, 0)), view_right, (tb_center_x + spacing_x, tb_center_y))]
+                    # Viewport.Create 把「视口外框」的中心放到指定点；视图里有远处的相机图标等注释时，外框被撑得很大，
+                    # 视图本身（裁剪框）就偏到图纸外面去了。所以建完后按「裁剪框中心」重新对准目标点。
+                    try:
+                        doc.Regenerate()
+                        for _vp, _vw, _tg in _vps_new:
+                            _cb = _vw.CropBox
+                            _T = _vp.GetProjectionToSheetTransform()
+                            _sc = float(_vw.Scale)
+                            _ccx = _T.Origin.X + (_cb.Min.X + _cb.Max.X) / 2.0 / _sc
+                            _ccy = _T.Origin.Y + (_cb.Min.Y + _cb.Max.Y) / 2.0 / _sc
+                            if abs(_ccx - _tg[0]) > 0.003 or abs(_ccy - _tg[1]) > 0.003:      # 偏差超过约 1 mm 才挪
+                                _bc = _vp.GetBoxCenter()
+                                _vp.SetBoxCenter(DB.XYZ(_bc.X + (_tg[0] - _ccx), _bc.Y + (_tg[1] - _ccy), 0))
+                    except Exception:
+                        pass
 
                     success_count += 1
                     generated_sheet_ids.append(sheet.Id)
@@ -1482,7 +2229,10 @@ def main():
                         "创建图纸过程崩溃，具体原因:\n" + str(inner_e) +
                         "\n\n" + traceback.format_exc(),
                         title="底层API报错")
+            _pt_mark('commit')
             t.Commit()
+            wcfg_cache_save(_pos_cache)
+            _renumber_pairs(doc, _renumber_later)
             pb.close()
         except Exception as trans_e:
             pb.close()
@@ -1532,8 +2282,9 @@ def main():
             forms.alert(
                 '批量生成大样图完毕！\n共成功生成 {} 张图纸，替换（删除重建）旧图 {} 张，删除这些井以前出的旧视图 {} 个。\n'
                 '视图样板：{}\n'
-                '提示：套了样板的视图，其"视图范围/显示样式"由样板决定，脚本不再覆盖。{}'.format(
-                    success_count, replaced_count, old_removed, _tpl_msg, export_result),
+                '提示：套了样板的视图，其"视图范围/显示样式"由样板决定，脚本不再覆盖。{}{}'.format(
+                    success_count, replaced_count, old_removed, _tpl_msg, export_result,
+                    ('\n图号提示：' + '；'.join(_num_warn)) if _num_warn else ''),
                 title='成功')
         else:
             forms.alert('执行完成，但没有图纸生成成功。请查看上面的打印日志。', title='警告')

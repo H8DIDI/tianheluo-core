@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-__title__ = '一键导出井大样DWG'
-__doc__ = '一键批量导出所有井大样图纸为 DWG 文件，自动合并外部参照，直接保存在指定文件夹中。'
+__title__ = '一键导出图纸DWG/PDF'
+__doc__ = ('批量导出图纸为 DWG / PDF：井大样按系列一键选，也能导项目浏览器里选中的图纸、全部图纸或手动勾选。\n'
+           'DWG 每 20 张一批导出（比逐张快），导出前检查没有图框的图纸，文件名按图号去重不再互相覆盖，可只补导缺的；\n'
+           '可选 AutoCAD 后台补 logo、瘦身（PurgeAll）；PDF 可合并成一个或每张一个。每次在文件夹里留一份导出清单。')
 
 import os
+import re
 import sys
+import io
+import base64
 import clr
 import System
 from System.Collections.Generic import List
@@ -13,177 +18,1339 @@ doc = revit.doc
 uidoc = revit.uidoc
 
 
+# 图纸名前缀、井编号系列、logo 位置都来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
+# ---- well_config（天河落共用片段，打包时内联进脚本）-----------------------------
+# 井大样系列插件（一键井展开图 / 一键井大样标注 / 图纸归类与图框编号 / 导出井大样DWG）共用的项目配置。
+# 配置文件：文档\KaifaTools\井大样配置.json。第一次运行时自动写出一份默认配置（与原来写死的规则完全一样），
+# 换项目时只改这个文件：图纸名前缀、图号前缀、井编号系列（前缀 → 系统名 → 系统代码）、图框 logo 位置。
+import io as _wc_io
+import os as _wc_os
+import json as _wc_json
+import re as _wc_re
+
+WCFG_FILE = _wc_os.path.join(
+    __import__('System').Environment.GetFolderPath(__import__('System').Environment.SpecialFolder.MyDocuments),
+    u"KaifaTools", u"井大样配置.json")
+
+WCFG_DEFAULTS = {
+    u"说明": (u"井大样系列插件的项目配置。改完保存，下次点插件生效；删掉这个文件会恢复默认。"
+            u"series 里每一项是一个井编号系列：prefix=井号前缀（井号形如 AA-01、T-068、室内-A-01，前缀后面可以有一个 -，再跟数字），"
+            u"system=系统名（写进图纸的「图纸系统」参数、用来归类），code=系统代码（图号模板里的 {系统码}），label=菜单里显示的名字。"
+            u"顺序就是菜单和排序的顺序；匹配时长的前缀优先（AA 先于 A）。"),
+    u"sheet_name_prefix": u"井大样_",
+    u"sheet_number_prefix": u"AG-",
+    u"indoor_prefix": u"室内-",
+    u"system_param": u"图纸系统",
+    u"series": [
+        {u"prefix": u"室内-A", u"system": u"室内强电井", u"code": u"NQ", u"label": u"室内-A- 强电井"},
+        {u"prefix": u"室内-T", u"system": u"室内通信井", u"code": u"NT", u"label": u"室内-T- 通信井"},
+        {u"prefix": u"室内-E", u"system": u"室内弱电井", u"code": u"NR", u"label": u"室内-E- 弱电井"},
+        {u"prefix": u"室内-L", u"system": u"室内低压拉线井", u"code": u"ND", u"label": u"室内-L- 低压拉线井"},
+        {u"prefix": u"AA", u"system": u"强电井", u"code": u"QD", u"label": u"AA- 强电特型井"},
+        {u"prefix": u"A", u"system": u"强电井", u"code": u"QD", u"label": u"A- 强电井"},
+        {u"prefix": u"BB", u"system": u"弱电井", u"code": u"RD", u"label": u"BB- 弱电特型井"},
+        {u"prefix": u"B", u"system": u"弱电井", u"code": u"RD", u"label": u"B- 弱电井"},
+        {u"prefix": u"T", u"system": u"通信井", u"code": u"TX", u"label": u"T- 通信井"},
+        {u"prefix": u"L", u"system": u"低压拉线井", u"code": u"DY", u"label": u"L- 低压拉线井"},
+        {u"prefix": u"E", u"system": u"预制井", u"code": u"YZ", u"label": u"E- 预制井"},
+        {u"prefix": u"Y", u"system": u"雨水井", u"code": u"YS", u"label": u"Y- 雨水井"},
+    ],
+    u"other": {u"system": u"其他", u"code": u"QT"},
+    # 图名模板（按井号前缀，长前缀优先）：{井号} 换成井号，如 T-001。没有模板的井沿用「井大样_」前缀。
+    # 图纸集合（按井号前缀）：新图放进对应的图纸集合，便于按集合导出 PDF。名字须与项目里的图纸集合一致。
+    u"sheet_collection_by_prefix": {
+        u"AA": u"275KV井大样", u"BB": u"275KV井大样", u"A": u"11KV井大样", u"B": u"11KV井大样",
+        u"E": u"ELV井大样", u"L": u"LV井大样", u"T": u"TELCO井大样",
+    },
+    u"sheet_name_templates": {
+        u"AA": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"BB": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"A": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"B": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"E": u"BTP-IF1 ELV-{井号} Detail Drawing",
+        u"L": u"BTP-IF1 Lv-{井号} Detail Drawing",
+        u"T": u"BTP-IF1 Telco-{井号} Detail Drawing",
+    },
+    u"logo": {u"enabled": True, u"file": u"frame_logo.jpg", u"x0": 736.54, u"y0": 141.10, u"w": 91.49,
+              u"说明": u"导出 DWG 后补插的图框 logo：x0/y0 = logo 左下角在 Layout1 里的坐标，w = 宽度（按 A1 横向图框标定）。换图框要改；enabled=false 不补 logo。"},
+}
+
+_WCFG_CACHE = [None]
+
+
+def _wcfg_merge(base, extra):
+    out = dict(base)
+    for k, v in (extra or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _wcfg_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def wcfg_load(write_default=True):
+    """读项目配置（缺的项用默认值补齐）。文件不存在时写出默认配置，方便用户找到并修改。"""
+    if _WCFG_CACHE[0] is not None:
+        return _WCFG_CACHE[0]
+    cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    try:
+        if _wc_os.path.exists(WCFG_FILE):
+            with _wc_io.open(WCFG_FILE, 'r', encoding='utf-8-sig') as f:
+                cfg = _wcfg_merge(cfg, _wc_json.load(f))
+        elif write_default:
+            d = _wc_os.path.dirname(WCFG_FILE)
+            if not _wc_os.path.isdir(d):
+                _wc_os.makedirs(d)
+            with _wc_io.open(WCFG_FILE, 'w', encoding='utf-8') as f:
+                f.write(_wc_json.dumps(WCFG_DEFAULTS, ensure_ascii=False, indent=2))
+    except Exception:
+        cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    # series 至少要有 prefix
+    good = []
+    for s in cfg.get(u"series") or []:
+        try:
+            p = (s.get(u"prefix") or u"").strip()
+        except Exception:
+            continue
+        if not p:
+            continue
+        s = dict(s)
+        s[u"prefix"] = p
+        s.setdefault(u"system", p)
+        s.setdefault(u"code", p)
+        s.setdefault(u"label", p + u"-")
+        good.append(s)
+    cfg[u"series"] = good or list(WCFG_DEFAULTS[u"series"])
+    _WCFG_CACHE[0] = cfg
+    return cfg
+
+
+def wcfg_series_of(mark, cfg=None, strict=False):
+    """井号属于哪个系列：前缀（长的优先）后面可以有一个 -，必须紧跟数字。认不出返回 None。
+    strict=True 时前缀后面必须是「-数字」（井的标记用这个：雨水井的 A1、BB24 这类不带 - 的不算强电/弱电井）。"""
+    cfg = cfg or wcfg_load()
+    m = (mark or u"").strip()
+    for s in sorted(cfg[u"series"], key=lambda x: -len(x[u"prefix"])):
+        p = s[u"prefix"]
+        if m.startswith(p):
+            rest = m[len(p):]
+            if rest[:1] == u"-":
+                rest = rest[1:]
+            elif strict:
+                continue
+            if rest[:1].isdigit():
+                return s
+    return None
+
+
+def wcfg_series_index(s, cfg=None):
+    cfg = cfg or wcfg_load()
+    for i, x in enumerate(cfg[u"series"]):
+        if x is s:
+            return i
+    return len(cfg[u"series"])
+
+
+def wcfg_natural_key(text):
+    out = []
+    for tok in _wc_re.split(r'(\d+)', text or u''):
+        out.append((0, int(tok), u'') if tok.isdigit() else (1, 0, tok.lower()))
+    return out
+
+
+def wcfg_well_sort_key(mark, cfg=None, strict=True):
+    """先按系列在配置里的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
+    s = wcfg_series_of(mark, cfg, strict)
+    return (wcfg_series_index(s, cfg) if s is not None else 9999, wcfg_natural_key(mark))
+
+
+def wcfg_sheet_name(mark, cfg=None):
+    """井号 → 图名（按配置里的图名模板）。没有对应模板时返回 None，调用方沿用「井大样_」前缀。
+    模板前缀按长度从长到短匹配，且前缀后面必须紧跟 "-"（AA-04 不会误判成 A 系列）。"""
+    cfg = cfg or wcfg_load()
+    tpls = cfg.get(u"sheet_name_templates") or {}
+    m = (mark or u"").strip()
+    for key in sorted(tpls.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return tpls[key].replace(u"{井号}", m)
+    return None
+# ---- well_config 结束 ----------------------------------------------------------
+
+
+def wcfg_collection_name(mark, cfg=None):
+    """井号 → 图纸集合名（按配置 sheet_collection_by_prefix，长前缀优先，前缀后紧跟 -）。没有对应返回 None。"""
+    cfg = cfg or wcfg_load()
+    maps = cfg.get(u"sheet_collection_by_prefix") or {}
+    m = (mark or u"").strip()
+    for key in sorted(maps.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return maps[key]
+    return None
+
+
+# ---- 井位置缓存（井没动就不重新生成）：Documents\KaifaTools\井大样位置缓存.json ----
+def wcfg_cache_path():
+    return _wc_os.path.join(_wc_os.path.dirname(WCFG_FILE), u"井大样位置缓存.json")
+
+
+def wcfg_cache_load():
+    """读位置缓存：{井号: {bbox, sheet_id, name, number}}。文件不存在或坏了返回空。"""
+    try:
+        with _wc_io.open(wcfg_cache_path(), 'r', encoding='utf-8-sig') as f:
+            d = _wc_json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def wcfg_cache_save(d):
+    """先把内容转成文字，转成功才写文件（避免转换失败时把旧缓存清成空文件）。"""
+    try:
+        txt = _wc_json.dumps(d, ensure_ascii=False, indent=1)
+    except Exception:
+        return
+    try:
+        p = wcfg_cache_path()
+        dd = _wc_os.path.dirname(p)
+        if not _wc_os.path.isdir(dd):
+            _wc_os.makedirs(dd)
+        with _wc_io.open(p, 'w', encoding='utf-8') as f:
+            f.write(txt)
+    except Exception:
+        pass
+
+WCFG = wcfg_load()
+
+# 井的编号：AA-01、室内-A-01 这种。改过名的图纸里也能找到
+_MARK_RE = re.compile(u"(" + re.escape(WCFG[u"indoor_prefix"]) + u")?[A-Za-z]{1,3}-\\d+(?:-\\d+)?")
+
+# ---- DWG 补 logo 的参数 ----
+# Revit 导出 DWG 时不会带上图纸里的光栅图片（比如图框右侧「总承包商」框里的 logo），
+# 所以导出后用 AutoCAD 在后台把 logo 补插到每张 DWG 的 Layout1（图纸空间）。
+# 下面的位置是按 A1 横向图框标定的（单位 mm，图纸空间坐标，原点在图框左下角）：
+#   LOGO_X0, LOGO_Y0 = logo 图片左下角；LOGO_W = logo 宽度（高度按图片比例自动算）。
+# 换了别的图框，改配置文件里 logo 的 x0 / y0 / w 三个数（enabled=false 则不补 logo）。
+LOGO_ENABLED = bool(WCFG[u"logo"].get(u"enabled", True))
+LOGO_X0 = float(WCFG[u"logo"].get(u"x0", 736.54))
+LOGO_Y0 = float(WCFG[u"logo"].get(u"y0", 141.10))
+LOGO_W = float(WCFG[u"logo"].get(u"w", 91.49))
+LOGO_FILE_NAME = WCFG[u"logo"].get(u"file") or u"frame_logo.jpg"
+# DWG 导出设置：模型里有这个名字的导出设置就用它，没有就用默认设置
+DWG_SETUP_NAME = WCFG.get(u"dwg_export_setup") or u"机电导图设置"
+
+# 内置的 logo 图片（JPEG，base64）。导出时会写成 frame_logo.jpg 放在 DWG 同一个文件夹，
+# DWG 里引用的就是这个文件，所以 DWG 和这个 jpg 要一起带走。
+_LOGO_B64 = (
+    "/9j/7gAOQWRvYmUAZAAAAAAB/9sAxQASDg4aDhojGiIvPC8mJC02PkExLzY+OEBYQDg+RERERERERERERERERERERERERERERERE"
+    "REREREREREREREREARQjIz4gPkQ+PkRERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERE"
+    "REQCFCMjPiA+RD4+RERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERP/dAAQA2//A"
+    "ABEIATwG0gMAEQABEQECEQL/xAGiAAEAAwADAQADAQAAAAAAAAAABQYHAQMEAggJCgsBAQEBAQEBAQACAwAAAAAAAAABAgUGBAMH"
+    "CAkKCxAAAQIDAgUKBQUCfwAAAAAAAAECAwQFBhESITFRcRQVMjRBUmGR0fATFiIzgUKhscHhcvEHCAkKFxgZGiMkJSYnKCkqNTY3"
+    "ODk6Q0RFRkdISUpTVFVWV1hZWmJjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPE"
+    "xcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6EQEAAAEDAgIAlgMAAAAAAAAAAQITMQMREiEEBQYHCAkKFBUWFxgZGiIj"
+    "JCUmJygpKjIzNDU2Nzg5OkFCQ0RFRkdISUpRUlNUVVZXWFlaYWJjZGVmZ2hpanFyc3R1dnd4eXqBgoOEhYaHiImKkZKTlJWWl5iZ"
+    "mqGio6SlpqeoqaqxsrO0tba3uLm6wcLDxMXGx8jJytHS09TV1tfY2drh4uPk5ebn6Onq8PHy8/T19vf4+fr/2gAMAwAAARECEQA/"
+    "ALwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/0LwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAf/0bwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/0rwAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/07wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/"
+    "1LwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/1bwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAf/1rwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/17wAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/0LwAAAAAHCqEir03UosJ6oi4j7pNThGDmS6rGEXn12i5z9JuD8p6JrtFzibg"
+    "T0TXaLnE3Anomu0XOJuBPRNdoucTcCeia7Rc4m4E9E12i5xNwJ6JrtFzibgT0TXaLnE3Anomu0XOJuBPRNdoucTcCeia7Rc4m4E9"
+    "E12i5xNwJ6JrtFzibgT0TXaLnE3Anomu0XOJuBPRNdoucTcCeia7Rc4m4E9E12i5xNwJ6JrtFzibgT0XOu0XOJqBPRTNKmXTLFV2"
+    "c+OqSbDF0KlKsUEgfi+kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//RvAAAAAAcOyBIqjUOuLpOrIocOqUvGfo/EAAcgAOAAADkDgAAAAAAAAAA"
+    "AAOUKLJQutrpOdVaXWqFCWPmfaAAAAAAAAAAAAAAAAAABeAvAAAAAAAAAAAAAAAAAAAAAvAXgAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPnojc4BIjV3QPoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/SvAAAAAAcOyFSKo1DrjtJ1JFDh1Sl4z9H4gAA"
+    "ACublCFylC5SAAuUKXKELgFwC4BcoUA4CAAABygFkoXW10nPqtLrVChLHzPtAAAAAAAAAAAAAAAAACAtNOxJNjVYt16kVVtfpjfd"
+    "zyge2lVWZmY7W34r8eUC9pkKgAAAAAAAAAAcYSAMJAGEgDCQDm+8AB5KjFWFBe5uVEUCiOrswirj7nlIqSoVTjzcdGquIC6FQAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAeGfqcOn3YW6B4emeXAdM8uA6Z5fhAdM8vwhTpnl+EB0zy/CBx0zy/CA6Z5cDnpnlwPuFaOBGc"
+    "jUyqoEw1cJLwjkAAAAAAHjm6jDkrsNbrwPL0wS+cKdMEvnCHTBL5wHTBL5wHTBL5wHTBL5wGv8vnAa/y+cCRl5hsy1HtyKB2gAAA"
+    "AAAAAAAAB1TK3Q3LwAZtHqEZHr1S5c5FemlzkeLHYmEuXOBoqZCoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHGEgDCQBhIAwkAYSA"
+    "MJAGEgDCQBhIAwkAYSAMJAOb7wAAAAAAAAAAAAAeGbqsGTxOXHmAho1rYaLc1OfGRU7ITerYaPzlR6gAAAAAAAAAD5dEazKtwHzq"
+    "hmdAGqGZ0AaoZnQBqhmdAGqGZ0AaoZnQBqhmdAGqGZ0AaoZnQBqhmdAPtHI7GgHIAAAAAAAH/9O8AAAAABw7IVIqjUOuO0nUkUOH"
+    "VKXjP0fiAAOQrluUEFil6ZDjMRT4JVUjCLpyalCMHbrPCMzsX6TMDWeEJ2JMwQ0aWayY6HuH0wlRjB8MZEIRrJlKRCVD5p2L7ZmB"
+    "rPCE7FZmDxVGRhyzL0P1kS4yovnqlThJg7JGmw40NFXKSVLjJi1U6nCVB6dZ4R+c7F+0zA1nhCdiTMEPVJVss5EQ+qpyrE+GqSLC"
+    "jj93ygAABygFkoXW10nPqtLrVChLHzPtAAAAAAAAAAAAAAAAACr2w62zTyhVLIqcswl8wgRoCFQAAAAAAAAAAM+q1RjQ47kR2JCK"
+    "8OusxvlAa6zG+A+odTmHuRMJcagXZrokvJYSr1VxRT3V2YRV6ruOQg64tZjxWq1VxKBHKt4V3S00+VdhNxKB7tfZjfdxyBHGvsxv"
+    "u45AJyzdSizcbBct6d4oFtKgAAAAAEZWqi6nQkemcCu9NsTNz4iKdN0TNz4gHTdEzc+IB03RM3PiAdN0TNz4gHTdEzc+IB03RM3P"
+    "iAdN0TNz4gHTdEzc+IB02xM3PiAnqHVHVNiuXcUqJcAAAAAAFSthkbpTuyKqF4UAAAAAAAAXgeqndfZ30nchGoQtimgqPoAAAAAA"
+    "FNtfsm884VVb1IpeAvAXgLwF4C8DluNUA0mhswJZmhO4QrKSAAAAAAAAh5u0EGUesN2VAOjpqlyB01S/CA6apfhCuuPaeXexUTdA"
+    "pMZ2G5VCvTTJlsrGa92RAi49NMvwlQ6apfhAdNUuQOmqXA9khWYVQcrWlEmAAAAPmItzVUCgz9ZjworkRcV5FefX2Y33ccgDX2Y3"
+    "3ccgDX2Y33ccgDX2Y33ccgDX2Y33ccgDX2Y33ccgDX2Y33ccgDX2Y33ccgDX2Y33ccgDX2Y33PiAa+zG+7jkAJXZhV2XccgF+p8R"
+    "YsFrlyqVHqAAAAFDrlQjQY6o11yEVGa6zG+Aa6zG+UBrrMb5QGusxvlAa6zG+UBrrMb4BrrMb5QGusxvlAa6zG+UBrrMb5QGusxv"
+    "lAvdBjOjS6Oct6lRKAAAAAAAARlbnVkoCuTKBWpW1cWHicl/PQRU3LWngRkudiUomoURIzUcmRQilWrllhxUibipyhVbvIq72Tm+"
+    "iQ1hrlTvQiylQAAAAAAAAAU+1kd8KI25bsRFVrVsXfKFNWxd8oQ1bF3ygNWxd8oDVsXfKA1bF3ygNWxd8oDVsXfKA1bF3ygcpORV"
+    "7UoVodFcr5ZirmKykQAAAAAAAP/UvAAAAAAcOyFSKo1DrjtJ1JFDh1Sl4z9H4gAABy0LBcJDrSHKl0u5U6HqPzfsBFamdtn3Sb+u"
+    "XKv8sjch8UXUg5IqKrfW00n0VKl8dWod9L60hmqUt1Kh7j8X0gEBXVTCQ+6ouZV0GfW54AAAcoBZKF1tdJz6rS61QoSx8z7QAAAA"
+    "AAAAAAAAPnDTOBzhpnAYaZwGGmcCsWvciw26eUKpZFTlmFumAi/YaZyo5w0zgMNM4DDTOARyKByAAAAAFGqdDmI8ZzmtxKRUfGoU"
+    "xBarnNxIBGKl2IKkaJLapmGpmW/twjQZuXWNBWGmZCoqLrKRVVVv58ZFdMxZmJLsV6rk55wIJUwVuA9dOp7qg/AaBITlnYkpDV67"
+    "gEGFWOyWKPzzKEXi9Co5AAAAACvWt2unfXKFUQigAAAAAAAAABdbH9afpKizhAAAAAAKlbDI3SndkVUAqzUGiwqhDVzsqLz3QiX6"
+    "VZfn38qHSrL8+/hTpVl+ffwHSrL8+/gOlWX59/A649mIENiqm5zzgUmM3AeqZlIrvp3X2d9J3IGoQtimgrL6AAAAAABE1WipU1RV"
+    "W67nnAi1sixO1dt3pFcdKkLf9t3oHKWShr2rtu9A56UGb7tu9AdKDN923egfESyTGNVcLJwd6BUorOhuVMwVxCS9yaUA1CmswIDE"
+    "9Mp3BWXqAAAAAAAUDOLQbafpIqKCgAIAAoAAAAgBZLJdeXRyFF4CAAAB8xEvaoGfT9LjxIzlRu6RXl1nmN6oU1nmN6oQ1nmN6oHm"
+    "jyr5ZbnJcoHSiX4gr2tpUdyYSNW4I8b2KxblyoFfUKC6OuC3GoHs1nmN6oDWeY3qgNZ5jeqEctpEwi7FQNBpzFhwWouW4qPWAAAA"
+    "KJW6dGjx1Vrb0IqN1nmN6oDWeY3qgNZ5jeqFeF7FYty5QOYcNYqo1MqhHojU6NLtwnNuQK8oHfLykSaW5iXhHo1nmN6oDWeY3qgN"
+    "Z5jegXmhQXQJdGuS5SolAAAAAAAAKha2c2MJOz2wVUiK99KkHT0VGpkCNIl4KS7EYm4hURNpZPVMBXbrQM+VLiNJOiT6yUZF3FXG"
+    "EaNDiJFajkyKhUfYAAAAAAAACrWlp0aciNViXpcRVf1gmt4A1gmt4A1gmt4A1gmt4A1gmt4A1gmt4A1gmt4A1gmt4B4I8B0u7Bcl"
+    "yhXWgGlUPazNBUSQQAAAAAAB/9W8AAAAABw7IVIqjUOuO0nUkUOHVKXjP0fiAAAHLcoWC3yS4MJFOVKpduRZQR8St4Cqlx+8KlXf"
+    "PGrVnskKgk5fwH5SpFhftIqljRMzts+iTf18cq/yZnJzUjEU+aTJsT7ZUuwQeKDWuiuRt2U/WNSrPxk1au+60t8NNJmp0rVrODup"
+    "7sCDfmvJLs4tVONaDyPrmAqpdkP0hUq7841as+dfuAs0zPo+fnNVqin7yJNhfLVJdjeE/Z84AAAcoBZKF1tdJz6rS61QoSx8z7QA"
+    "AAAAAAAAAAeSpPVkFypluAzt1Ujoq9UvGpFca6R98vGoU10j75eNQGukffLxqEdUeciTCXOW8DoCuyFGdAW9q3KB6NdI++XjUIa6"
+    "R98vGoDXSPvl41Aa6R98vGoE5Zudix41zlVUAuhUAAAAAuAhLSzOp5dU3V5UCs+Vb1vIq4WTksFFir2O2CPNWa1MSsdzGrciaeUC"
+    "O6Y5rfdzygfEWvTMZqsVcS6eUCMVbwr0Sk5EknYTFuUD1TFbmJlqscuJdPKERoV3S00+VXCYtygS1Oq0xFjNRXYlXhKi/txogRyA"
+    "AAAPJUJBlQZgOyXgRXSrL87uQB0qy/O7kCnSrL87uQIdKsvzu5AHSrL87uQKdKsvzu5Ah0qy/O7kAdKsvzu5Ap0qy/O7kCHSrL87"
+    "uQCTp1NZTmq1u6oHtAAAAAABUrYZG6U7siqgFTFMrj6cxWomUI93TbEzc+MB02xM3PjAdNsTNz4wHTbEzc+MB02xM3PjA+YlqokR"
+    "qtuy884FdiP6I5XZwr0U7r7O+k7kDUIWxTQVl9AAAAAAAAQ1ooiw4GJbtAFDScip2peNSNJWiTsaLHRuEt2lQjQEKgB0Ta4MN2gD"
+    "LYq3uXSRp9yjcOK1OFANRlkwYbE9Mp3BWXaAAAAAAAoEXM0KXmnq9yY10cgEXPU+Qp6dVl7HIRVanY8F96MS4KlbPSEvPorX7JAi"
+    "aj2clmMVUTGmjkAokZqMeqJuBXrpUu2ZjNY7IoRdOlqVzdxyFFftFIQJDBazKvekHhp0aW2MVOyBZZakSE4l7MfFyFEnJUiDIuwm"
+    "JjCJAAAAAAOMBMwHGA3MAwG5gGA3MBSbWIiRk55iKr8DZIBpkq1NTtxdpQqM5qHXn6SK9ln8cwgGiIxMxUMBuYBgNzAMBuYD6uuA"
+    "AAAADhWIu4BxgNzAcXMvuxAHMbcuIDMaj152kivuk7YZp7oC42kaiS2TncoFACrTZFEV7uecIuOA3MVDAbmAYDcwH0iXAAAAAAAA"
+    "dMzHSXYr13EAzSozazkZz13VIrytbhLcBoNnqaklCwlTqnd6VE0B8RYaRWq1cigZnVJVZSM5pFeJFuCrpZqr9Eb0F640yFRaAgAA"
+    "AAAAD4ixmwUvctyAeVapL75AONdJbfIBzrpLb5AGuktvkAa6S2+QBrpLb5AGuktvkAa6S2+QDtgzUKYvwFRQKBX9sKRUUmUK0qh7"
+    "WZoKiSCAAAAAAAP/1rwAAAAAHDshUiqNQ647SdSRQ4dUpeM/R+IAAActyhYLdKdZ7By5VLtSaFVj7JTpyaHHlUpig9qPkqr7ag6J"
+    "nbZZN/UlX+e2tdbafnUqX61ahCyfXW6T65dD4JFKcrPWk0nx1Ol0KrQ7JPa66FJLpWRf1W4+zXSffChzJVLrNMBVcEQAAAOUAslC"
+    "62uk59VpdaoUJY+Z9oAAAAAAAAAAAPFVesO0AZi/KpGn3AgOmHI1uVQJTpdmMwQ6XZjMB5pylRZJMJyYgPAFeiUlHzjsBuUCR6XJ"
+    "jMEcdLsxmA8s7S4siiK5MoV4ALDZXr4RfCoAAAAD5iRGw0VVW5EAoFoqlq2LgpsWkVDwYaxXI1N0K02nSySsFrCsoCq2eiTkZXou"
+    "JQrw9KcbOhB1TFmosuxXquQCBVLluA9lOkHVB+A0KkZqzcWWYr1XEgRBKlwV7adTnVB+A0InpKzUWXitcq4kAuDUuRCo5AAAAAAA"
+    "AAAAAAAAAAAAAAAAAAFSthkbpTuyKqAHbClYkZL2tVdCBXZrfH3i8QQ1vj7xeIBrfH3i8QDW+PvF4gGt8feLxANb4+8XiA51vj7x"
+    "eIK9MhIxmxmKrV2SbgRo8PE1NBUfQAAAAAAAEBal10FAqhEVPWWhYcxfmQqL8EAPLUHYMFy8AGXvyqRp6aW3CjsThA0+ElzUTgQr"
+    "L6AAAAAAAAAQNpKekzCw0ytCqCqXEVJ0Kb1JMNXcXL24RoMd6RIKuTdQqMwmdm7SRp7qFthoRo0SIkJquXIhUZtWJ1Z2M524RUei"
+    "K5bgq82apiyzOiOyruFZWMAAAAAAACLqNah09yNdugeHprg5iKdNcHMUVyu1FtQiYTSCKhuwXIoFyg2mhMhNZdjRLiiozcVI0Rzk"
+    "3VIr0UqaSTjI9cgRbOmqDmAdNcHMUdkK00KM5GomUCdRb0vCOQAAAAA8FWmYkrBV7MqAUePX5mNlW7i5CK7aLPxNUtwnXot/cKBo"
+    "CrehUZhUevO0kafdI2wzT3QRcrSbV55lKM/UirVZDZu55yos9Ri9Cgvcm4i9wEUJtbmITlVHdwRXvlrUx70R2Pi5Ci5ysVY8NHLi"
+    "vCO4AAAAAF9wFLtNVuiO6CxcSZSKq4VYbN0vVUTojk6lCovaJdiCAACs2opvRWdFamNMpFUlUuCvuFFdBcjm5UCL9RK02eYjXLc5"
+    "ComwAAAAAARFoVul3BWeK9SKYagMNQGGoDDUBhqAw1AYagWuyKqqv0coRD1/bCgRSZQrSqHtZmgqJIIAAAAAAA//17wAAAAAHDsh"
+    "UiqNQ647SdSRQ4dUpeM/R+IAAActyhYLdKdZ7By5VLtSaFVj7JTpSaHHlUpig9qPlqr7qg6JnbZZN/WJV/ntrXW2n51Ol+1WoQsn"
+    "11uk+yXQ+Gp0pys9aTSfFU6X31ah2Se110KSXSsi/qtx9muk++FDmSqXUaYAAAAAA5QCyULra6Tn1Wl1qhQlj5n2gAAAAAAAAAAA"
+    "8VV6w7QBmL8qkaSND2y0I0lqYio5uArdrOtJpCqORU5ZfbARoFxULgKta3Yt7JFUwKsFlevhF8KgAAAAKFX5+L0ZzMJUTNepFQCr"
+    "eFdkGMsByOTKgRKpaKYVUx9uoFofPPSR6N2q7uyoq62jmc/bqRXXGr0eM1WquJeFQIpVvCvRJzr5J2E3KB7I9djzDVaq4l4VCItV"
+    "CrHZLr/PMoReSoAAAAAAA+XPRuVQOOjMzoA6MzOgDozM6AOjMzoA6MzOgDozM6AOiszoA6KzOgHLXo7IoH0AAAAAAABUrYZG6U7s"
+    "iqgFWegVSBJw1a+6+8ImNf5Tg4gOdf5Tg4ghr/KcHEA1/lODiAa/ynBxANf5Tg4gGv8AKcHEFOmCUTNxBHola3Amn4DVxlEoAAAA"
+    "AAABW7WvwYTU4QqjkVabIs8RHO4CouYQA8FYdgy7lAzN2VSNJGhswpqHpCNKRLioAAAAAAAAAPiLDSK1WrugZjUZZZWK5pFeeE1y"
+    "qip2wVoVPiPiSfVZUQrLP5nZu0kV7qFtloFntLMxYcPAYmJcqoVFGciouMjSZs9TtWRkVU6loRoLWoxLkKjkAAAAAAACkWt663s9"
+    "0FVoigAAAAAAAAD1U/rzdIRqEPIhUfQAAAAAdceGkVitXdAy6cg9AiuZmIr5loiw3tcm4oVqMGJ0SGi8BWWaVHrztJFfdI2wzT3Q"
+    "FytJtXnmUoz9SKtVkNm7nnKibtDF6FLLw4u2UIzpcakae+jy+qY7WhGmMbgoiZio5AAAAACDr9WSSh4DV6pQqgvesRVcuVSK7pKV"
+    "dNxEYm6oRpUhKNk4TWJmKjz1Oqspt1+6B1StoJeYTLcoVJw47IuRUUI5jQkjNVq5FQDO65TlkYy4upUiooK7IEd0u5HNW5UAvFEr"
+    "zZpqMetziosCLeEAAAAB5J+TSdhqxd0CA6UGZ1CnSgzOoDpQZnUB0oMzqA6UGZ1AdKDM6gOlBmdQHSgzOpBKUqjtpl6ot94RTq/t"
+    "hQqKTKFaVQ9rM0FRJBAAAAAAAH//0LwAAAAAHDshUiqNQ647SdSRQ4dUpeM/R+IAAActyhYLdKdZ7By5VLtSaFVj7JTpSaHHlUpi"
+    "g9qPlqr7qg6JnbZZN/WJV/ntrXW2n51Ol+1WoQsn11uk+yXQ+Gp0pys9aTSfFU6X31ah2Se110KSXSsi/qtx9muk++FDmSqXUaYA"
+    "AAAAA5QCyULra6Tn1Wl1qhQlj5n2gAAAAAAAAAAA8VV6w7QBmL8qkaSFD2y0I0puQqOQK3a3rSaQqjkVOWX2wEaAVACrWu2LeyRV"
+    "MCrBZXr4RfCoAAAACi1qmRo8dXNTERUbrLMb0DyR5Z8suC5LlA62ZUCr/BlXTUgkNMqp3YZQHSrHCuqYs3Gl2K9ciAQapgrcFeyn"
+    "098+/AblCJXpVjgOlWOBLUKixafFw3ZO8UosoQAAAAAABVLVTD4Dm4K3c0Iqs64xt8vGoDXGNvl41CuNcY2+XjUBrjG3y8agNcY2"
+    "+XjUBrjG3y8agc64xt8vGoHGuMbfLxqBZLKzMSNEcjlVcRUW4IAAAAAAAqVsMjdKd2RVQCgC9QheoUvUBeoC9QF6gL1AXgS9ntst"
+    "CNFKgAAAAAACq2wXqGJwhVNIqxWdqcGQRcNbryon+maVzgOmaVzhHhq9fgTMBzGrjUiqYoVJUWahykZHvyIEW/pmlc5Q6Z5XOB7p"
+    "Gpwp+/AXIEe0AAAAeOpzayUJYibgFVW10VO0oRTpui71AIeo1DV8ToipcB3ylUhymRiKoHufap7mqxGoiAV578NVXOB3Sc0spER6"
+    "bgE461T4iXOYioBDzk2yZW9Goi8AV7adXVpzMFrU0hHu6bou9QAlroqrsUAt0pGWYhteu6hUd4AAAAAUi13XW9nugqtpjUgu1Koc"
+    "tMQEc5t69gortdlocpHVjEuRORCCOl2dEejc6gXqFZ6WWEiq3HdwchRSJ2GkKK5qZEUivVR5Zk1GRjsaBFwi2elWsVcHc4OQooUZ"
+    "qMcqIRXdT+vN0hGoMyIVH0AAAAAADPrSy6QZhVzkVCItyhWkUSN0aVapWVCqPXnaSK+6RthmnugLlaTavPMpRn6kVarIbN3POVHq"
+    "tdHuY2Hnx9yBSyKs9kZfDiOib3kUIupUAAAABF1erNpzF3y5AM+mpp829XuXKRp0Il63AXizVKSXZ0VydUuTtyosgRQ7VTPRY+Bv"
+    "eRCKgEcqBU9Z1keYipcq4KZcYRfUxFRH1amtqENUXLdiAzqblnSj1Y7cIroCvpkR0Nb0W5QLtZupRptMF2NE3SosgQAAAAHmnpnU"
+    "kNX5bgKx04u3qBTpxdvUAdOLt6gDpxdvUAdOLt6gDpxdvUA9tMtG6fipDVt14FiXIEZzX9sKRUUmUK0qh7WZoKiSCAAAAAAAP//R"
+    "vAAAAAAcOyFSKo1DrjtJ1JFDh1Sl4z9H4gAABy3KFgt0p1nsHLlUu1JoVWPslOnJoceVS9ElPLK33bp+cqTYn6SJdhcsjLHjo5d0"
+    "zGFaDcJViila11tp89TpfVVqEBBidCcjsx9sYV3OhGs9s1UnTTcFT8pMis/aXVLEmJLa66FPllUvtkX9VuPs10n3wocyVS6jTAAA"
+    "AAAHKAWShdbXSc+q0utUKEsfM+0AAAAAAAAAAAHiqvWHaAMxflUjTtlZh0q9HplQCb6aY/O7kCHTVH53chR4qhWolQajXEEWFeqR"
+    "nXSL8NuUIl+mqPzu5AHTVH53cgHgqNYiVBER24BGgWCyvXwL4VAAAA4VbkvAgJy0sGXVURL1QK+aRXtcY2AqXIQQ1quvIBAQ9kmk"
+    "Ku03HfKU9rm4luTuSorOvczvu4IPiJWJiK1Wq7EoHgVbwrulpp8quExblCPZr5M77uAGvkzvu4AnLN1GLNRsF63p3ilFuCAAAAAA"
+    "AKlayE6I5tyX80CqtqWJvV4iKakib1eIBqSJvV4gGpIm9XiAakib1eIBqSJvV4gGpIm9XiAalib1eICy2ThOhxHXpdiKi4hAAAAA"
+    "AAFSthkbpTuyKqAVarPUmDOQle9MilRJrSJFN1OPvQGtMhnTj70BrTIZ04+9Aa0yGdOPvSBrTIZ04+9A+4dEkoq3NuXs96UeCt0a"
+    "BKwVc1MZBTgqXs9tloRopUAAAAAAAVK2DsTE4QqoEUAAAAAAAAAXOySdS5dBUWkIAAAEXXmq6WciY+/EGerKxL9ivEGjUkTerxAN"
+    "SxN6vEEfESE6HlS4K+AAABlCO5JWIuO5eIKalib1eIBqSJvV4gOWysS9OpXiCNKpqK2AxFzBHrKAAAAApFruut7PdBVbblIrSKKu"
+    "DKovPIhWVFrEfo8w5xFKPAWNMMThA0lzcFl2ZCozGo9ffpI09ln9soEaDH627QVGWzOzXSRXbT+vN0gagzIhUfQAAAAAAKha6Dja"
+    "4iqkFXeysXDgubmCKnUevO0hX3SNsM090EXK0m1eeZSjP1Iq1WQ2buecqPFaaZ6PHu3qEEEFX+zMt0GBhb4qJ0IAAAACn1+iRYjl"
+    "itxpmCqo9isW5cpFWCz1IWad0RydSlwRemtRqXJuFR1zMVILFcu4gGXzkdZiI52dSNOuFDWK5GplUI0aiyCSMFE3Vx9sVEmAAh61"
+    "Rm1BuEmyQCgzEs+WcrXJcqEadtOkXT0VGIEaPIyjZOG1ibiFR6gAAAAAjq1tdwVmi5SK5axX5APvoD8y8QDoD8y8QHDoTmpeqAfA"
+    "E1ZrbCc91AjQlyFRnFf2wpFRSZQrSqHtZmgqJIIAAAAAAA//0rwAAAAAHDshUiqNQ647SdSRQ4dUpeM/R+IAAActyhYLdKdZ7By5"
+    "VLtSaFVj7JTpSaHHlUuo0w9En1xpiXQ/Wp0putdbafHU6X31ahXT73LEylFoktrroU5su/zryL+q3H2a6T74UOXKpdRpgAAAAADl"
+    "ALJQutrpOfVaXWqFCWPmfaAAAAAAAAAAADxVXrDtAGYvyqRoa1XLcgR26ki71eIBqSLvV4gr4fBfDyoqaQPgD6YxYi3Il4HZqSLv"
+    "V4ghqSLvV4gPh8F8PKippCvgCwWV6+EXwqAAAAVLwM9tHJ6lj3pkcFeKlzCy0druEivdaKMkeIjkzBERLtwojU4UCr/OU905KNhI"
+    "ty3J3RWUB0pRs6EV1TNmIsuxXqqYgIBUuxBXsp1PdUH4DVuCJjpSjZ0AdKUbOgErRKG+mxMNypzQosYQAAAAAAB8vhNiZURdKAfG"
+    "poe9TiQBqaHvU4kAamh71OJAGpoe9TiQBqaHvU4kAamh71OJAGpoe9TiQBqaHvU4kA+mQmMyIiaEA+wAAAAAAAKda93VNTR3ZFVQ"
+    "KvFnWq2UcVFRmo70iO6pcudSK6dURN8vGoDVETfLxqA1RE3y8agNURN8vGoFgsrEc+Mt6quldIRPWl2uvPOBnoVL2e2y0I0UqAAA"
+    "AAAAIup0dlSuwlyBUd0owc6kDpRg51AdKMHOoDpRg51AdKMHOoDpRg51KHSjBzqBXa1TW06JgtIqKAvNlGXQlXQEWMqAAABw5qOx"
+    "LjA69TQt6nEgDU0PepxIB8RIUGE1XK1tycCAZ9Wp1s1GXBRERMxFRgUAAEW7GEXezs9Cm2JDc1uEnAgFg1NC3qcSFQ1ND3qcSANT"
+    "Q96nEgHaiImJAAAAAAAUi13XW9nugqttykVdVndR09F3VycRUUp7leqqu6QWiycnhOWIuRALjE2K6Coy+o9ffpIpITaycVH5gLW+"
+    "1cF7FS7GqAU2K/Dcq5wrvp/Xm6QjUGZEKj6AAAAAABW7WMvhIuYKo5FWmyURUc9vByBEDUevO0hX3SNsM090EXK0m1eeZSjP1Iqz"
+    "WZidBSI7MnKEQE5F6PEc7OoHErD6LEa3OqdyFadJQugQmtzIVl6AAAAAAKl4EBVLOsnHo9uJd24CYlJVspDRjdwDvArtqZ7oMLoa"
+    "LjcFUXKRVnstTejO6M5MTcnbhFxiRWwUvctyFRVataZUVWQuMivbZ6sasTAevVd/KLCERlUo8OoNXFc7OB10ajpTmrfjcu6BLgAA"
+    "AAAAjq1tdwGaLlI0nrMQmxY1zkv0hF11BB3qcSFQ1BB3qcSARtdlIUOWcqNRFxbiZ0Az92UjSZs1thOe6gRoS5Coziv7YUiopMoV"
+    "pVD2szQVEkEAAAAAAAf/07wAAAAAHDshUiqNQ647SdSRQ4dUpeM/R+IAAAfTcoWC2ynWewcuVS7UmhVY+yU6cmhx5VLrKw75PrjT"
+    "Eqh+1TpTda620+Op0vuq1Cun3uWJlAtEltddCnOl3+daRf1W4+zXSffChzJVLqNMAAAAAAcoBZKF1tdJz6rS61QoSx8z7QAAAAAA"
+    "AAAAAeKqJfAdoAzV8F164iNPdRoCrMNvTEEaEkrDVNinEhUc6khb1OJAK9aqCyHCS5ETsBVKIqas0xr5i5UvKL5qWFvU4kDJqSFv"
+    "U4kAr1pZFYjW4DU7AVV9a4+9Iqbs3JRIEa9yXBF0KgAAAAIK00kkxAV6ZW8ihVB2KkVy56vyqEeulQuix2Jwp3IVO2gqEaUiI1iq"
+    "iIm4vAhUQ2vczvl41Ir5iViYitVquW5eFQPAq3gd0vMvlXYTFuUD169zO+XjUBr3M75eNQOyDWZh70RXLlzqEaFLuVzGquYqO0AA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAKFamP0SPdmRCKgEyhWhUmF0KT0oEUOb647SB3U2TSeipDyXgWXpPZvlKPPO2WbKwlejlxAVdyXLc"
+    "RVhsn19eecIsFpdrrzzlGekVL2e2y0I0UqAAAAAhpu0MGUiLDdlQg8/TXLlU6a5fmgQ6a5fmgDprl+aAOmuX5oA6a5fmgDprl+aA"
+    "OmuXIr3U6sw6iqo3cKiq2pdfMXc90ioBAq/2YZgwL9BUToQAAAAADhVuxgVC0Vdw0WDDXFuqRVTVbwqVpVKdO3uXYtAjo7UY9UQD"
+    "sk5VZt+AmUD5mZZ0q9WOyoBzKzT5R6PatyoEX6j1plQaiLskKiXAAAAAAAAAUi13XW9nugqttykVMVJkXoDFXYhEVAhLHejUyqoG"
+    "k0mSSSgtbu3JfxFR7lS9AM8rlPfLx3LdicRUV0F2YB0J2YD4CvVT+vN0hGoMyIVH0AAAAAACCtOzClwqkQ5KLFXEhFWaztMjyr1e"
+    "5Lku5AiuVLrztIV90jbDNPdBFytJtXnmUoz9SKnqHLvmmPY3KpUR83So8ovVIRXts3J9HmEVcjeVAjQUS4qAAAAAAAAAD4ixEhNV"
+    "y5EAzitTyz0ZV3EyEV5JSXWaiIxN0DSqfKNkoTWJmKjxV+QfOQr2KqKm4BnsRqsVUXKhFdkrMulXo9q40UDR6VPpPwkdu7pUe8AA"
+    "AAAAAABHVra7gM0XKRpNWenIcnFwn5Ai29MErn7YodMErn7YCPrNZl5mXcxq41u7kCkOW9SKmrNbYTnuoEaEuQqM4r+2FIqKTKFa"
+    "VQ9rM0FRJBAAAAAAAH//1LwAAAAAHDshUiqNQ647SdSRQ4dUpeM/R+LlEvCpyXo7YrEdflQ+ONUrRdCTUbFB2axpnMzrUw8U/IJK"
+    "3XKftIl2J+Eup2BNybcKCiHxSqXQkQrweN1ERy33n7QqtZ+EajXfOsaZyzrMw8D4KQJhGpuH617FB+FawykjWuttPxqdL6KtQgYE"
+    "Por0bnPtlRrQc6TCvFIz1OSVYjrz8JEuxPql1OwwStObhwbs580uyi+ypwrwed9FR6qt+U3Cq1n5xqNd86xpnLOszDxR5BsGK1ir"
+    "iU/WEuvB+Eqp1o1nt1jauO8/KdfvMGsaZxOrMIyfk9SuuPpkSrE+OqSLBF4T9XzuUAslC62uk59VpdaoUJY+Z9oAAAAAAAAAAAOH"
+    "NRyXKB06jhZgOWysNi3ogHcAArlretJpAoxGk5ZjbARoBUAF14C5AF1wAAAAAAPiLDSK1WrkVAM3rEksnGcm4q4iKjgqfstLpEj4"
+    "e97wqJet0SJPRMJuQCK6VYxB1TFm4sBivXIgEGqXLcFeuQkHT78BoEt0qxgh0qxgPuFZiMxyLmUC6QWdDYiZkKjsAAAAHy57WZVu"
+    "A+ejszpxgOjs3ycYDo7N8nGA6OzfJxgOjs3ycYDo7N8nGA6OzfJxgOjs3ycYDo7N8nGA6OzfJxgOjs3ycYDo7N8nGB9NiNfkVFA+"
+    "gAAAB8RoiQmq5dwDL5+OsxFc5c5FdcszokRrc6oFaVCh9ClkbmahWWbTfXHaSK9lEmGS0w1zluTvUAuvTBK77uOUqPHU63LR4Lmt"
+    "djXRyhVFet6kVYbJ9fXnnCLBaXa6885UZ6RpL2e2w0I0UqAAAAXIBnFfS+ZcRUXcoUuUBcoC5QFygLlAXKAuUCz2QS6I/QVEfaN2"
+    "FNO57qkEOmUK0WzzcGXTQhWUuAAAAAHXFjsgJhOW5EAp9atEsW+HDyZwqrqt5FSFKpr6hERqJi3VCL6yTbJS6sbuIVGbzPXHaSK9"
+    "1C2y0C2V2jpPMw27JCihxIToSq1UuVCKQozoKo5q3KgFoplqFbcyLkzlRZ5eoQZlL2uTjQI9SKigAAAAAApFruut7PdBVbblIrQJ"
+    "CUbOSSMdu8hUdFGoGo3q9/YAsQQA+HwmxMqXgdeo4WYDrjykNGOxbgGZzCXPUiu2n9eaBqDMiFR9AAAAAAA+IkJsVLlAMhNYlyIB"
+    "9OyKBl9R687SRX3SNss090BcrSbV55lKM/Iq1WQ2buecqLg+G2IlyhHVAlIcuqq1LrwO8AAAAAAAABwrkbjUCpWkrSOToLF0rxBV"
+    "RXGRVxsrT0a3ozsq5O3CLThpnKjhYrU3U4wKhaWmw+vMVOFLyKqoVK0SprIRU3qhGiQoiRWo5MilR9gAAAAAAAR1a2u4DNFykaEA"
+    "5xgcYwGMABNWa2wnPdQI0FchUZzX9sKRUUmUK0qh7WZoKiSCAAAAAAAP/9W8AAAAABw7IVIqjUOuO0nUkUOHVKXkP0fi5aFguEh1"
+    "luhDlS6XcqdEHpPzfsha3uH11Jz6ukJDrSH4S6X1VOh6j837AFamdtn3Sb+uXKv89ta620/OpUv1q1CFk+ut0n1y6Hw1OlOVnrSa"
+    "T46nS++q0PRS+tIYqlL9alQ9x+L6QCDq/XYelD6pFD4KpSmoexTQfNF9sKH0RpXK3sz76lQ5VXpQ59T4XKAWShdbXSc+q0utUKEs"
+    "fM+0AAAAAAAAAAAAAAAAAK5a3rSaQKMRpOWY2wEaAVAAAAAAAAAAA6piYbLMV7siIBnVYqGr4qu3EyEVGhXok52JJOwmLcEWqStW"
+    "1UuiJjzlEvCrktETZdzyBHXUp+DFgPRHbi9wBnj8aqRpN2ZjNgx73LdzUIuuuMDfFR8rVICdq7kD4WsSydr7ZeQDqfX5Zvau2XkA"
+    "90tMJMsR6ZFA7gAACr2sjPhNbgqqaAKnq2Lvl41Ipq2Lvl41Aati75eNQGrYu+XjUBq2Lvl41Aati75eNQGrYu+XjUBq2Lvl41Aa"
+    "ti75eNQGrYu+XjUBq2Lvl41Aati75eNQLHZaO+LEW9VXSpRcQgAAAQNpZ9JaCrEXG7lQKoK4yKlqBK6pmG+mbl7cI0COl0NU4Coy"
+    "+b647SRXSgVzcoQVFCuALFZPr6884RN2ojtZAwd1V5QKEFS9nUvmUCNFKgAAAAPBHo8vMOwnNvVQOvWCV3oDWCV3oVxrBK70BrBK"
+    "70BrBK70DnWCV3oDWCV3oHzrFKb0DvgyUCQRzmJdiCKBWI6TEw9yZL17kivC3GqBWl0dmBLs0IVlIAAAACHqdehyN7cruyBTJ+sR"
+    "p5VvW5MxFRwV76bTIlQejUTFuqEaDT6eyQYjWpjzlR3TXW3aAMumdm7SRp7qFthoRpNxUQFboLZxFexLncAVR5iXfLOVrkuVCDqC"
+    "u2DHiQ1TBVeMIv8AQGR+hYUVcpUTAAAAAAUi13XW9nugqtX3EVNytoosqxGJuBHf01RijjpqjEDpqjAOmqMA6aowHD7URnoqZyiB"
+    "e7DVVzkV6Kf15ukI1BmRCo+gAAAB4alUm05uE4CJ6bYWbuQp02ws3c8gQ6bYWbueQAtrISpk58RFU2aipGiK5N0D6kY6S0Vr1yIF"
+    "T9Wr8Odg9DRMYRWAqaoVVbTXKrkylRPdNsLN3PIEOm2Fm7nkCnTbCzdzyER2y9p4Uw9GImUqp9FvS8IAAAAABSq/V48OIsJMSd4F"
+    "Vlzlct6kVwB7oNWjwG4LXXIgRytYmF7UoHW6pR35XLxgdL5iJEyuVeyFdQAC52YqnRE6C5caZCotIQAAAAAABHVra7gM0XKRpMWf"
+    "kmTsXBfkCLZ0uS2YodLktmCPBWKJAloDntTGl3ckVS1at4VNWaRdUJz3UCNAcqIhUZvXIjYkdyoRUYgVpVD2szQVEkEAAAAAAAf/"
+    "1rwAAAAAHDshUiqNQ647SdSRQ4dUpeQ/R+LloWC2ykRIcBrl3EQ5cqFeLtSI1pLiDUocZ2ChYyIwJNUhKi8Va3D9ak+ervqXqkKE"
+    "xGklVOMYrJqsIQd2vEIzNRfpPQeiWnWTV924fnKk2F+smXCUhJnbZ9Um/r4ZV/ntrXW2n51Ol+tVoQsn11uk+uXQ+Gp0pys9aQ+O"
+    "p0vvq1DvpzsGDfmMy6X6VKyg+XVeG1bizcSNWg414hCbik9BFzk02ZjNVM6H0SZNhg+SVKsUU9Ejtl4aOXMh8VavF0YyrDB8S8+y"
+    "ZW5DUqRYWZNUhKQ9b2Z9VSfDV6UOfU+FygFkoXW10nPqtLrVChLHzPtAAAAAAAAAAAAAAAAACt2t60mkiqOFTlmNsBGgFQAAAAAA"
+    "AAAdceL0FiuzAZ/WKzEn3YORqEVD5Qqcp1nok7DV64swRGzchFlFucgHlCiLcB9Ya5wPkDlHKgHPRHZwGGucDjCUD1U6X1VGazhC"
+    "NNl4SQWI1NxCo7AAACsWrl3x2twUvCqprdH3qkDW6PvVAa3R96oDW6PvVAa3R96oDW6PvVAa3R96oDW6PvVAa3R96oDW6PvVAa3R"
+    "96oDW6PvVAsdl5WJBequS4ot4QAAfMR2C1VzIBnFamIkxHcrkuuUiowKvFlpHoMPoi5VKiwxWYbVTOEU+NZWLEeq35Qrvp1mXS8V"
+    "HuxohBY9QQt6nEVHVMUyHFYrURL1ArjrIvVcpFeGckYtBcj0XLz7sCJmpt82t7lA6AqfstBWJMX5k5SovoQAAAAAAAAAAAAABTbS"
+    "tiykTDaq3O4QqvPnor0uVVIPMq3hXZAYr3tTOqAahJMwILEzNTuCsvQAAAAImq0VlQaq5HAUWep8SRerXJ2SK9dLocSfVFXE3OBf"
+    "JOSZJMRrSo9IHTNdbdoAy6Z2btJFe6hbYaBpKFQAjqnSYdQbjxLnApNQocaSW+69Arvs7TFm4uEuxb3hBf2tRqXIVHIAAAAAUi1v"
+    "XW9nuiKrQV6GSMWIl6NxBH1rdH3qgNbo+9UBrdH3qgNbo+9UBrdH3qgFp8ZO0qB5VS4K9VP683SBqDMiFZfQAAAArdresoRVHCgA"
+    "AAAAAgFAAAAB7aV19ukI05mRNBUcgAAAABTrWynVJE57hFVS4K7Gy735ECPRDpkeJkaoHqZZ+YfuAemHZaO7KB6mWRiLlUDzVKzj"
+    "5OHhot9wFfCu+TjrLRGvTcVAjTJCZ1VCa/OVHpAAAAAAB0Tcuk1DVi7oFf6UoedSK91NoTKe/DRSiZCAHXGgtjtwVyKB49ZoGYDw"
+    "1OWSmw1iwkxoFVaZr0eYTBXFoIIpVV2MKJjUI0uiswJaHoKiRAAAAAAAA//XvAAAAAAcOyFSKo1DrjtJ1JFDh1Sl4z9H4vpuURWC"
+    "0N2qmjujnYmdfEqGpq3RUPql0PgqdlKe6tPRyJcp+NShWfRVo14IG8+1zi8KnKDlcfFVX31B55nbZqTf1mVf57q11tp+dTpftVqE"
+    "LJ9dbpPsl0PhqdKcrPWk0nxVOl99WodkntddCkl0rIv6rcZeqXSffJocyVS67zTDtl9m3ShmVQ/SRSsNU6x2E7o+Gp0unVL+o+ju"
+    "RH41P3qr5KjZRKy5HPxKKktWjXiiD6XxOUAslC62uk59VpdaoUJY+Z9oAAAAAAAAAAAAAAAAAV21bVdCS5L8e4RVJ6A/MvEFTdmo"
+    "TmzGNFKi+hAAAAAAAAAAVEXEBXq1QGTLVexLnIFRFFoL4sTCiJcjV4SC7Q4aQmo1MiFR1x5ZkwlzkvAh5my8CNjTEBFRbJPTYqFe"
+    "WJZaYbm7fkA6ulqZzdzyAcdLUzm7nkIHS1M5u55AHS1M5u55AHS1M5u55AJeg0WLKRcN6bnIUWwIAAAHCoigcYCAc4CAMBAGAgDA"
+    "QBgIAwEAYCAMBAGAgDAQDjAQDlGogHIAAAAj6hSYU+1UVMecKqUOzsVsfAVOpz4yC9QYSQWo1MiFR9gAAAAAAhbSy/RpdVuvVOVC"
+    "ChpKxHZGrxKFeuWosxMKiI1U0ovIBdqNSkprMeyUqJUAAAAAAAAAAAAAACGtHL9Gl1VEvVAKFqWLvV4lIr6ZIxnrcjV4lAsdDs89"
+    "r0ixMV24UXFEuxBAAAAAAOiYlIczskvuA7IcJsJEaiXIgH2AA6ZrrbtAGZTEB6vdiXLmIr20SE9sw1VReIDRkKgAA+XsR6XKB8QZ"
+    "dkulzUuA7QAAAAAAV2uUSJUXo5u53gVFJZOMmYgtdOlNSwkYuVCo9WAgHOAgDAQBgIAwEA+IkJHtVM4FTiWUc9yreFfUvZZ0F6Ov"
+    "yAW1qXJcEcgAAADzzUmycbguTEB4el+WzAOl+WzAOl+WzAOl+WzAOl+WzAOl+WzAOl+WzAOl+WzAOl+WzAOl+WzAOl+WzAOl+WzB"
+    "X3CokCC5HImNAiTRLgAAAAAAeadkmTzcFwHlgUKXg7l4V7GScKHkQI7kYiAcgAAHXMQkjMc1d1AKP0txo0ZyXXNvXHjIqwyNnIMr"
+    "cq41KJljEhpcmJAj6AAAAAAAAAAAAAAA8dUh9Fl3tzovcAZq+WejlS5cuYijZOK7I1eJQJelUCNHiIrkuame8C+QoaQmo1MiFR9g"
+    "AAAAAAAf/9C8AAAAABw7IVIqjUOuO0nUkUOHVKXjP0fi5aIrBaW7VTvnujnYmdfEqvS8J0V9yZT7YxrQc2TCvF6JyTiS92Et6GJM"
+    "qEX6y5MYUvptKc5mHeScs6xNWVdGqlyn0PlrVk5Qe1Hx1V0Kg88ztssm/rEq/wA91a620/Op0v2q1CFk+ut0n2S6Hw1OlOVnrSaT"
+    "4qnS++rUOyT2uuhSSqWpF/Vbj7NdJ98KHLlUuo0w7ZfZt0oZlUP0kUrFVOsdhO6PgkUunVb+oSTl3x1uafZKjWpc+RCMqhxOS74C"
+    "3OLJjCNCS5MZNLyH6PxcoBZKF1tdJz6rS61QoSx8z7QAAAAAAAAAAAAAAAAA+IsFsZLnJeB063wd6nEB9w5SHCW9qIigdwAAAAAA"
+    "AAAAAAcI1EA5AAAAABcAuAXALgFwAAAAAAAAAAAAAAAAAAAAAAAAAAAAC5AAAAAAAAAHy9iREuXGgHW2UhNyNTiA7WsRuRAOQAAA"
+    "AAAAAAAAAAAAHDmI9LlA6tSw96nEB9JAY3IicQHZkAAAAAAAAAAAAAqX4gPMsjBXtKcQH0yThQ1vRqIugDvAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAXAAAAAAAAAAAAAAAAAADhUR2JQOjUMLLgpxAfbZaG3tKcQHYjUTIB"
+    "yAAAAAAAAA//0bwAAAAAHDshUiqNQ647SdSRQ4dUpeM/R+L6aFgtDEvlU757o5uJnXxKiKY1UiofVLjZPjqcI13urWRD8ak/erPX"
+    "AS+XPyjS/aF/VYexb1OjCMHKjCNdNUJitwj46rF91QhWeaZ22bk39YlX+e6spfDafnU6X7VaFkhZRipEafXKjZPhkQs03WetJpPj"
+    "qdL7qtQ7JLa66FJLpWp39V2MxcJdJ98I2TmypMa7r6Gpa7NaL7gJdEbpQzKs4NyYVorFU0vgdhO6PhkWUXSqlnJeGisXDv3D9qrG"
+    "u+eowrRfNb2ZalQlXpQ59T4XKAWShdbXSc+q0utUKEsfM+0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/9K8AAAAABw7IVIqjUOuO0nUkUOHVKXj"
+    "P0fi+mhYLfIpfBboQ5Uul3KnZwdyQGtW9EM127DCCJre4fTUnxVZISKXwkPwlUvpkUO3UzMxmxN2CD6ZCSHkJXrtVqyuzO2z7ZN/"
+    "XNlX+WJYaRES8+OvWdGtXfKS7GrfcK8Swwgj631tNJ+9SpfNVqHfTMcIzVKW6lQ9KyzF3D8rFF+thg41MzMLFEsEENU4TYcVipnQ"
+    "+qRGvB8UuTWim2sR7URcx8td90IV4OWQ2w8hK9dYQrK/W9mfdUqHMq9KHPqfC5QCyULra6Tn1Wl1qhQlj5n2gAAAAAAAACIq1bZT"
+    "kwcrgIPplm16pG9ToIqVpdomTq4DsTiiWnJjU0NXpuBEPSK4+fiKxUAnojsBqrmQCtstE90x0K7FfcFTk5MrLwViZkCImj111RiK"
+    "xUyAeytVJabDRybqgQ0tat0R6NcmJSC1tejkvQork1aF8CP0JExYVwVY2OwmoudAjqnJlJWG567iAVZtrXq+67FeFWyBFSOxr03U"
+    "RQjsAARFVrcOnJdldmCoLplm16rB6nQQS1KtCydXAdicVE9fugQNTtEyUXAZjcBFdMc5ssHFoIqUplo2TbsB+JwE9fivKirT1pny"
+    "sVWImQKkKLWtcr0XKgR76jNrJwliJuAR9FrDqkqoqZAJOcnGSTFe5cQFYi2ojRVVITb00BXZJ2oej0ZGS6/gCLK6OnQ+iNx4gKvE"
+    "tPGY5UwcnARXX02xMl3bAdsK00aI5EwcvAUTFTqbpKA2KiY1uCINtq4rsje2Ir7ZaxzV6tvbAWKQqEOoMwmlR4K3WXUxUREyge6l"
+    "ziz0JIi7oHomYvQWK7MBA020D5yN0NUxAWJzkYl65AKzP2o6G7AhJevGB5G2mmYSp0RuLQRVkp1Th1FmE3LmKiHn7QRZWKrEbiTg"
+    "A8a2titxKnbEV9JaqMvae2AsMrOujwOiqlylRE0+0L5uN0NU3QLI5yNS9cgFbqFqGwnYEJL1CvF0xzbOqc3FoIJql12HUOpyO4Si"
+    "VjP6GxXZkCKlGtXEhuVLsgVP0mppUoeFuplCOKxUVp0PDQD4o1SdUWYSgSoFerFbi02Jg3Yl3QqSpdRSow8PdCOqs1VKaxFTKoCj"
+    "T8SoMV7kuQCUVbgKxUrSrKRVhtS+4CVpFS1xh4W6gEkBW6taF8hGWGiZAruo1d1wcrXYlCJiajdAhufmQCGpNcdUIqw1TIBOxIiQ"
+    "0wlW5EArM7anBdgQkvUK8nTHOMxq3FoAmKVaCHPrgLicEemrVB0gzCal4EAtqozUvVvbEVw21kV2RO2Ak6TW4k/EVrkuTQUfFUrs"
+    "SSiYDW3poCPD00xt72wUg2riRHtbdlVEyAWObm1l4HReC8IraWsiqtyJ2xFc9NMbe9sUWOlzjp2Ej3JcqhHtAgazW3U5+CiARqWq"
+    "jLjwe2IrulrWIrroiXAWaFGbGbhtxopUV2LaN8OY6DdivuCpioTbpWCsRqXqgRH0aurUXqx2JQqeCICsV1ZB6MbjUKkGzjkl1iqm"
+    "O68IrvTXFvuRO2Irnppjb3tgJyjVF9RYrnJdcpUeKs151OiIxECo9LVRlx4PbEHplLVo52DES4ossKKkVqOTGihH2B4apPpT4Sv3"
+    "QFLnHTsJIjkuvAh6paJ8jGWGiAdtItAs/EwHJcBYFW5LwKrO2odLxXMal6NVUCpKiVd1TvvTIETIEHWq5ra5GtxqoHxRq+tQerHY"
+    "lAnwIat1Z1MRLt0D1UqeWehI9QPeAAjqtUkp0PC3QIen2mdNRUY5LkUirSi3lRE1moxKciOal6AddFrWuV6LiVAJCoTiSUJXruAR"
+    "dGrMWpPVFTqU3bgJSenmSLFe4CtRLTx4yr0Jt6aCK7ZG07nPRkVLryiztiI9uEmQIrkxaN8GY6FdivuAsrHYSIucDqm5hJaG567i"
+    "AVVtrHK+67FeFWyBFSMxHJuoEcxXKxqqmVEAiqXV1nYjobsStXlAmAAEPVa7Dp/UpjdwBUItpJteqRvU6AJmkV1lQ6lcTgJKdj6m"
+    "hOfmCKt01xVVURO2Irsh2sc1erat2gIn5Cpwqg29q48xR3zcbU8Nz8yAVRLXRL8gVZqdOpPwkegR4q3VnU267dA9tMm1nYKRF3QP"
+    "YAA4euCirmQCpTFqYkKI5iJkW4K+emqKmNW4tARM0uuw6h1OR3CBITcbU8Nz8yKBDUmuun4qw1TOBPRHYDVXMgFcg2ifEmOhXYrw"
+    "qcmpjU8FYmZAirpayKq3InbEV2Q7WOavVtW7QVFgkKpCn0vauPMB7QAAAAAAAAAD/9O8AAAAABw7IVIqjUOuO0nUkUOHVKXjP0fi"
+    "+miKwXCQ603QhypdLuVOiD0n5v2Qtb3D66k59WSEh1pD8JdL6anQ9R+b9wIrUzts+6Tf1y5V/lkbkPii6kHJFRVb62mk+ipUvjq1"
+    "DvpnWkM1SlupUPcfi+kAg6ut8VmlD66nQ+CqUpmHsU0HyxfbCh9kVXK3sz76lQ5dXpQ59T4XKAWShdbXSc+q0utUKEsfM+0AAAAA"
+    "AAA+Ir+htV2ZAM9ffUZy5caK4ir1DkITYaMwUuuzBFWjWdjw5jDh7G/nulVYagipKqi5bgisWaiNhzC3rdlIq4xpqGrHdUmRSook"
+    "BUdPJdviKudV2q7QhUViynX3aAqUtd1lukCvOkL5VI7dy4gttAnkm4CJutKirVLbqd992RV+g7BuhCor9qpvocJIaZXAV+NSlhSz"
+    "Y+6pFWizU30eAjVytKJsI+Iz+htV2ZAM8iX1CcVFyK5e7Iq+NkITYeBgpddmKirRbPR4Uxhw9jfwBVim47pSVwlyoiERUKHK64TO"
+    "E7GiZ+wFXnUcLBwcFLtBUUeuyaU+YRzMSKRVxpkzqqAjuAqKZNwkjT2CuRVIr7go6jTaZlAtFbekSUVybqd0pRC2R2TuecD7tfEc"
+    "iNbud+IO2zSy/QrluwuEDvqtCbPuR8O5LsxRLSEqstBSG7HcEIkhBuVcFOICiQITVnUbdiwshFXxkjBREXBTiKiJtWl0sicJFeGy"
+    "0vDiscrkRdPZA7LTSkCHCwmoiO4AOuyDXdUu534D4tfsmc8xSCZs5tVvPcQI98/1l2gClUDbfZIqz2hmVl5dbsqlRXbMSTZmIr3Y"
+    "0TORVnqVLZNwlajUvuxYioh6HSZiQjXu2OPdCrG+ThRFvVqKugIpFoYLIUwiNS5O/EVaaZJQXwGKrUyJucBUeyYYkOEqIlyAUeh7"
+    "bTSnckVaLRTSy0ut2V3KhRBWZpzZpyxH47s/YILdFkoURqtVqY0zFRQo8NaZN4sSYSkVenxOjS6uztXuCooUvLpNTDmLuoRUhRI6"
+    "02aWC7Iq8oEvarHL9nlCPiyfWlKqyBELaOQ1XBwkytx9yBAWYndTRVhuxIvc3oFfNYjLU5tIbciLcQXKSlklITWJuIVCfjpLwnOX"
+    "MvcAUaSkVqr4j13MfckV7bLzPQIzoS7t5RdQih19qOnrl3bu4IrqfDdSJhj0yKiLxgXKbipGlXOTdQIq1mNsu55wqVtTOrBhIxuV"
+    "Sjx2YpjIqLFel+a8gs8SThRGq3BTGmYqK02zcWDHw24kv57oVaXwGxW3OS/SEQ9ck4UOWeqNRFRMwVCWVgMjPdhIi6SC4wpWHBW9"
+    "rUReBCo4iSkKKt7moq6AIWuRpeQhqiNTCXg7wioKz9LWdipEXYtW/iAtdZTBlnJwFRVrOMhujLh3buUird0CVzN4kKj1wmNYlzcn"
+    "AB9gUq1fXUIqbpEpBdLtVWpfdmKK9aaXhQYqYFyX7iEFjoLXNlkwioqczt/28RV8iwkjQVau6hUUSnuWmziNXPd26EVoDnojMLgK"
+    "ihKq1Se4Lwq41BiMlnJmb3QRTqC2G+Z6u66/d7JFXLoErmbxIVHpgQ4cNOoRETgApdqtsN55gqw0uTgOl2KrUvVE3OACs2jgQ4MZ"
+    "Eh7ubskFroSObLMwiokwKnayMq4ENM/KRVgpsLoMBqcBUU2ttwp27nukV8sYtOmmLuOAuk9MpCl3P9MlRRoMtqiHEjLnIqYshkfp"
+    "5ALY52CirmKihzKa6zys3L17siuuG1aTONTMBf4bsNqLnKirWvyMCpGze10IJoqAFItLNLMR0hJkIrxz8ktLiQ3cKKBepCOkxBY/"
+    "OiFRxPyiTkNWKBRabFdTZtGriS9CKlLTT/RsGE1cpRN0KQSSgJnUIg7XRHYTW9pIr22dWWWDdiwuED6qlAbOvR8O5LsxRLycB0tB"
+    "RireqIEUee28vfRFaBC2KaEKiCtTNdCg4CZXd6BWYtMWFLNjZ+UirXZqb1RAuXKneFRNql4FNgrqKoqm+UirkmMqPmIqo1VTMBnM"
+    "1Ew5xViZMIKvEBktGhojUS5UzBETL2ddLR+iNXFz4QJeqpdLP0AVSzcFkaO5HJfpIqyz9GgzENbmoi3LkQqKhIxX0ybRl+LCRAq7"
+    "VB2HLPXO0IotOkknGvTdRFUipizM2svEdAcEdlr8jSqlrPbVZz3QJYIAfMXYroUDOLkWdx5MPuyKucaBKLCxo3JmAqVJhqs2mBkR"
+    "e2vQC7VLrD++V7gqKjZuI2HMqqrdlCrjHmoasd1SZFCKNKKiz2LOvdkVc6ntV2hCip2ZgsjR1RyX4t3sEFon6NBmYaojURc6IUU2"
+    "nxX06aweFUINFa7CS/OVHIAAAAAAAAD/1LwAAAAAHDshUiqNQ647SdSRQ4dUpeQ/R+JeFe6FUokNqNRch+ManCL6IVWMH3rtFzkm"
+    "oLPRdEedfMZTcJMJLEqXGU7YdUiQ0wUMRqcItQqsYPrXaLnE3BZ6JrtFzibgs9F5HTLnvw90/Sw1rJ+Njr2b166xU3T85qD9Z6Jr"
+    "tFzibgT0XTMTz5hLlNQkQgxKqkZT6g1GJBTBRRGRCKwqkZLs12i5zM3Bqeia7Rc4moE9F54046M5HLlQ3CTWfnGXXehKrFTdMTcH"
+    "6T0XC1aLnE1AnovLHmXTC3qfpCFhfjKlWJ0G35uUAslC62uk59VpdaoUJY+Z9oAAAAAAAB0TvWX98qBRKOt05jzhWhIEcXoB4qtt"
+    "d+gCgyElEnYqtYtykVLOs5Moirhdv3hRGSEJYM21q5UUgu9V2q7QhUVmynX3aCKlLXdZbpKOaFBSYknMXd5EAiKNHWnTSwlyLiA6"
+    "KljnU777sgv0LYN0IVFFrMzqubRm41U7oirBORIL5RYaLkb3QEJZia6BGWHuLeUXgI6J3rL++VAoVLxTnZXuyK0QqOL0AibRpfKu"
+    "u4O5QCCsj1x3PMFXQIplrtm0ipqzqKkqnZKitRfIQTvoipe08l0SE2KmVO8KjzwZ3VdPci5W39wRXFkdk7nnKLHUaeyoMwHcYRUp"
+    "izceVW+Gt6ae8IrywqrM059zl7AF4ps8k/CSIVHqibFdAGfS+3076IrQmZEKiAtZtZO+gqrU2FMvRehLiIOZ2HHhORY2NALnQosK"
+    "JBTAS4ohLX7JvPMQTNnNqt57iFR7p/rLtAFKs/tvshU3axF6ChB0WQVMFycK90UWoI4vRQOQKLaXbKc8xFW2lbXZoTuCo7pzrbgK"
+    "LQ9tppTuSKnLWovQm88xRxZLrS9kCzKEUC0eOZxEVbZdLpNO+O6KKjSdupz3UIPdaaU1PEbHbu94B2VWb1ZItfu94B6rJ9aUosgR"
+    "8vaj0VF3QM9rcm6nx1VN3GRUlZaTWM9Y7ueUouQRXLVTfQ4XQ03V7oK6bOPhS8FVVcbu9IISPGSTncJuS/uwNAgv6IxHZ0Kij17b"
+    "3ZTuEIqXrklqiVY9MrUTuCjoo870eTfDXK1O7IPJZjbLuecDutei4TV4OUol7Nqiy6AeWuT8xLRESHkCIuUr0w+KjHLukVd2reiF"
+    "RF2g2q/QBA2Q2biKuZUdE3MpKQ3PXcQDP4r31qZ0r2xFX6RlGycNGJuFR563td+gKotPkok5EVGLcpBLJQJtFTqu37wotkhBdAhN"
+    "a7KiBHpApNrOuoFeWVgTrmIrF6kg87VWBMJ0fGBoMBzXQkVuS4qKFM7f9vEVoUPYpoKik2lltTR0ipuqRUvGqHinpE3VQDwWUlcN"
+    "7oq88pRZKptd+hQjPpOViTcVWsW5SNJjpfm99268gRZaTKvlYWC9b1Kiq2s2wnPMRXVLQJ5zEVi9SB0QHdAmPEdL1vA0KA5rmIrc"
+    "hUdgFMtJ1U0xNHcqFW6XxQ26Aij1rFOpzzkV6rRQMGHCipmTuyjsqc/hyUNqZVIPrU+p6bfvrl7Yo5sh2vTyEE7WJnU0u53AVFXs"
+    "25iRXRXLjv7kivi0ysdEbEavPGBaKHM6pl2rzyqVENa/IwKkbN7XQImgOuYidCY52ZAM/k3tm5zDdkIqatK+FMQkVFxoB32Vm+iw"
+    "lYvaSosYFMtTIdCekZu6RXgoUq6oR0c7GjeQDQUTBS4qPDU6ayoswVy5wKnMWdmJRb2LehFdEvWJinvucuJNwC7SM6k9Cw03SopE"
+    "9t5e+iK0CGtzE0FRR67M6qmkZuIqEVNzjoL5PoaLkagERZaZ6DGWHuL3hRdwimVbqZ9l2fkCrizYpoCPoCv1azzZ1yvatzgquxqd"
+    "N069UXEmYg9tHtDEa9IcTGigWaquwpZ650Kir2X2w4irs7IugqM8qK4U7i3yEVcplLpNe+O6CK3ZTHFcmdFCvitQVp02kVuRVTui"
+    "o7rRR0mYMJ6bqIRU7Z7arOe6USwQA+YuxXQoGZzENYsy5qZVevckVKvoE05l9+5nXkA+6BPtkYnQXJjVbrwLTUlvgPX0yvcFRQJC"
+    "SfOxVaxblvUipZ9nZlqKuF2/eAR1MhrCm0auVFXuwLvU9qu0IVFXsr19dHIRV3dkUqM5nVwpzFviK0KX2DdBUdoAAAAAAAAD/9W8"
+    "AAAAABw7IVIqjUOuO0nUkUOHVKXjP0fi5A4CgRyBwByBwAAFAgBXIRwByFAjgAFAgBygFkoXW10nPqtLrVChLHzPtAAAAAAAAPl7"
+    "cNqpnAz6dgvpk3hqmLCvCrbDr8usJHq5L7sl6BFXWoR5+Z6i+5VCrXPtVsqqLluCK1ZfbC9kirrF2LtClRQGbfTvoirhVdqu0IVF"
+    "Zsp192gipS13WW6Sjvsvtfs90BEWlk1l4rY7QIRsysxGYq75CDQ5iYSWl8NdxqBFDkqe+rRXKnGFSvSpF3wRErBdSJlEduKFaLAi"
+    "JFYjk3So+ojcNqpnQDPZ2C+mTauVMWEqkVbmV+XWFhq5L7sl6BFX1fHn5nqMiqVVxjSqx5foa5VRAilU+M6jTPVpcgVcNfJbAwsJ"
+    "NF6BFPqEw6szCYCYiKvElLalgozgKilxfIQTvoirrHgJMwVYu6hUZ5Fe+nufC3FvIqcsjsnc85R22kjx5V7XNyYwj2UqvQYkJEiO"
+    "RHJnuCoO0k5CnYjUh47t1OwQWOzss6Xl0vyryIVEtF2K6AM+l9vp30RWhMyIVEBazayaQPNZHYO55wr02qhI6XwsyoQeSyEXqXN4"
+    "eQo77UyTozEe1L8EI81nqxDl2dCiLddnIr3VeuQEgq1rr1XNcURdl5N74ixVS5ALBW5RZuAqJlQIqlBn0psZUfiRSKsFVr0FkJUY"
+    "5FcqblxRG2cfHmYqvdsQLgEUW0u2U55iKttK2uzQncFR3TfW3AUWh7bTSnckVba5JLOQFRMqFRV6FUda4isiYkUirRGrstDYrkci"
+    "4sl6FRUITH1ebwkTFepFXqMzoUBzczV7gqKRStupz3UCrfV5PVkBW7oGfumHQmOgrnILbZPrSlFkCAFStcmx7HdhUnZtLpdAJpVu"
+    "xhFArcZahNdDbnRCK9bLKRbk6oCOqlFiU65yreBbbOzeqJdE3W8qlRW69t7sp3CEVcoUNI0BGrkVqdwVFCmcOlRns3FIr3WWdhTD"
+    "l57oE7aOnrOQb25UKIOz9WSnqsKJiRc4FliVaUc1VwkyZ0CKa2I2LOYTciqRWiMyIVEXaDar9AEDZDZuIq5riKijWlqbo7+hJkRV"
+    "IrtoE3KyDMJy9WoE620Ms5URFy6OUqOysPR8q5ybqAVOgz0OSiqr1uTGRVn6Y5bP3HKUSEpOMnG4TcgR6AKVavryBVjouOXZoArt"
+    "rYd0Rq8AE/RInRJZOBAioTO3/bxFaDC2KFRDWllOjwFcmVvIoFNSce+EkDcIq+USU1JAa3dUqO6qbXfoUCkUacZJzCudkIq19Mct"
+    "n7jlKj2yVRhzyKrFvuAqNqtst55iKtVI2szQncFRV7UswI7XZ+9CrPRYiRJZi8ARIAU+1TFhxWP0d2FWiSekSC1eAIpVa27z4Qqw"
+    "1SV1TJJwNRe2Apsoj5mIyFuXkFyrUPoMkjc1xUR1kO16eQiubWTd+DBTdKPDJ2Zix4aPvuvIE5ZmLAhq+++4D12Tm8FXQlKPu1+R"
+    "gHNErMCVgoxy4wJWHX5eK5GouNV4OUI6bRziQJe5MrgqtU2gRJ5mGi3EHsi2Vio1VwsiAeWz8dZKawHZ17hQL/lKiFtIniXUCMsg"
+    "mzIq2lRULRTExKRkc1epCpOm16DFhJhuRHImO+4Cu2hmoU9FakLHoILPQpZ0vL48qlRU57by99EVdpyYSVl1eu97oqKJJSL6vFdc"
+    "vZIqW6VIu+AiUhOo8y3C3F7sDRIERIrEcm6hUVCOmqqiiJ2lQq5NS5ECPiMiqx12W5QKRDqsaSmboi4kUKs0StSqw71ci4sl6EFN"
+    "l4SzszexMV4F2qTcCUcmZpUVChT0OSjOc/IRU7P2mhIxUZjVUKIKkSUSozPRFTEiot4FzqKYMs9PTIRVrKdeUKnLRSOqoCuTK0Ck"
+    "RJtzofQl7SQXuz21W9nuQj6i1uFCi9BXLfcUSbVwkvzgcRdiuhQM3dFSFOK5ciP7sjS3paOWY1Me5wcoRU0c6fm0c1MrkKLvONVk"
+    "qqLlRi9wEVazG2V7JFXaNsHaFKigy23+yvdkVcantV2hCinUCdhyUZXPW5CCen7TQmsVGY1UogaPJRJ+Y6IqYr77wL7EiJAYrlyI"
+    "gR4pCrw59ytbuASIAAAAAAAH/9a8AAAAABw7IVIqjUOuLpOpIocOqUvJcfo/EuAXALgFwC4BcAuAXALgFwC4BcAuAXALgFwC4BcA"
+    "uAIgFkoXW10nPqtLrVChLHzPtAAAAAAAAAHjnqbCn0ucnZAhVslDvy4ufCBLSFIgyGxTHnA9UzASZYrF3QI6n0Nkg/DTKBLOTCRU"
+    "zgQyWfhpG6Nu3kEnMSyTENYa5FQo8FNobKe9Xpugeip01tRYjXbgH1T5FshDwEA+p6RbPQ8BwEPDsrChuR1+RQqWnJFJuF0JcgR1"
+    "UylMpqLg7oEiBE1Khw6g5HrlCpCVganYjMwR3AeOdpsKfS5ydkCFWyUO/Li58JFS0hR4MhjamPOVEgBHz1Igz+yTHnAielKHflW7"
+    "nwhUtI0eDI42pjzqESCpeBDOoEN0fo27eBMIlyXAQ9Qs/Cnn4a4lA7qZR2U1VVu6B7JqUZONwXJegEDFsnCVcS3Jz4Qr1Sdm4Esq"
+    "OXGqZwiaa1GpcgByYSXAQrLPQ2Rui7t94E2iXIB46lT21FmA7OB10yltpqKjd0DvnpNs7DVjsgHjptGZTnKrVyhUm9iREuXGihEH"
+    "N2Ygx1VyYlUK6oNlITFvct/PSBPQJdks1GtS5AjtVLwIees/BnFwrrl4APHBsnCat7lv56SKnpaVZKNRrUuQqO4CHqFCZPRMNcoE"
+    "nLQUl2IxNxAPqLD6I1W5wIiTs/DlIvREygTVwEVPUGBOLeqXLwARzLJw0XGuLnwhU3JU6FIpc1OyEemIzojVbnQCHlqBDl43RUyg"
+    "TN16XAQM1ZmFMPV+S8CRptNbTm4LQPcAAjanSWVK7C3APRISSSMNGIB6Htw0VM4EPAs/DgxujZVAmgPJUJBk+zAcB00yltpqKjVy"
+    "gdE5QmTcboq5QJaGzobUbmQCLqVDh1B2GuUDim0NlPfhoBLql4EPO2egTaq665eACPSyTM68+yQeyVs1Bl3I7dQqpxEuCPPOyqTk"
+    "NYa5FA8dMozKcqq3dAlFxgQM1ZuHNPV67qgdHSlCz8+MK+mWUhMcjr8i890CZjSaRoXQlyXXBEKtk4S7vPjCuOlKFn58YEzTpBtP"
+    "ZgIEewCKqVFZUXI5dwD3SkskqxGJuAeWp0llSRMLcA7ZCQSRZgJkA8ESz0N8bo27feBNNTBS4D5jQkjNVq5FAgoVl4MN+HwhU+1u"
+    "Cl2YI65iCkdisXdAgHWUhOW+/nxhXHSlCz8+MCUpdKZTUVG7oR01GhsqD0euVAJGWgJLMRiZEA8VUo7KkqK7cCvRISSSMNGJkQI9"
+    "YENaKRWcg3tS9Wgd1DR7ZdEelypygdM3QYc1G6KuUglOgJ0Poe5dcURcpZ+FKxeiIBITsok5DWGuQDzUykspt+DugdE5QWTkXorl"
+    "3QJaFDSE1GpkRAEWGkVqtXIoERKUBkpF6K1QPTU6SypIiO3AIvpShZ+fGFdkGy8KC9r0XIt/PGB7ajR21DBvXIgR7JSVbJsRjciA"
+    "ehUvS4CEiWehujLFTEt4E01LkuA80/JJPMVigeemUllNvwd0CSA803JQ51uC5AIKJZOGq4lxc+EivbJWdgSio7KvCUTGCiJcEQsa"
+    "z0OLG6Lu3ge+ekEnYXQ1yAdNMpDKbfg5VAkgImpUOHUHI9coHshwdRwcFMdyAQVFkYizL4z0ux8oFnAARdQokGfxqlygRjbJQ0XG"
+    "q3c+ECakaXCkU6lMecD0TMBJlisXIoEAtk4Srffz4yK7YNloDFvXGVEzLyrJVuC1LgPqYgpHYrF3QI2m0RlOdhIBKPYj2q1d0CAi"
+    "2WgxHK7OoExJSiScNIaZEA8EahMjR+jbt94Eu1uCiJmAOTCRUzgV+NZeFGerlXKoHy2ycFFxrz4wJSSpMGSxtTHnA9UxBSOxWLuo"
+    "BG0+hskH4aZQJZ7cJFTOBDQ7Pw2RujX4wJSPLpHhrDXIqAQK2ThLu8+MK7INloDFvXGETUvKslkuaiIB9RoSRmKxd1LgI+nUZlPc"
+    "rk3QJQAAAAAAAD//17wAAAAABcYHgi0uHFdhKftCqRg+aNShF8azwjU7FmZgazwiTkVmYGs8ITkSZgazwhORJmBrPCE5EmYGs8IT"
+    "kSZgazwhORJmBrPCE5EmYGs8ITkSZgazwhORJmBrPCE5EmYGs8ITkSZgazwhORJmBrPCE5EmYGs8ITkSZgazwhORJmBrPCE5EmYG"
+    "s8ITkSZgazwhORSZgazwhORWZgLRoQnIpMweuWlWyqYLT85UqxP3kyYSXeYfoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AIlwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABEuAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/0LwAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/0bwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAf/0rwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/07wAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAf/1LwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/1bwAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/1rwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAf/2Q=="
+)
+
+# 后台补 logo 的 PowerShell 脚本。参数：文件夹、DWG 清单文件、logo 图、日志、位置宽度。
+_PS_LOGO = u"""param(
+  [string]$Folder,
+  [string]$ListFile,
+  [string]$Png,
+  [string]$Log,
+  [double]$X0,
+  [double]$Y0,
+  [double]$W,
+  [int]$AddLogo = 1,
+  [int]$Purge = 0
+)
+$ErrorActionPreference = 'Continue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+function Write-Log([string]$m) { Add-Content -LiteralPath $Log -Value $m -Encoding UTF8 }
+Set-Content -LiteralPath $Log -Value ('开始补 logo ' + (Get-Date)) -Encoding UTF8
+$names = @(Get-Content -LiteralPath $ListFile -Encoding UTF8 | Where-Object { $_.Trim().Length -gt 0 })
+Write-Log ('待处理 DWG: ' + $names.Count)
+$was = [bool](Get-Process -Name acad -ErrorAction SilentlyContinue)
+try {
+  $acad = New-Object -ComObject AutoCAD.Application
+  if (-not $was) { $acad.Visible = $false }
+} catch {
+  Write-Log '无法启动 AutoCAD，DWG 未补 logo（DWG 本身已导出）'
+  exit 1
+}
+$done = 0; $skip = 0; $fail = 0; $script:purged = 0
+foreach ($n in $names) {
+  $path = Join-Path $Folder $n
+  if (-not (Test-Path -LiteralPath $path)) { $fail++; Write-Log ('找不到: ' + $n); continue }
+  $ok = $false
+  for ($try = 1; $try -le 4 -and -not $ok; $try++) {
+    $doc = $null
+    try {
+      $doc = $acad.Documents.Open($path, $false)
+      $blk = $doc.Layouts.Item('Layout1').Block
+      $has = $false
+      foreach ($e in $blk) { if ($e.ObjectName -eq 'AcDbRasterImage') { $has = $true; break } }
+      $changed = $false
+      if ($AddLogo -eq 1) {
+        if ($has) { $skip++ } else {
+          $ip = [double[]]@($X0, $Y0, 0.0)
+          [void]$blk.AddRaster($Png, $ip, $W, 0.0)
+          $changed = $true
+          $done++
+        }
+      }
+      if ($Purge -eq 1) {
+        $before = (Get-Item -LiteralPath $path).Length
+        # 清理未使用的图层、块、线型、文字样式等；嵌套的要清几遍
+        for ($k = 0; $k -lt 3; $k++) { $doc.PurgeAll() }
+        $changed = $true
+        $script:purged++
+      }
+      if ($changed) { $doc.Save() }
+      if ($Purge -eq 1) { Write-Log ('瘦身: ' + $n + '  ' + [math]::Round($before / 1MB, 2) + ' MB -> ' + [math]::Round((Get-Item -LiteralPath $path).Length / 1MB, 2) + ' MB') }
+      $ok = $true
+    } catch {
+      Start-Sleep -Seconds 4
+    } finally {
+      if ($doc) { try { $doc.Close($false) } catch { } }
+    }
+  }
+  if (-not $ok) { $fail++; Write-Log ('失败: ' + $n) }
+}
+if (-not $was) { try { $acad.Quit() } catch { } }
+Write-Log ('完成：补 logo ' + $done + ' 张，已有 logo 跳过 ' + $skip + ' 张，瘦身 ' + $script:purged + ' 张，失败 ' + $fail + ' 张')
+"""
+
+
+def _well_mark(sheet):
+    """图纸对应的井编号；不是井大样图纸返回空串。
+    「井大样_」开头的，取前缀后面的部分；改过名的（例如 BTP-IF1 11KV-…-AA-01），
+    只要写过「图纸系统」参数（归类插件写入的），就取图名里最后的井编号。"""
+    nm = sheet.Name or u""
+    pre = WCFG[u"sheet_name_prefix"]
+    if pre and nm.startswith(pre):
+        return nm[len(pre):]
+    p = sheet.LookupParameter(WCFG[u"system_param"])
+    if p is None or not p.HasValue or not p.AsString():
+        return u""
+    found = [m.group(0) for m in _MARK_RE.finditer(nm)]
+    return found[-1] if found else u""
+
+
+def _safe_name(name):
+    return re.sub(u'[\\\\/:*?"<>|]', u'_', name or u'sheets')
+
+
+def _autocad_available():
+    try:
+        return System.Type.GetTypeFromProgID("AutoCAD.Application") is not None
+    except Exception:
+        return False
+
+
+def _start_logo_job(folder, dwg_names, add_logo=True, purge=False):
+    """后台启动 AutoCAD 给 DWG 补 logo 和/或瘦身（PurgeAll）。返回 (是否已启动, 说明, 日志路径)。"""
+    log_path = os.path.join(folder, u"补logo日志.txt")
+    if not (add_logo or purge):
+        return False, u"", log_path
+    if not dwg_names:
+        return False, u"没有导出成功的 DWG，不需要后处理", log_path
+    if not _autocad_available():
+        return False, u"这台电脑没有装 AutoCAD，DWG 没有补 logo / 瘦身（DWG 本身已导出）", log_path
+    # logo 放在 DWG 同一个文件夹：DWG 引用的就是它
+    logo_path = os.path.join(folder, LOGO_FILE_NAME)
+    data = base64.b64decode(u"".join(_LOGO_B64))
+    with open(logo_path, "wb") as f:
+        f.write(data)
+    tmp = System.IO.Path.GetTempPath()
+    ps1 = os.path.join(tmp, u"thl_dwg_logo.ps1")
+    lst = os.path.join(tmp, u"thl_dwg_logo_list.txt")
+    with io.open(ps1, "w", encoding="utf-8-sig") as f:
+        f.write(_PS_LOGO)
+    with io.open(lst, "w", encoding="utf-8-sig") as f:
+        f.write(u"\n".join(dwg_names) + u"\n")
+    args = (u'-NoProfile -ExecutionPolicy Bypass -File "{}" -Folder "{}" -ListFile "{}" '
+            u'-Png "{}" -Log "{}" -X0 {} -Y0 {} -W {} -AddLogo {} -Purge {}').format(
+        ps1, folder, lst, logo_path, log_path, LOGO_X0, LOGO_Y0, LOGO_W, 1 if add_logo else 0, 1 if purge else 0)
+    psi = System.Diagnostics.ProcessStartInfo()
+    psi.FileName = "powershell.exe"
+    psi.Arguments = args
+    psi.UseShellExecute = False
+    psi.CreateNoWindow = True
+    System.Diagnostics.Process.Start(psi)
+    what = u"、".join([x for x, on in ((u"补 logo", add_logo), (u"瘦身", purge)) if on])
+    return True, u"已在后台启动 AutoCAD {}（不影响 Revit，完成后日志见：{}）".format(what, log_path), log_path
+
+
+def _export_pdf(sheets, folder):
+    """所有图纸按图号排序，合并导出成一个 PDF，文件名用第一张图纸的图名。返回 (成功, 说明)。"""
+    ordered = sorted(sheets, key=lambda s: getattr(s, 'SheetNumber', None) or s.Name)
+    pdf_dir = os.path.join(folder, u"PDF")
+    if not os.path.exists(pdf_dir):
+        os.makedirs(pdf_dir)
+    ids = List[DB.ElementId]()
+    for s in ordered:
+        ids.Add(s.Id)
+    o = DB.PDFExportOptions()
+    o.Combine = True
+    base = _safe_name(ordered[0].Name)
+    o.FileName = base
+    ok = doc.Export(pdf_dir, ids, o)
+    path = os.path.join(pdf_dir, base + u".pdf")
+    if ok and os.path.exists(path):
+        return True, u"PDF 已导出：{}（共 {} 页）".format(path, len(ordered))
+    return False, u"PDF 导出失败（文件夹：{}）".format(pdf_dir)
+
+
+
+# ============================================================
+# 导出主流程（0.4.0 重写）：一个窗口设好全部选项；DWG 按批导出（每次 20 张，比逐张快）；
+# 导出前检查没有图框的图纸；文件名按图号去重（不会再因为同名图纸互相覆盖）；可只补导缺的；
+# 每次导出在文件夹里留一份「导出清单.csv」（图号、图名、文件、大小、结果）。
+# ============================================================
+import time as _time
+import json as _json
+clr.AddReference('System.Windows.Forms')
+clr.AddReference('System.Drawing')
+import System.Windows.Forms as WF
+import System.Drawing as SD
+
+TITLE = u'一键导出图纸 DWG/PDF'
+BATCH = 20
+SETTINGS = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
+                        u'KaifaTools', u'导出图纸设置.json')
+NAME_MODES = [(u'name', u'图名（同名的自动加图号区分）'), (u'num_name', u'图号_图名'), (u'num', u'图号')]
+
+
+def _load_settings():
+    s = {u'folder': os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop), u'所有井大样图纸导出'),
+         u'dwg': True, u'pdf_merge': False, u'pdf_each': False, u'logo': True, u'slim': False,
+         u'name_mode': u'name', u'skip_existing': False, u'setup': DWG_SETUP_NAME,
+         u'big_medium': True, u'big_hide_cad': False}
+    try:
+        with io.open(SETTINGS, 'r', encoding='utf-8') as f:
+            s.update(_json.load(f))
+    except Exception:
+        pass
+    return s
+
+
+def _save_settings(s):
+    try:
+        d = os.path.dirname(SETTINGS)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        with io.open(SETTINGS, 'w', encoding='utf-8') as f:
+            f.write(_json.dumps(s, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+def _titleblock_sheet_ids():
+    ids = set()
+    for tb in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_TitleBlocks).WhereElementIsNotElementType():
+        try:
+            ids.add(tb.OwnerViewId.Value)
+        except Exception:
+            pass
+    return ids
+
+
+def _frame_hidden(sheet):
+    try:
+        return sheet.GetCategoryHidden(DB.ElementId(DB.BuiltInCategory.OST_TitleBlocks))
+    except Exception:
+        return False
+
+
+def _file_stems(sheets, mode):
+    """每张图纸的文件名（不含扩展名），保证不重名。"""
+    out, used = {}, {}
+    for s in sheets:
+        num, nm = (getattr(s, 'SheetNumber', None) or u''), s.Name or u''
+        stem = {u'num_name': u'%s_%s' % (num, nm), u'num': num}.get(mode, nm)
+        stem = _safe_name(stem)
+        used[stem] = used.get(stem, 0) + 1
+        out[s.Id.Value] = stem
+    for s in sheets:
+        if used[out[s.Id.Value]] > 1:
+            out[s.Id.Value] = _safe_name(u'%s_%s' % (out[s.Id.Value], getattr(s, 'SheetNumber', None) or s.Id.Value))
+    return out
+
+
+def _scope_items(sheets_all, well_sheets, mk_of):
+    """范围下拉框：(显示文字, 图纸列表)。"""
+    items = []
+    picked = []
+    for i in uidoc.Selection.GetElementIds():
+        e = doc.GetElement(i)
+        if isinstance(e, DB.ViewSheet):
+            picked.append(e)
+    views = []
+    for i in uidoc.Selection.GetElementIds():
+        e = doc.GetElement(i)
+        if isinstance(e, DB.View) and not isinstance(e, DB.ViewSheet) and not e.IsTemplate and e.CanBePrinted:
+            views.append(e)
+    if picked:
+        items.append((u'项目浏览器里选中的 %d 张图纸' % len(picked), picked))
+    if views:
+        items.append((u'项目浏览器里选中的 %d 个视图（直接导视图，没有图框）' % len(views), views))
+    av = doc.ActiveView
+    if not picked and not views and av is not None and not isinstance(av, DB.ViewSheet) and av.CanBePrinted:
+        items.append((u'当前视图「%s」（没有图框）' % av.Name, [av]))
+    elif isinstance(av, DB.ViewSheet) and not picked:
+        items.append((u'当前图纸「%s %s」' % (av.SheetNumber, av.Name), [av]))
+    if well_sheets:
+        items.append((u'先行测试：前 5 张井大样图纸', list(well_sheets)[:5]))
+        _ind = WCFG[u"indoor_prefix"]
+        _indoor = [s for s in well_sheets if mk_of(s).startswith(_ind)]
+        for _sr in WCFG[u"series"]:
+            if _sr[u"prefix"].startswith(_ind):
+                continue
+            _ss = [s for s in well_sheets if wcfg_series_of(mk_of(s), WCFG, True) is _sr]
+            if _ss:
+                items.append((u'井大样 %s（%d 张）' % (_sr[u"label"], len(_ss)), _ss))
+        if _indoor:
+            items.append((u'井大样 室内井（%d 张）' % len(_indoor), _indoor))
+        items.append((u'全部井大样图纸（%d 张）' % len(well_sheets), list(well_sheets)))
+    # 按 Revit 图集（图纸集合）分组：每个图集一项，图集里的图纸按图号排好
+    _cols = {}
+    _order = []
+    for _s in sheets_all:
+        try:
+            _cid = _s.SheetCollectionId
+            if _cid is None or _cid == DB.ElementId.InvalidElementId:
+                continue
+            _ce = doc.GetElement(_cid)
+            _nm = _ce.Name if _ce is not None else None
+        except:
+            continue
+        if not _nm:
+            continue
+        if _nm not in _cols:
+            _cols[_nm] = []
+            _order.append(_nm)
+        _cols[_nm].append(_s)
+    for _nm in sorted(_order, key=lambda t: wcfg_natural_key(t)):
+        items.append((u'图集「%s」（%d 张）' % (_nm, len(_cols[_nm])), _cols[_nm]))
+    items.append((u'项目里全部图纸（%d 张）' % len(sheets_all), list(sheets_all)))
+    items.append((u'手动勾选图纸…', None))
+    return items
+
+
+def _dialog(s, items):
+    f = WF.Form()
+    f.Text = TITLE
+    f.Font = SD.Font(u'Microsoft YaHei UI', 9.0)
+    f.StartPosition = WF.FormStartPosition.CenterScreen
+    f.FormBorderStyle = WF.FormBorderStyle.FixedDialog
+    f.MaximizeBox = False
+    f.MinimizeBox = False
+    W = 560
+    y = [14]
+
+    def label(t, bold=False, x=16, w=W - 32):
+        l = WF.Label(); l.Text = t; l.Location = SD.Point(x, y[0]); l.Size = SD.Size(w, 20)
+        if bold:
+            l.Font = SD.Font(f.Font, SD.FontStyle.Bold)
+        f.Controls.Add(l)
+
+    def check(t, v, x=28, w=W - 44):
+        c = WF.CheckBox(); c.Text = t; c.Checked = bool(v); c.Location = SD.Point(x, y[0]); c.Size = SD.Size(w, 22)
+        f.Controls.Add(c); y[0] += 24
+        return c
+
+    def combo(vals, idx):
+        c = WF.ComboBox(); c.DropDownStyle = WF.ComboBoxStyle.DropDownList
+        for v in vals:
+            c.Items.Add(v)
+        c.SelectedIndex = max(0, min(idx, len(vals) - 1))
+        c.Location = SD.Point(28, y[0]); c.Size = SD.Size(W - 44, 24); f.Controls.Add(c); y[0] += 32
+        return c
+
+    label(u'导出范围', True); y[0] += 22
+    cb_scope = combo([t for t, _l in items], 0)
+    label(u'格式', True); y[0] += 22
+    c_dwg = check(u'DWG（每次 %d 张一批导出，比逐张导快）' % BATCH, s[u'dwg'])
+    c_logo = check(u'  DWG 导出后用 AutoCAD 在后台补插图框 logo（已有 logo 的跳过）', s[u'logo'] and LOGO_ENABLED, x=44)
+    c_slim = check(u'  DWG 瘦身：AutoCAD 后台清理没用到的图层、块、样式（PurgeAll），日志里记前后大小', s[u'slim'], x=44)
+    c_med = check(u'  大图提速：范围超过 %d 米的平面/剖面，导出时临时改成「中等」详细程度（管道单线），导完自动还原' % int(BIG_SPAN_M), s[u'big_medium'], x=44)
+    c_cad = check(u'  大图提速：这些视图里导入的（非链接）CAD 底图不导出', s[u'big_hide_cad'], x=44)
+    c_pm = check(u'PDF：所有图纸按图号合并成一个文件', s[u'pdf_merge'])
+    c_pe = check(u'PDF：每张图纸一个文件', s[u'pdf_each'])
+    y[0] += 6
+    label(u'DWG 导出设置', True); y[0] += 22
+    setups = [u'（Revit 默认设置）'] + sorted([x.Name for x in DB.FilteredElementCollector(doc).OfClass(DB.ExportDWGSettings)])
+    cb_setup = combo(setups, setups.index(s[u'setup']) if s[u'setup'] in setups else 0)
+    label(u'文件名', True); y[0] += 22
+    cb_name = combo([t for _k, t in NAME_MODES], [k for k, _t in NAME_MODES].index(s[u'name_mode']) if s[u'name_mode'] in [k for k, _t in NAME_MODES] else 0)
+    c_skip = check(u'只补导文件夹里还没有的（上次中断、或只想补几张时用；默认全部覆盖重导）', s[u'skip_existing'])
+    y[0] += 6
+    label(u'保存到', True); y[0] += 22
+    t_dir = WF.TextBox(); t_dir.Text = s[u'folder']; t_dir.Location = SD.Point(28, y[0]); t_dir.Size = SD.Size(W - 140, 24); f.Controls.Add(t_dir)
+    b_dir = WF.Button(); b_dir.Text = u'浏览…'; b_dir.Location = SD.Point(W - 104, y[0] - 1); b_dir.Size = SD.Size(88, 26); f.Controls.Add(b_dir)
+
+    def _browse(sender, e):
+        d = WF.FolderBrowserDialog(); d.SelectedPath = t_dir.Text
+        if d.ShowDialog() == WF.DialogResult.OK:
+            t_dir.Text = d.SelectedPath
+    b_dir.Click += _browse
+    y[0] += 40
+    ok = WF.Button(); ok.Text = u'开始导出'; ok.DialogResult = WF.DialogResult.OK; ok.Location = SD.Point(W - 200, y[0]); ok.Size = SD.Size(90, 30)
+    ca = WF.Button(); ca.Text = u'取消'; ca.DialogResult = WF.DialogResult.Cancel; ca.Location = SD.Point(W - 104, y[0]); ca.Size = SD.Size(88, 30)
+    f.Controls.Add(ok); f.Controls.Add(ca); f.AcceptButton = ok; f.CancelButton = ca
+    f.ClientSize = SD.Size(W, y[0] + 44)
+    if f.ShowDialog() != WF.DialogResult.OK:
+        return None, None
+    s = dict(s)
+    s.update({u'dwg': c_dwg.Checked, u'logo': c_logo.Checked, u'slim': c_slim.Checked, u'pdf_merge': c_pm.Checked,
+              u'pdf_each': c_pe.Checked, u'setup': setups[cb_setup.SelectedIndex], u'name_mode': NAME_MODES[cb_name.SelectedIndex][0],
+              u'skip_existing': c_skip.Checked, u'folder': t_dir.Text.strip(),
+              u'big_medium': c_med.Checked, u'big_hide_cad': c_cad.Checked})
+    return s, cb_scope.SelectedIndex
+
+
+class _SheetItem(object):
+    def __init__(self, s):
+        self.s = s
+
+    def __str__(self):
+        return u'%s  %s' % (self.s.SheetNumber, self.s.Name)
+
+
+def _dwg_options(s):
+    opt = None
+    if s[u'setup'] and not s[u'setup'].startswith(u'（'):
+        for x in DB.FilteredElementCollector(doc).OfClass(DB.ExportDWGSettings):
+            if x.Name == s[u'setup']:
+                opt = x.GetDWGExportOptions()
+                break
+    if opt is None:
+        opt = DB.DWGExportOptions()
+    opt.MergedViews = True               # 不导出成独立的外部参照文件
+    try:
+        opt.PreserveCoincidentLines = False
+        opt.HideUnreferenceViewTags = True
+    except Exception:
+        pass
+    return opt
+
+
+BIG_VIEW = 3000
+_AUTO_DIALOGS = []
+
+
+def _on_dialog(sender, args):
+    """导出期间 Revit 弹出的提示框（如「导出范围太大/离原点太远」）自动点确定，记下内容放进完成报告。"""
+    try:
+        msg = u''
+        try:
+            msg = args.Message or u''
+        except Exception:
+            pass
+        _AUTO_DIALOGS.append(u'%s %s' % (args.DialogId or u'', msg.replace(u'\n', u' ')[:120]))
+        for r in (1, 8, 6):          # 确定 / 关闭 / 是，按对话框支持的依次试
+            try:
+                if args.OverrideResult(r):
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _auto_dialogs(on):
+    try:
+        uiapp = __revit__
+        if on:
+            uiapp.DialogBoxShowing += _on_dialog
+        else:
+            uiapp.DialogBoxShowing -= _on_dialog
+    except Exception:
+        pass
+
+
+BIG_SPAN_M = 100.0
+
+
+def _is_big(v):
+    """大范围视图：没开裁剪、或裁剪框对角线超过 BIG_SPAN_M 米的平面/剖面/立面（整片场地图）。
+    这类视图在「精细」下管道画双线、管件全画，是导出慢、DWG 大的主要原因。只看裁剪框，不数构件（数构件本身就很慢）。"""
+    try:
+        if v is None or v.IsTemplate or not isinstance(v, (DB.ViewPlan, DB.ViewSection)):
+            return False
+        if v.DetailLevel != DB.ViewDetailLevel.Fine:
+            return False
+        if not v.CropBoxActive:
+            return True
+        bb = v.CropBox      # 视图坐标系：X/Y 是视图里的宽和高，Z 是看进去的深度（不算）
+        return ((bb.Max.X - bb.Min.X) ** 2 + (bb.Max.Y - bb.Min.Y) ** 2) ** 0.5 * 0.3048 > BIG_SPAN_M
+    except Exception:
+        return False
+
+
+def _big_views(items):
+    out = []
+    for x in items:
+        vids = list(x.GetAllPlacedViews()) if isinstance(x, DB.ViewSheet) else [x.Id]
+        for vid in vids:
+            v = doc.GetElement(vid)
+            if _is_big(v):
+                out.append(v)
+    return out
+
+
+def _slim_start(views, medium, hide_cad):
+    """临时瘦身：改详细程度、隐藏导入的 CAD（一个事务提交），导完由 _slim_end 逐项改回原样。返回还原信息。"""
+    if not views or not (medium or hide_cad):
+        return None
+    undo = []
+    t = DB.Transaction(doc, u'天河落 · 导出临时瘦身')
+    t.Start()
+    try:
+        for v in views:
+            old = v.DetailLevel
+            changed = False
+            hid = []
+            if medium and old == DB.ViewDetailLevel.Fine:
+                try:
+                    v.DetailLevel = DB.ViewDetailLevel.Medium
+                    changed = True
+                except Exception:
+                    pass      # 视图样板锁定了详细程度，跳过
+            if hide_cad:
+                hid = [i.Id for i in DB.FilteredElementCollector(doc, v.Id).OfClass(DB.ImportInstance) if not i.IsLinked]
+                if hid:
+                    try:
+                        v.HideElements(List[DB.ElementId](hid))
+                    except Exception:
+                        hid = []
+            if changed or hid:
+                undo.append((v.Id, old, hid))
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        return None
+    _PENDING_UNDO.extend(undo)
+    return undo
+
+
+_PENDING_UNDO = []
+
+
+def _slim_end(undo):
+    """把临时改的视图逐项改回去。"""
+    if not undo:
+        return
+    t = DB.Transaction(doc, u'天河落 · 还原导出前的视图设置')
+    t.Start()
+    try:
+        for vid, old, hid in undo:
+            v = doc.GetElement(vid)
+            try:
+                if v.DetailLevel != old:
+                    v.DetailLevel = old
+                if hid:
+                    v.UnhideElements(List[DB.ElementId](hid))
+            except Exception:
+                pass
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        return
+    for u in undo:
+        if u in _PENDING_UNDO:
+            _PENDING_UNDO.remove(u)
+
+
+def _export_dwg_batches(sheets, folder, stems, opt, pb, report, slim=(False, False)):
+    """按批导出。Revit 一次导出多张时按「前缀-图纸 - 图号 - 图名.dwg」命名，导完按图号改成目标文件名。"""
+    done = []
+    total = len(sheets)
+    for b in range(0, total, BATCH):
+        if pb.cancelled:
+            break
+        chunk = sheets[b:b + BATCH]
+        pb.update_progress(b, total)
+        tag = u'thl%d' % b
+        before = set(os.listdir(folder))
+        t0 = _time.time()
+        bigs = _big_views(chunk) if (slim[0] or slim[1]) else []
+        tg = None
+        if bigs:
+            # 事务组：临时改动 + 导出 + 改回，最后整组回滚，模型不留任何改动（回滚失败时上面已逐项改回）
+            tg = DB.TransactionGroup(doc, u'天河落 · 导出临时瘦身')
+            tg.Start()
+        undo = _slim_start(bigs, slim[0], slim[1]) if bigs else None
+        try:
+            ids = List[DB.ElementId]([x.Id for x in chunk])
+            if len(chunk) == 1:
+                doc.Export(folder, stems[chunk[0].Id.Value], ids, opt)
+            else:
+                doc.Export(folder, tag, ids, opt)
+        except Exception as ex:
+            for x in chunk:
+                report.append((x, u'', 0, u'失败：%s' % ex))
+            continue
+        finally:
+            _slim_end(undo)
+            if tg is not None:
+                try:
+                    tg.RollBack()
+                except Exception:
+                    pass
+        sec = (_time.time() - t0) / max(1, len(chunk))
+        new = [n for n in os.listdir(folder) if n not in before and n.lower().endswith(u'.dwg')]
+        for x in chunk:
+            stem = stems[x.Id.Value]
+            target = os.path.join(folder, stem + u'.dwg')
+            src = None
+            if len(chunk) == 1:
+                src = target if os.path.exists(target) else None
+            else:
+                key = u' - %s - ' % _safe_name(getattr(x, 'SheetNumber', u'') or u'')
+                hit = [n for n in new if n.startswith(tag + u'-') and key in n]
+                if hit:
+                    src = os.path.join(folder, hit[0])
+            if src is None:
+                report.append((x, u'', 0, u'失败：Revit 没有生成文件'))
+                continue
+            if src != target:
+                try:
+                    if os.path.exists(target):
+                        os.remove(target)
+                    os.rename(src, target)
+                except Exception:
+                    target = src
+            done.append(os.path.basename(target))
+            report.append((x, os.path.basename(target), os.path.getsize(target), u'成功（约 %.1f 秒/张）' % sec))
+    pb.update_progress(total, total)
+    return done
+
+
+def _export_pdf_each(sheets, folder, stems):
+    pdf_dir = os.path.join(folder, u'PDF')
+    if not os.path.exists(pdf_dir):
+        os.makedirs(pdf_dir)
+    n = 0
+    for x in sheets:
+        o = DB.PDFExportOptions()
+        o.Combine = True
+        o.FileName = stems[x.Id.Value]
+        try:
+            if doc.Export(pdf_dir, List[DB.ElementId]([x.Id]), o):
+                n += 1
+        except Exception:
+            pass
+    return u'PDF（每张一个）已导出 %d / %d 张：%s' % (n, len(sheets), pdf_dir)
+
+
+def _write_report(folder, report):
+    path = os.path.join(folder, u'导出清单.csv')
+    try:
+        with io.open(path, 'w', encoding='utf-8-sig') as f:
+            f.write(u'图号,图名,文件,大小(MB),结果\r\n')
+            for x, fn, size, res in report:
+                f.write(u'%s,%s,%s,%.2f,%s\r\n' % ((getattr(x, 'SheetNumber', None) or u'（视图）').replace(u',', u' '), (x.Name or u'').replace(u',', u' '),
+                                                  fn.replace(u',', u' '), size / 1048576.0, res.replace(u',', u' ')))
+    except Exception:
+        return u''
+    return path
+
+
 def main():
     try:
-        # 1. 收集全模型所有井大样图纸
-        sheets = [
-            s for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements()
-            if s.Name and s.Name.startswith("井大样_")
-        ]
+        sheets_all = [x for x in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements() if not x.IsPlaceholder]
+        sheets_all.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
+        marks = {}
+        well = []
+        for x in sheets_all:
+            mk = _well_mark(x)
+            if mk:
+                marks[x.Id.Value] = mk
+                well.append(x)
+        well.sort(key=lambda x: wcfg_well_sort_key(marks[x.Id.Value], WCFG))
 
-        if not sheets or len(sheets) == 0:
-            forms.alert('模型中未找到以【井大样_】开头的图纸！', title='提示')
+        def mk_of(x):
+            return marks.get(x.Id.Value, u"")
+
+        items = _scope_items(sheets_all, well, mk_of)
+        s, idx = _dialog(_load_settings(), items)
+        if s is None:
             return
-
-        # 2. 导出范围选择菜单
-        # 菜单数量按当前模型实时统计 —— 原来写死的 947/127 等数字不会随后续
-        # 增删图纸变化，容易让人以为"列表没刷新、导的还是老数据"。
-        def _pick(prefix, exclude=None):
-            out = []
-            for s in sheets:
-                nm = s.Name or ""
-                if not nm.startswith("井大样_" + prefix):
-                    continue
-                if exclude and nm.startswith("井大样_" + exclude):
-                    continue
-                out.append(s)
-            return out
-
-        _grp = {
-            'in': [s for s in sheets if (s.Name or "").startswith("井大样_室内-")],
-            'AA': _pick("AA-"),
-            'BB': _pick("BB-"),
-            'A': _pick("A-", "AA-"),
-            'B': _pick("B-", "BB-"),
-            'T': _pick("T-"),
-            'L': _pick("L-"),
-            'E': _pick("E-"),
-        }
-
-        menu_opts = [
-            '【1】先行测试：导出前 5 张样板井图纸（当前共 {} 张可选）'.format(len(sheets)),
-            '【2】室内井全系列（当前 {} 张）'.format(len(_grp['in'])),
-            '【3】AA- 强电特型井全系列（当前 {} 张）'.format(len(_grp['AA'])),
-            '【4】BB- 弱电特型井全系列（当前 {} 张）'.format(len(_grp['BB'])),
-            '【5】A- 强电井全系列（当前 {} 张）'.format(len(_grp['A'])),
-            '【6】B- 弱电井全系列（当前 {} 张）'.format(len(_grp['B'])),
-            '【7】T- 通信井全系列（当前 {} 张）'.format(len(_grp['T'])),
-            '【8】L- 低压拉线井全系列（当前 {} 张）'.format(len(_grp['L'])),
-            '【9】E- 预制井全系列（当前 {} 张）'.format(len(_grp['E'])),
-            '【10】全模型全量导出（当前共 {} 张）'.format(len(sheets))
-        ]
-
-        choice = forms.SelectFromList.show(
-            menu_opts,
-            title='一键批量导出井大样 DWG - 范围选择',
-            button_name='开始导出'
-        )
-        if not choice:
+        _save_settings(s)
+        targets = items[idx][1]
+        if targets is None:
+            got = forms.SelectFromList.show([_SheetItem(x) for x in sheets_all], title=u'勾选要导出的图纸',
+                                            multiselect=True, button_name=u'导出')
+            if not got:
+                return
+            targets = [getattr(g, 's', g) for g in (got if isinstance(got, list) else [got])]
+        if not targets:
+            forms.alert(u'这个范围里没有图纸。', title=TITLE)
             return
-
-        target_sheets = []
-        if '【1】' in choice:
-            # 原实现只取 AA- 前 5 张，模型里没有 AA- 井时就一张也导不出来；
-            # 改成取当前全部井大样图纸的前 5 张，任何模型都能试跑。
-            target_sheets = list(sheets)[:5]
-        elif '【2】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_室内-")]
-        elif '【3】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_AA-")]
-        elif '【4】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_BB-")]
-        elif '【5】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_A-") and not s.Name.startswith("井大样_AA-")]
-        elif '【6】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_B-") and not s.Name.startswith("井大样_BB-")]
-        elif '【7】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_T-")]
-        elif '【8】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_L-")]
-        elif '【9】' in choice:
-            target_sheets = [s for s in sheets if s.Name.startswith("井大样_E-")]
-        elif '【10】' in choice:
-            target_sheets = list(sheets)
-
-        if not target_sheets:
-            forms.alert('未找到符合选择条件的图纸！', title='警告')
+        if not (s[u'dwg'] or s[u'pdf_merge'] or s[u'pdf_each'] or s[u'slim']):
+            forms.alert(u'没有勾选任何导出格式。', title=TITLE)
             return
+        folder = s[u'folder']
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
 
-        # 3. 选择或确认导出文件夹
-        desktop = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop)
-        default_folder = os.path.join(desktop, "所有井大样图纸导出")
-        if not os.path.exists(default_folder):
-            os.makedirs(default_folder)
+        # 导出前检查图框：没有图框、或图框类别在图纸上被隐藏的，先告诉你
+        has_tb = _titleblock_sheet_ids()
+        no_frame = [x for x in targets if isinstance(x, DB.ViewSheet) and (x.Id.Value not in has_tb or _frame_hidden(x))]
+        if no_frame:
+            names = u'\n'.join(u'  %s  %s' % (x.SheetNumber, x.Name) for x in no_frame[:15])
+            pick = forms.CommandSwitchWindow.show(
+                [u'跳过这些没有图框的图纸，其余照常导出', u'照样全部导出', u'取消，我先去补图框'],
+                message=u'有 %d 张图纸上没有图框（或图框被隐藏），导出来也不会有图框：\n%s%s'
+                        % (len(no_frame), names, u'\n  …' if len(no_frame) > 15 else u''))
+            if not pick or pick.startswith(u'取消'):
+                return
+            if pick.startswith(u'跳过'):
+                bad = set(x.Id.Value for x in no_frame)
+                targets = [x for x in targets if x.Id.Value not in bad]
+                if not targets:
+                    return
 
-        # 4. 配置 DWG 导出参数 (不要把链接作为外部参照，直接合并到图纸中)
-        all_dwg_setups = DB.FilteredElementCollector(doc)\
-            .OfClass(DB.ExportDWGSettings)\
-            .ToElements()
+        stems = _file_stems(targets, s[u'name_mode'])
+        report = []
+        dwg_targets = targets
+        if s[u'skip_existing']:
+            dwg_targets = [x for x in targets if not os.path.exists(os.path.join(folder, stems[x.Id.Value] + u'.dwg'))]
+            for x in targets:
+                if x not in dwg_targets:
+                    report.append((x, stems[x.Id.Value] + u'.dwg', os.path.getsize(os.path.join(folder, stems[x.Id.Value] + u'.dwg')), u'已存在，跳过'))
 
-        dwg_setup = None
-        for s in all_dwg_setups:
-            if s.Name == "机电导图设置":
-                dwg_setup = s
-                break
-
-        if dwg_setup:
-            opt = dwg_setup.GetDWGExportOptions()
-        else:
-            opt = DB.DWGExportOptions()
-
-        opt.MergedViews = True  # 核心：合并外部参照，不导出为独立 XREF 文件
-
-        # 5. 循环导出并展示进度条
-        success_count = 0
-        new_count = 0
-        overwrite_count = 0
-        fail_count = 0
-        fail_names = []
-        skip_count = 0
-        total = len(target_sheets)
-
-        with forms.ProgressBar(title='正在批量导出井大样 DWG... ({value}/{max_value})', cancellable=True) as pb:
-            for idx, s in enumerate(target_sheets):
-                if pb.cancelled:
-                    break
-                pb.update_progress(idx + 1, total)
-
-                # 覆盖式导出：不再"文件已存在就整张跳过"。
-                # 原逻辑会让重新出图后磁盘上仍留着旧 DWG，看起来像"没更新/不是实时数据"。
-                expected_file = os.path.join(default_folder, s.Name + ".dwg")
-                existed = os.path.exists(expected_file)
-
+        t_start = _time.time()
+        exported = []
+        if (s[u'dwg'] or s[u'slim']) and dwg_targets:
+            opt = _dwg_options(s)
+            with forms.ProgressBar(title=u'正在导出 DWG（共 %d 张，每批 %d 张）…' % (len(dwg_targets), BATCH), cancellable=True) as pb:
+                _sl = (bool(s[u'big_medium']), bool(s[u'big_hide_cad']))
+                _sh = [x for x in dwg_targets if isinstance(x, DB.ViewSheet)]
+                _vw = [x for x in dwg_targets if not isinstance(x, DB.ViewSheet)]
+                _auto_dialogs(True)
                 try:
-                    view_ids = List[DB.ElementId]()
-                    view_ids.Add(s.Id)
-                    ok = doc.Export(default_folder, s.Name, view_ids, opt)
-                    if ok:
-                        success_count += 1
-                        if existed:
-                            overwrite_count += 1
-                        else:
-                            new_count += 1
-                    else:
-                        fail_count += 1
-                        if len(fail_names) < 8:
-                            fail_names.append(s.Name + "（导出返回 False）")
-                except Exception as ex:
-                    fail_count += 1
-                    if len(fail_names) < 8:
-                        fail_names.append(s.Name + ": " + str(ex))
+                    exported = _export_dwg_batches(_sh, folder, stems, opt, pb, report, _sl) if _sh else []
+                    for _v in _vw:     # 视图逐个导（Revit 批量导视图的文件名不好对回去）
+                        exported += _export_dwg_batches([_v], folder, stems, opt, pb, report, _sl)
+                finally:
+                    _auto_dialogs(False)
+                    _slim_end(list(_PENDING_UNDO))   # 保险：中途取消或出错也一定还原
+        t_dwg = _time.time() - t_start
 
-        # 6. 完成提示并自动打开文件夹
-        msg = "批量导出任务执行完毕！（本次为覆盖式导出，磁盘上的 DWG 均为当前模型状态）\n\n"
-        msg += "• 目标文件夹: {}\n".format(default_folder)
-        msg += "• 本次成功导出: {} 张  (其中新增 {} 张 / 覆盖旧文件 {} 张)\n".format(
-            success_count, new_count, overwrite_count)
-        if fail_count > 0:
-            msg += "• 失败: {} 张\n".format(fail_count)
-            for fn in fail_names:
-                msg += "    - {}\n".format(fn)
-        if skip_count > 0:
-            msg += "• 跳过: {} 张\n".format(skip_count)
+        post_msg = u''
+        if exported and (s[u'logo'] or s[u'slim']):
+            try:
+                _ok, post_msg, _lg = _start_logo_job(folder, exported, add_logo=bool(s[u'logo'] and LOGO_ENABLED), purge=bool(s[u'slim']))
+            except Exception as ex:
+                post_msg = u'启动 AutoCAD 后处理失败（DWG 本身已导出）：%s' % ex
 
-        forms.alert(msg, title='导出完成')
+        pdf_msgs = []
+        _auto_dialogs(True)
+        if s[u'pdf_merge']:
+            try:
+                pdf_msgs.append(_export_pdf(targets, folder)[1])
+            except Exception as ex:
+                pdf_msgs.append(u'合并 PDF 出错：%s' % ex)
+        if s[u'pdf_each']:
+            try:
+                pdf_msgs.append(_export_pdf_each(targets, folder, stems))
+            except Exception as ex:
+                pdf_msgs.append(u'单张 PDF 出错：%s' % ex)
 
+        _auto_dialogs(False)
+        rep = _write_report(folder, report)
+        ok_n = len([r for r in report if r[3].startswith(u'成功')])
+        fail = [r for r in report if r[3].startswith(u'失败')]
+        size = sum(r[2] for r in report if r[3].startswith(u'成功'))
+        msg = u'导出完成：%s\n\n' % folder
+        if s[u'dwg'] or s[u'slim']:
+            msg += u'• DWG 成功 %d 张，共 %.1f MB，用时 %d 分 %d 秒\n' % (ok_n, size / 1048576.0, int(t_dwg) // 60, int(t_dwg) % 60)
+            skipped = len([r for r in report if r[3].startswith(u'已存在')])
+            if skipped:
+                msg += u'• 文件夹里已有、跳过 %d 张\n' % skipped
+            if fail:
+                msg += u'• 失败 %d 张：\n' % len(fail) + u''.join(u'    %s %s：%s\n' % (getattr(r[0], 'SheetNumber', u''), r[0].Name, r[3]) for r in fail[:8])
+        if post_msg:
+            msg += u'• %s\n' % post_msg
+        for m in pdf_msgs:
+            msg += u'• %s\n' % m
+        if no_frame:
+            msg += u'• 没有图框的图纸 %d 张（见上一步提示）\n' % len(no_frame)
+        if _AUTO_DIALOGS:
+            msg += u'• Revit 弹出的提示已自动确认 %d 次：%s\n' % (len(_AUTO_DIALOGS), u'；'.join(sorted(set(_AUTO_DIALOGS))[:3]))
+        if rep:
+            msg += u'\n清单：%s' % rep
+        forms.alert(msg, title=TITLE)
         try:
-            System.Diagnostics.Process.Start("explorer.exe", default_folder)
-        except:
+            System.Diagnostics.Process.Start('explorer.exe', folder)
+        except Exception:
             pass
-
     except Exception as e:
         import traceback
-        forms.alert("发生严重错误:\n" + str(e) + "\n\n" + traceback.format_exc(), title="报错追踪")
+        forms.alert(u'导出出错：\n' + str(e) + u'\n\n' + traceback.format_exc(), title=TITLE)
 
 
 if __name__ == '__main__':
