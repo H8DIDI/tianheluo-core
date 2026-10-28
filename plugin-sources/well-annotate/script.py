@@ -878,6 +878,8 @@ def wcfg_first_run(plugin_title):
 
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]
+# ---- annotate_core（一键井大样标注 / 井大样变动同步 共用；打包时内联）----
+# 依赖：先 include form_fit / well_config / settings_ui / well_config_ui，并定义好 WCFG、WS_PREFIX、doc、uidoc。
 import io
 import os
 import json
@@ -3532,7 +3534,6 @@ def open_settings():
         fh.write(txt)
     _apply_settings()
     return True
-
 
 def main():
     if not wcfg_first_run(u'一键井大样标注'):   # 这台电脑第一次用井大样插件：先确认项目配置

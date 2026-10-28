@@ -1052,7 +1052,7 @@ COORD_TEXT = {u'shared': u'共享坐标', u'internal': u'项目内部坐标', u'
 
 def _load_settings():
     s = {u'folder': os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop), u'所有井大样图纸导出'),
-         u'dwg': True, u'pdf_merge': False, u'pdf_each': False, u'logo': True, u'slim': False,
+         u'dwg': True, u'pdf_merge': False, u'pdf_each': False, u'pdf_series': False, u'zip_pack': False, u'logo': True, u'slim': False,
          u'name_mode': u'name', u'skip_existing': False, u'setup': DWG_SETUP_NAME,
          u'big_medium': True, u'big_hide_cad': False, u'coords': u'shared', u'coord_copy': False}
     try:
@@ -1206,6 +1206,8 @@ def _dialog(s, items):
     c_cad = check(u'  大图提速：这些视图里导入的（非链接）CAD 底图不导出', s[u'big_hide_cad'], x=44)
     c_pm = check(u'PDF：所有图纸按图号合并成一个文件', s[u'pdf_merge'])
     c_pe = check(u'PDF：每张图纸一个文件', s[u'pdf_each'])
+    c_ps = check(u'PDF：按井号系列各合并一个文件（11KV、275KV、ELV、TELCO、LV… 每个系列一个，报审用）', s.get(u'pdf_series', False))
+    c_zip = check(u'导完把 DWG、PDF、导出清单打成一个 zip（放在导出文件夹旁边，报审包）', s.get(u'zip_pack', False))
     y[0] += 6
     label(u'DWG 导出设置', True); y[0] += 22
     setups = [u'（Revit 默认设置）'] + sorted([x.Name for x in DB.FilteredElementCollector(doc).OfClass(DB.ExportDWGSettings)])
@@ -1238,7 +1240,7 @@ def _dialog(s, items):
         return None, None
     s = dict(s)
     s.update({u'dwg': c_dwg.Checked, u'logo': c_logo.Checked, u'slim': c_slim.Checked, u'pdf_merge': c_pm.Checked,
-              u'pdf_each': c_pe.Checked, u'setup': setups[cb_setup.SelectedIndex], u'name_mode': NAME_MODES[cb_name.SelectedIndex][0],
+              u'pdf_each': c_pe.Checked, u'pdf_series': c_ps.Checked, u'zip_pack': c_zip.Checked, u'setup': setups[cb_setup.SelectedIndex], u'name_mode': NAME_MODES[cb_name.SelectedIndex][0],
               u'skip_existing': c_skip.Checked, u'folder': t_dir.Text.strip(),
               u'big_medium': c_med.Checked, u'big_hide_cad': c_cad.Checked,
               u'coords': COORD_MODES[cb_coord.SelectedIndex][0], u'coord_copy': c_copy.Checked})
@@ -1470,6 +1472,54 @@ def _export_dwg_batches(sheets, folder, stems, opt, pb, report, slim=(False, Fal
     return done
 
 
+def _sheet_series_label(sh):
+    """图纸所在的井号系列（取图名里的井号，认不出归「其他」）。"""
+    try:
+        mk = u''
+        nm = sh.Name or u''
+        m = _MARK_RE.search(nm)
+        if m:
+            mk = m.group(0)
+        sr = wcfg_series_of(mk, WCFG, True) if mk else None
+        return sr[u'label'] if sr else u'其他'
+    except Exception:
+        return u'其他'
+
+
+def _export_pdf_series(sheets, folder):
+    """按井号系列各合并一个 PDF（每个系列内按图号排序，文件名用该系列第一张图纸的图名）。返回说明列表。"""
+    groups = {}
+    order = []
+    for sh in sorted(sheets, key=lambda x: getattr(x, 'SheetNumber', None) or x.Name):
+        lab = _sheet_series_label(sh)
+        if lab not in groups:
+            groups[lab] = []
+            order.append(lab)
+        groups[lab].append(sh)
+    msgs = []
+    for lab in order:
+        ok, msg = _export_pdf(groups[lab], folder)
+        msgs.append(u'%s（%d 张）：%s' % (lab, len(groups[lab]), msg))
+    return msgs
+
+
+def _make_zip(folder, include_dwg):
+    """导出文件夹里的 DWG / PDF / 清单打成 zip，放在文件夹旁边。返回 (zip 路径, 文件数)。"""
+    import zipfile
+    zpath = folder.rstrip(u'\\/') + u'.zip'
+    n = 0
+    with zipfile.ZipFile(zpath, u'w', zipfile.ZIP_DEFLATED) as z:
+        for root, _dirs, files in os.walk(folder):
+            for fn in files:
+                low = fn.lower()
+                if not (low.endswith(u'.pdf') or low.endswith(u'.csv') or (include_dwg and low.endswith(u'.dwg'))):
+                    continue
+                full = os.path.join(root, fn)
+                z.write(full, os.path.relpath(full, folder))
+                n += 1
+    return zpath, n
+
+
 def _export_pdf_each(sheets, folder, stems):
     pdf_dir = os.path.join(folder, u'PDF')
     if not os.path.exists(pdf_dir):
@@ -1571,7 +1621,7 @@ def main():
         if not targets:
             forms.alert(u'这个范围里没有图纸。', title=TITLE)
             return
-        if not (s[u'dwg'] or s[u'pdf_merge'] or s[u'pdf_each'] or s[u'slim']):
+        if not (s[u'dwg'] or s[u'pdf_merge'] or s[u'pdf_each'] or s.get(u'pdf_series') or s[u'slim']):
             forms.alert(u'没有勾选任何导出格式。', title=TITLE)
             return
         folder = s[u'folder']
@@ -1646,9 +1696,21 @@ def main():
                 pdf_msgs.append(_export_pdf_each(targets, folder, stems))
             except Exception as ex:
                 pdf_msgs.append(u'单张 PDF 出错：%s' % ex)
+        if s.get(u'pdf_series'):
+            try:
+                pdf_msgs += _export_pdf_series(targets, folder)
+            except Exception as ex:
+                pdf_msgs.append(u'按系列合并 PDF 出错：%s' % ex)
 
         _auto_dialogs(False)
         rep = _write_report(folder, report)
+        if s.get(u'zip_pack'):
+            try:
+                _dwg_late = bool(s[u'logo'] and LOGO_ENABLED) or bool(s[u'slim'])     # AutoCAD 后台还在改 DWG，现在打进去的是半成品
+                zp, zn = _make_zip(folder, include_dwg=not _dwg_late)
+                pdf_msgs.append(u'报审包 zip：%s（%d 个文件%s）' % (zp, zn, u'；DWG 正在由 AutoCAD 补 logo/瘦身，没有放进 zip，做完后请自己再打包' if _dwg_late else u''))
+            except Exception as ex:
+                pdf_msgs.append(u'打 zip 出错：%s' % ex)
         ok_n = len([r for r in report if r[3].startswith(u'成功') and len(r) < 5])
         fail = [r for r in report if r[3].startswith(u'失败')]
         size = sum(r[2] for r in report if r[3].startswith(u'成功'))

@@ -1,0 +1,12 @@
+{
+  "id": "rfi-pack",
+  "name": "RFI 取证包",
+  "version": "0.1.0",
+  "description": "写 RFI（设计问询）要附井号、位置、尺寸、截图。选中有疑问的井、排管或任何构件（没选就框选），一键生成一个「RFI取证」文件夹：\n① 构件清单.xlsx：井号/标记、族与类型、注释、井内深度或长度、内部坐标和共享坐标（E/N/RL，米，排管给起点终点）；\n② 当前视图截图.png；③ RFI正文素材.txt：每个构件一行「位置说明」，可以直接贴进 RFI 的 Location Detail。只读，不改模型。",
+  "category": "井与管线",
+  "revit": "2026",
+  "hostApi": 1,
+  "type": "python",
+  "script": "script.py",
+  "glyph": "证"
+}

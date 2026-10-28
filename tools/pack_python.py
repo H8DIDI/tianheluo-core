@@ -8,9 +8,9 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"control-points": "0.1.1", "elv-merge": "0.2.2", "export-dwg": "0.4.8", "export-nwc": "0.3.0", "family-param-dim": "0.1.2",
+VERSION_OVERRIDE = {"control-points": "0.1.1", "elv-merge": "0.2.2", "export-dwg": "0.5.0", "export-nwc": "0.3.0", "family-param-dim": "0.1.2",
                     "pile-cleanup": "0.2.1", "pile-cushion": "0.4.1", "quantity-export": "0.2.3", "rebar-3d-view": "0.2.0", "rebar-cage": "0.3.0",
-                    "sheet-organize": "0.6.6", "sheet-preview": "0.1.1", "well-annotate": "0.3.37", "well-clear-marks": "0.1.3",
+                    "sheet-organize": "0.6.6", "sheet-preview": "0.1.1", "well-annotate": "0.3.38", "well-clear-marks": "0.1.3",
                     "well-config": "0.1.1", "well-depth-report": "0.1.6", "well-family-guard": "0.1.2", "well-number": "0.2.1",
                     "well-param-sync": "0.1.2", "well-sheet-fit": "0.1.3", "well-sheet-no": "0.1.7", "well-sheets": "0.5.12",
                     "well-spec-table": "0.1.5", "well-zone": "0.1.5"}
@@ -44,6 +44,11 @@ PLUGINS = {
     "控制点坐标表":       ("control-points",  "市政管线", "点"),
     "井深统计报表":       ("well-depth-report", "市政管线", "深"),
     "图纸快速预览":       ("sheet-preview",   "出图打印", "览"),
+    "井大样变动同步": ("well-sync", "井大样出图", "同"),
+    "井大样体检": ("well-audit", "井大样出图", "检"),
+    "井表核对": ("well-list-check", "井与管线", "核"),
+    "排管井工程量表": ("duct-boq", "井与管线", "量"),
+    "RFI 取证包": ("rfi-pack", "井与管线", "证"),
 }
 
 INCLUDE_RE = re.compile(r"^# @include (\S+)\s*$", re.M)
