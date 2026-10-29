@@ -251,6 +251,10 @@
     "rfi-pack": {
       "group": "井与管线",
       "status": "tested"
+    },
+    "duct-elev": {
+      "group": "井与管线",
+      "status": "tested"
     }
   }
 }

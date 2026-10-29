@@ -49,6 +49,7 @@ PLUGINS = {
     "井表核对": ("well-list-check", "井与管线", "核"),
     "排管井工程量表": ("duct-boq", "井与管线", "量"),
     "RFI 取证包": ("rfi-pack", "井与管线", "证"),
+    "排管标高批量调整": ("duct-elev", "井与管线", "标"),
 }
 
 INCLUDE_RE = re.compile(r"^# @include (\S+)\s*$", re.M)
