@@ -9,13 +9,13 @@ OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
 VERSION_OVERRIDE = {"control-points": "0.1.1", "elv-merge": "0.2.2", "export-dwg": "0.5.0", "export-nwc": "0.3.0", "family-param-dim": "0.1.2",
-                    "pile-cleanup": "0.2.1", "pile-cushion": "0.4.1", "quantity-export": "0.2.3", "rebar-3d-view": "0.2.0", "rebar-cage": "0.3.0",
+                    "pile-cleanup": "0.2.1", "pile-cushion": "0.4.1", "quantity-export": "0.3.0", "rebar-3d-view": "0.2.0", "rebar-cage": "0.3.0",
                     "sheet-organize": "0.6.6", "sheet-preview": "0.1.1", "well-annotate": "0.3.38", "well-clear-marks": "0.1.3",
                     "well-config": "0.1.1", "well-depth-report": "0.1.6", "well-family-guard": "0.1.2", "well-number": "0.2.1",
                     "well-param-sync": "0.1.2", "well-sheet-fit": "0.1.3", "well-sheet-no": "0.1.7", "well-sheets": "0.5.12",
                     "well-spec-table": "0.1.5", "well-zone": "0.1.5"}
 # 商店里显示的名字改过的插件（文件夹名不变，图标照旧从原文件夹取）
-NAME_OVERRIDE = {"elv-merge": "族类型清洗合并", "export-dwg": "一键导出图纸DWG/PDF"}
+NAME_OVERRIDE = {"quantity-export": "框选提量导出Excel（结构 + 井排管）", "elv-merge": "族类型清洗合并", "export-dwg": "一键导出图纸DWG/PDF"}
 OUT.mkdir(exist_ok=True)
 
 # 文件夹名 -> (id, 分类, 图标上的字)
@@ -47,7 +47,6 @@ PLUGINS = {
     "井大样变动同步": ("well-sync", "井大样出图", "同"),
     "井大样体检": ("well-audit", "井大样出图", "检"),
     "井表核对": ("well-list-check", "井与管线", "核"),
-    "排管井工程量表": ("duct-boq", "井与管线", "量"),
     "RFI 取证包": ("rfi-pack", "井与管线", "证"),
     "排管标高批量调整": ("duct-elev", "井与管线", "标"),
 }

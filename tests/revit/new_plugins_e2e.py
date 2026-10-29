@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""在 Revit 里运行：临时项目里放 3 口井 + 1 根梁，实跑「井表核对」「排管井工程量表」「RFI 取证包」的核心函数并核对结果。不保存。
+"""在 Revit 里运行：临时项目里放 3 口井 + 1 根梁，实跑「井表核对」「框选提量（含井排管）」「RFI 取证包」的核心函数并核对结果。不保存。
 结果：%TEMP%\\thl_new_plugins_e2e\\report.txt。"""
 import io, sys, types, re, os, math, traceback
 import Autodesk.Revit.DB as DB
@@ -96,14 +96,16 @@ try:
     check(u'井表核对 报「清单有、模型没有」A-9', (u'清单有、模型没有', u'A-9') in kinds)
     check(u'井表核对 报「长宽对不上」A-2', (u'长宽对不上', u'A-2') in kinds)
     check(u'井表核对 报「模型有、清单没有」A-3', (u'模型有、清单没有', u'A-3') in kinds)
-    # ---- 工程量表
-    n = load('duct-boq')
-    data = n['collect']([])
-    sheets, st = n['build'](*data)
-    check(u'工程量 井 3 口、排管梁 1 根、总长 6.096 m（20 ft）', st[0] == 3 and st[1] == 1 and abs(st[5] - 6.096) < 0.01, u'%s' % (st,))
-    p = os.path.join(OUT, u'工程量.xlsx')
-    n['xlsx_write'](p, sheets)
-    check(u'工程量 写出 Excel', os.path.exists(p) and os.path.getsize(p) > 2000)
+    # ---- 提量（合并了排管井工程量表）：3 口井按系列汇总；模板里的普通梁算混凝土，不算排管
+    n = load('quantity-export')
+    res = n['_quantities']([w for w in wells] + [beam])
+    tables, summ = n['_table_rows'](res)
+    names = [t[0] for t in tables]
+    check(u'提量 井 3 口、普通梁进混凝土表、没有排管', summ['wells'] == 3 and summ['banks'] == 0 and len(res['conc']) == 1, u'%s %s' % (summ['wells'], names))
+    check(u'提量 有井汇总、井明细页', u'井汇总' in names and u'井明细' in names, u'%s' % names)
+    p = os.path.join(OUT, u'提量.xlsx')
+    n['_write_xlsx'](tables, p)
+    check(u'提量 写出 xlsx（多个工作表）', os.path.exists(p) and os.path.getsize(p) > 2000)
     # ---- RFI 取证
     n = load('rfi-pack')
     rows, lines = n['build_rows']([wells[0], beam])

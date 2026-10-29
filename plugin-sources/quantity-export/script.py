@@ -2,10 +2,12 @@
 from __future__ import unicode_literals
 __title__ = "一键框选\n提量表格"
 __author__ = "KAIFA"
-__doc__ = ("框选（或整个项目、当前视图）里的梁柱墙基础楼板和钢筋，先在窗口里显示表格：\n"
-           "混凝土体积（m³）、钢材重量（t，按材料密度算）、钢筋按直径汇总（根数、总长、重量）。\n"
-           "看完可以导出 Excel；也可以在 Revit 里生成明细表（之后模型改了，明细表自动更新）。")
+__doc__ = ("框选（或整个项目、当前视图）里的构件，先在窗口里按标签页给出表格，看完可导出 Excel（xlsx）：\n"
+           "结构：混凝土体积（m³）、钢材重量（t，按材料密度算）、钢筋按直径汇总（根数、总长、重量）；\n"
+           "小市政：井按系列、族类型、深度档汇总并附逐口明细，排管和导管按族类型汇总根数、长度、孔数、孔·米，松木桩根数和垫层块数、体积。\n"
+           "排管、松木桩、垫层各自单算，不会混进混凝土表。也可以在 Revit 里生成明细表（之后模型改了自动更新）。只读，不改模型（生成明细表除外）。")
 
+import re
 import math
 import io
 import os
@@ -21,6 +23,7 @@ from System.Collections.Generic import List
 from pyrevit import revit, DB, UI, forms
 import System.Windows.Forms as WF
 import System.Drawing as SD
+from Autodesk.Revit.UI.Selection import ISelectionFilter
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -40,6 +43,8 @@ QTO_BICS = [
     DB.BuiltInCategory.OST_StructuralFoundation,
     DB.BuiltInCategory.OST_Floors,
     DB.BuiltInCategory.OST_Rebar,
+    DB.BuiltInCategory.OST_GenericModel,      # 只认井（有井号的）
+    DB.BuiltInCategory.OST_Conduit,
 ]
 QTO_CAT_IDS = set(int(b) for b in QTO_BICS)
 
@@ -330,6 +335,351 @@ def ff_fit(f):
     return f
 # ---- form_fit 结束 ----------------------------------------------------------------
 
+# ---- well_config（天河落共用片段，打包时内联进脚本）-----------------------------
+# 井大样系列插件（一键井展开图 / 一键井大样标注 / 图纸归类与图框编号 / 导出井大样DWG）共用的项目配置。
+# 配置文件：文档\KaifaTools\井大样配置.json。第一次运行时自动写出一份默认配置（与原来写死的规则完全一样），
+# 换项目时只改这个文件：图纸名前缀、图号前缀、井编号系列（前缀 → 系统名 → 系统代码）、图框 logo 位置。
+import io as _wc_io
+import os as _wc_os
+import json as _wc_json
+import re as _wc_re
+
+WCFG_FILE = _wc_os.path.join(
+    __import__('System').Environment.GetFolderPath(__import__('System').Environment.SpecialFolder.MyDocuments),
+    u"KaifaTools", u"井大样配置.json")
+
+WCFG_DEFAULTS = {
+    u"说明": (u"井大样系列插件的项目配置。改完保存，下次点插件生效；删掉这个文件会恢复默认。"
+            u"series 里每一项是一个井编号系列：prefix=井号前缀（井号形如 AA-01、T-068、室内-A-01，前缀后面可以有一个 -，再跟数字），"
+            u"system=系统名（写进图纸的「图纸系统」参数、用来归类），code=系统代码（图号模板里的 {系统码}），label=菜单里显示的名字。"
+            u"顺序就是菜单和排序的顺序；匹配时长的前缀优先（AA 先于 A）。"),
+    u"sheet_name_prefix": u"井大样_",
+    u"sheet_number_prefix": u"AG-",
+    u"indoor_prefix": u"室内-",
+    u"system_param": u"图纸系统",
+    u"series": [
+        {u"prefix": u"室内-A", u"system": u"室内强电井", u"code": u"NQ", u"label": u"室内-A- 强电井"},
+        {u"prefix": u"室内-T", u"system": u"室内通信井", u"code": u"NT", u"label": u"室内-T- 通信井"},
+        {u"prefix": u"室内-E", u"system": u"室内弱电井", u"code": u"NR", u"label": u"室内-E- 弱电井"},
+        {u"prefix": u"室内-L", u"system": u"室内低压拉线井", u"code": u"ND", u"label": u"室内-L- 低压拉线井"},
+        {u"prefix": u"AA", u"system": u"强电井", u"code": u"QD", u"label": u"AA- 强电特型井"},
+        {u"prefix": u"A", u"system": u"强电井", u"code": u"QD", u"label": u"A- 强电井"},
+        {u"prefix": u"BB", u"system": u"弱电井", u"code": u"RD", u"label": u"BB- 弱电特型井"},
+        {u"prefix": u"B", u"system": u"弱电井", u"code": u"RD", u"label": u"B- 弱电井"},
+        {u"prefix": u"T", u"system": u"通信井", u"code": u"TX", u"label": u"T- 通信井"},
+        {u"prefix": u"L", u"system": u"低压拉线井", u"code": u"DY", u"label": u"L- 低压拉线井"},
+        {u"prefix": u"E", u"system": u"预制井", u"code": u"YZ", u"label": u"E- 预制井"},
+        {u"prefix": u"Y", u"system": u"雨水井", u"code": u"YS", u"label": u"Y- 雨水井"},
+    ],
+    u"other": {u"system": u"其他", u"code": u"QT"},
+    # 图名模板（按井号前缀，长前缀优先）：{井号} 换成井号，如 T-001。没有模板的井沿用「井大样_」前缀。
+    # 图纸集合（按井号前缀）：新图放进对应的图纸集合，便于按集合导出 PDF。名字须与项目里的图纸集合一致。
+    u"sheet_collection_by_prefix": {
+        u"AA": u"275KV井大样", u"BB": u"275KV井大样", u"A": u"11KV井大样", u"B": u"11KV井大样",
+        u"E": u"ELV井大样", u"L": u"LV井大样", u"T": u"TELCO井大样",
+    },
+    u"sheet_name_templates": {
+        u"AA": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"BB": u"BTP-IF1 275Kv-{井号} Detail Drawing",
+        u"A": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"B": u"BTP-IF1 11Kv-{井号} Detail Drawing",
+        u"E": u"BTP-IF1 ELV-{井号} Detail Drawing",
+        u"L": u"BTP-IF1 Lv-{井号} Detail Drawing",
+        u"T": u"BTP-IF1 Telco-{井号} Detail Drawing",
+    },
+    u"logo": {u"enabled": True, u"file": u"frame_logo.jpg", u"x0": 736.54, u"y0": 141.10, u"w": 91.49,
+              u"说明": u"导出 DWG 后补插的图框 logo：x0/y0 = logo 左下角在 Layout1 里的坐标，w = 宽度（按 A1 横向图框标定）。换图框要改；enabled=false 不补 logo。"},
+}
+
+_WCFG_CACHE = [None]
+# 本次运行之前配置文件还不存在（第一次在这台电脑上用井大样插件）。wcfg_load 会写出默认文件，所以要在调用它之前记下来。
+WCFG_FIRST_RUN = not _wc_os.path.exists(WCFG_FILE)
+
+
+def _wcfg_merge(base, extra):
+    out = dict(base)
+    for k, v in (extra or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _wcfg_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def wcfg_load(write_default=True):
+    """读项目配置（缺的项用默认值补齐）。文件不存在时写出默认配置，方便用户找到并修改。"""
+    if _WCFG_CACHE[0] is not None:
+        return _WCFG_CACHE[0]
+    cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    try:
+        if _wc_os.path.exists(WCFG_FILE):
+            with _wc_io.open(WCFG_FILE, 'r', encoding='utf-8-sig') as f:
+                cfg = _wcfg_merge(cfg, _wc_json.load(f))
+        elif write_default:
+            d = _wc_os.path.dirname(WCFG_FILE)
+            if not _wc_os.path.isdir(d):
+                _wc_os.makedirs(d)
+            with _wc_io.open(WCFG_FILE, 'w', encoding='utf-8') as f:
+                f.write(_wc_json.dumps(WCFG_DEFAULTS, ensure_ascii=False, indent=2))
+    except Exception:
+        cfg = _wcfg_merge(WCFG_DEFAULTS, {})
+    # series 至少要有 prefix
+    good = []
+    for s in cfg.get(u"series") or []:
+        try:
+            p = (s.get(u"prefix") or u"").strip()
+        except Exception:
+            continue
+        if not p:
+            continue
+        s = dict(s)
+        s[u"prefix"] = p
+        s.setdefault(u"system", p)
+        s.setdefault(u"code", p)
+        s.setdefault(u"label", p + u"-")
+        good.append(s)
+    cfg[u"series"] = good or list(WCFG_DEFAULTS[u"series"])
+    _WCFG_CACHE[0] = cfg
+    return cfg
+
+
+def wcfg_series_of(mark, cfg=None, strict=False):
+    """井号属于哪个系列：前缀（长的优先）后面可以有一个 -，必须紧跟数字。认不出返回 None。
+    strict=True 时前缀后面必须是「-数字」（井的标记用这个：雨水井的 A1、BB24 这类不带 - 的不算强电/弱电井）。"""
+    cfg = cfg or wcfg_load()
+    m = (mark or u"").strip()
+    for s in sorted(cfg[u"series"], key=lambda x: -len(x[u"prefix"])):
+        p = s[u"prefix"]
+        if m.startswith(p):
+            rest = m[len(p):]
+            if rest[:1] == u"-":
+                rest = rest[1:]
+            elif strict:
+                continue
+            if rest[:1].isdigit():
+                return s
+    return None
+
+
+def wcfg_series_index(s, cfg=None):
+    cfg = cfg or wcfg_load()
+    for i, x in enumerate(cfg[u"series"]):
+        if x is s:
+            return i
+    return len(cfg[u"series"])
+
+
+def wcfg_natural_key(text):
+    out = []
+    for tok in _wc_re.split(r'(\d+)', text or u''):
+        out.append((0, int(tok), u'') if tok.isdigit() else (1, 0, tok.lower()))
+    return out
+
+
+def wcfg_well_sort_key(mark, cfg=None, strict=True):
+    """先按系列在配置里的顺序，同系列按号（自然排序：A-2 在 A-10 前面）。"""
+    s = wcfg_series_of(mark, cfg, strict)
+    return (wcfg_series_index(s, cfg) if s is not None else 9999, wcfg_natural_key(mark))
+
+
+def wcfg_sheet_name(mark, cfg=None):
+    """井号 → 图名（按配置里的图名模板）。没有对应模板时返回 None，调用方沿用「井大样_」前缀。
+    模板前缀按长度从长到短匹配，且前缀后面必须紧跟 "-"（AA-04 不会误判成 A 系列）。"""
+    cfg = cfg or wcfg_load()
+    tpls = cfg.get(u"sheet_name_templates") or {}
+    m = (mark or u"").strip()
+    for key in sorted(tpls.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return tpls[key].replace(u"{井号}", m)
+    return None
+# ---- well_config 结束 ----------------------------------------------------------
+
+
+def wcfg_collection_name(mark, cfg=None):
+    """井号 → 图纸集合名（按配置 sheet_collection_by_prefix，长前缀优先，前缀后紧跟 -）。没有对应返回 None。"""
+    cfg = cfg or wcfg_load()
+    maps = cfg.get(u"sheet_collection_by_prefix") or {}
+    m = (mark or u"").strip()
+    for key in sorted(maps.keys(), key=lambda k: -len(k)):
+        if m.startswith(key + u"-"):
+            return maps[key]
+    return None
+
+
+# ---- 井位置缓存（井没动就不重新生成）：Documents\KaifaTools\井大样位置缓存.json ----
+def wcfg_cache_path():
+    return _wc_os.path.join(_wc_os.path.dirname(WCFG_FILE), u"井大样位置缓存.json")
+
+
+def wcfg_cache_load():
+    """读位置缓存：{井号: {bbox, sheet_id, name, number}}。文件不存在或坏了返回空。"""
+    try:
+        with _wc_io.open(wcfg_cache_path(), 'r', encoding='utf-8-sig') as f:
+            d = _wc_json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def wcfg_cache_save(d):
+    """先把内容转成文字，转成功才写文件（避免转换失败时把旧缓存清成空文件）。"""
+    try:
+        txt = _wc_json.dumps(d, ensure_ascii=False, indent=1)
+    except Exception:
+        return
+    try:
+        p = wcfg_cache_path()
+        dd = _wc_os.path.dirname(p)
+        if not _wc_os.path.isdir(dd):
+            _wc_os.makedirs(dd)
+        with _wc_io.open(p, 'w', encoding='utf-8') as f:
+            f.write(txt)
+    except Exception:
+        pass
+
+# ---- xlsx_lite（天河落共用片段，打包时内联进脚本）--------------------------------
+# 不依赖 Excel，用标准库 zipfile 直接写 .xlsx。IronPython 3.4 可用。
+# 用法：xlsx_write(path, [(工作表名, 行列表, {"widths": [..], "header_rows": n, "title_rows": n}), ...])
+#   行列表里的数字写成数字单元格，其余写成文字；header_rows 行加粗带底色，title_rows 行加粗（放在表头前）。
+import zipfile as _xl_zip
+
+
+def _xl_esc(s):
+    s = u'%s' % s
+    return (s.replace(u'&', u'&amp;').replace(u'<', u'&lt;').replace(u'>', u'&gt;')
+             .replace(u'"', u'&quot;'))
+
+
+def _xl_col(i):
+    s = u''
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = u'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[r] + s
+    return s
+
+
+def _xl_is_num(v):
+    if isinstance(v, bool):
+        return False
+    try:
+        return isinstance(v, (int, float)) or type(v).__name__ in ('long', 'Double', 'Int32', 'Int64')
+    except Exception:
+        return False
+
+
+def _xl_sheet_xml(rows, opts):
+    widths = opts.get('widths') or []
+    title_rows = int(opts.get('title_rows', 0))
+    header_rows = int(opts.get('header_rows', 1))
+    x = [u'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+         u'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">']
+    if title_rows + header_rows > 0:
+        x.append(u'<sheetViews><sheetView workbookViewId="0"><pane ySplit="%d" topLeftCell="A%d" '
+                 u'activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+                 % (title_rows + header_rows, title_rows + header_rows + 1))
+    if widths:
+        x.append(u'<cols>')
+        for i, w in enumerate(widths):
+            x.append(u'<col min="%d" max="%d" width="%s" customWidth="1"/>' % (i + 1, i + 1, w))
+        x.append(u'</cols>')
+    x.append(u'<sheetData>')
+    for r, row in enumerate(rows):
+        style = 0
+        if r < title_rows:
+            style = 1
+        elif r < title_rows + header_rows:
+            style = 2
+        x.append(u'<row r="%d">' % (r + 1))
+        for c, v in enumerate(row):
+            if v is None or v == u'':
+                continue
+            ref = u'%s%d' % (_xl_col(c), r + 1)
+            st = u' s="%d"' % style if style else u''
+            if _xl_is_num(v) and style != 2:
+                x.append(u'<c r="%s"%s><v>%s</v></c>' % (ref, st, repr(float(v)) if isinstance(v, float) else v))
+            else:
+                x.append(u'<c r="%s" t="inlineStr"%s><is><t xml:space="preserve">%s</t></is></c>'
+                         % (ref, st, _xl_esc(v)))
+        x.append(u'</row>')
+    x.append(u'</sheetData></worksheet>')
+    return u''.join(x)
+
+
+def xlsx_write(path, sheets):
+    """sheets: [(name, rows, opts)]。返回 path。"""
+    names = []
+    for i, (name, _rows, _o) in enumerate(sheets):
+        n = (u'%s' % name)
+        for ch in u'[]:*?/\\':
+            n = n.replace(ch, u'_')
+        n = n[:31] or (u'Sheet%d' % (i + 1))
+        names.append(n)
+    ct = (u'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+          u'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          u'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          u'<Default Extension="xml" ContentType="application/xml"/>'
+          u'<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+          u'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>')
+    for i in range(len(sheets)):
+        ct += (u'<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' % (i + 1))
+    ct += u'</Types>'
+    rels = (u'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            u'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            u'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            u'</Relationships>')
+    wb = (u'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+          u'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+          u'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>')
+    wbrels = (u'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+              u'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">')
+    for i, n in enumerate(names):
+        wb += u'<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (_xl_esc(n), i + 1, i + 1)
+        wbrels += (u'<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%d.xml"/>' % (i + 1, i + 1))
+    wb += u'</sheets></workbook>'
+    wbrels += (u'<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' % (len(names) + 1))
+    wbrels += u'</Relationships>'
+    styles = (u'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+              u'<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+              u'<fonts count="2"><font><sz val="11"/><name val="等线"/></font>'
+              u'<font><b/><sz val="11"/><name val="等线"/></font></fonts>'
+              u'<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
+              u'<fill><patternFill patternType="solid"><fgColor rgb="FFDDEBF7"/><bgColor indexed="64"/></patternFill></fill></fills>'
+              u'<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+              u'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+              u'<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+              u'<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+              u'<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1">'
+              u'<alignment wrapText="1" vertical="center"/></xf></cellXfs>'
+              u'<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+              u'</styleSheet>')
+    try:
+        mode = _xl_zip.ZIP_DEFLATED
+        z = _xl_zip.ZipFile(path, 'w', mode)
+    except Exception:
+        z = _xl_zip.ZipFile(path, 'w', _xl_zip.ZIP_STORED)
+    try:
+        z.writestr('[Content_Types].xml', ct.encode('utf-8'))
+        z.writestr('_rels/.rels', rels.encode('utf-8'))
+        z.writestr('xl/workbook.xml', wb.encode('utf-8'))
+        z.writestr('xl/_rels/workbook.xml.rels', wbrels.encode('utf-8'))
+        z.writestr('xl/styles.xml', styles.encode('utf-8'))
+        for i, (_n, rows, opts) in enumerate(sheets):
+            z.writestr('xl/worksheets/sheet%d.xml' % (i + 1), _xl_sheet_xml(rows, opts or {}).encode('utf-8'))
+    finally:
+        z.close()
+    return path
+# ---- xlsx_lite 结束 ------------------------------------------------------------
+
+WCFG = wcfg_load()
+DEPTH_STEP = 500.0         # 井深度按 500 mm 一档汇总（预制井按档订货）
+_HOLES = re.compile(u'(\\d+)\\s*孔')
+PILE_KEYS = (u'松木桩', u'Φ75')
+PAD_KEYS = (u'垫层',)
+# 排管（含雨水沟）：族名以这些前缀开头，或名字里有「排管」「N孔」
+BANK_PREFIXES = (u'TELCO', u'ELV', u'LV-', u'ELE-', u'雨水沟')
+
+
 def _u(x):
     if x is None:
         return u''
@@ -349,11 +699,103 @@ def _eid(x):
             return -1
 
 
-def _is_qto(e):
+def _mark(e):
     try:
-        return e is not None and e.Category is not None and _eid(e.Category.Id) in QTO_CAT_IDS
+        p = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+        return (p.AsString() or u'').strip() if p is not None else u''
+    except Exception:
+        return u''
+
+
+def _is_well(e):
+    """井：常规模型族实例，标记（井号）属于配置里的某个井系列。"""
+    try:
+        return (isinstance(e, DB.FamilyInstance) and _eid(e.Category.Id) == int(DB.BuiltInCategory.OST_GenericModel)
+                and wcfg_series_of(_mark(e), WCFG, True) is not None)
     except Exception:
         return False
+
+
+def _ftname(e):
+    try:
+        s = e.Symbol
+        return _u(s.FamilyName), _u(s.Name)
+    except Exception:
+        try:
+            t = doc.GetElement(e.GetTypeId())
+            return (_u(t.FamilyName) if t is not None else u''), (_u(t.Name) if t is not None else u'')
+        except Exception:
+            return u'', u''
+
+
+def _is_bank(e):
+    """排管（含雨水沟）：结构框架里族名像排管的；真正的梁仍按混凝土/钢材算。"""
+    f, t = _ftname(e)
+    fu = f.upper()
+    if any(fu.startswith(k) for k in BANK_PREFIXES):
+        return True
+    return u'排管' in f or u'排管' in t or bool(_HOLES.search(f + u' ' + t))
+
+
+def _pile_or_pad(e):
+    """结构基础里的松木桩 / 垫层；其他返回 None。"""
+    f, t = _ftname(e)
+    txt = f + u' ' + t + u' ' + _u(e.Name)
+    if any(k in txt for k in PILE_KEYS):
+        return u'松木桩'
+    if any(k in txt for k in PAD_KEYS):
+        return u'垫层'
+    return None
+
+
+def _is_qto(e):
+    try:
+        if e is None or e.Category is None:
+            return False
+        c = _eid(e.Category.Id)
+        if c not in QTO_CAT_IDS:
+            return False
+        if c == int(DB.BuiltInCategory.OST_GenericModel):
+            return _is_well(e)
+        return True
+    except Exception:
+        return False
+
+
+class _QtoFilter(ISelectionFilter):
+    def AllowElement(self, e):
+        return _is_qto(e)
+
+    def AllowReference(self, r, p):
+        return False
+
+
+def _depth_mm(e):
+    """井内深度（mm）：优先「井内深度」参数，没有就用 偏移 − 井底标高。"""
+    p = e.LookupParameter(u'井内深度')
+    if p is not None and p.HasValue and p.StorageType == DB.StorageType.Double and p.AsDouble() > 0:
+        return p.AsDouble() * FT_TO_MM
+    b = e.LookupParameter(u'井底标高')
+    o = e.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
+    if b is not None and b.HasValue and o is not None and o.HasValue:
+        return (o.AsDouble() - b.AsDouble()) * FT_TO_MM
+    return None
+
+
+def _length_m(e):
+    try:
+        loc = e.Location
+        if isinstance(loc, DB.LocationCurve):
+            return loc.Curve.Length * FT_TO_M
+    except Exception:
+        pass
+    try:
+        p = e.get_Parameter(DB.BuiltInParameter.CURVE_ELEM_LENGTH)
+        if p is not None and p.HasValue:
+            return p.AsDouble() * FT_TO_M
+    except Exception:
+        pass
+    return 0.0
 
 
 def _level_name(e):
@@ -388,9 +830,20 @@ def _volume_m3(e):
     p = e.get_Parameter(DB.BuiltInParameter.HOST_VOLUME_COMPUTED)
     if p is None or not p.HasValue:
         p = e.LookupParameter(u'Volume')
-    if p is not None and p.HasValue:
+    if p is not None and p.HasValue and p.AsDouble() > 0:
         return p.AsDouble() * FT3_TO_M3
-    return 0.0
+    try:                                        # 体积参数取不到（嵌套族等）：累加几何实体
+        tot = 0.0
+        for g in e.get_Geometry(DB.Options()):
+            if isinstance(g, DB.Solid):
+                tot += g.Volume
+            elif isinstance(g, DB.GeometryInstance):
+                for x in g.GetInstanceGeometry():
+                    if isinstance(x, DB.Solid):
+                        tot += x.Volume
+        return tot * FT3_TO_M3
+    except Exception:
+        return 0.0
 
 
 def _density(e):
@@ -424,14 +877,20 @@ def _material_name(e):
 
 
 def _pick_elements(sel_ids):
-    """要统计的构件：有选中就用选中的；没有就问整个项目还是当前视图。取消返回 (None, None)。"""
+    """要统计的构件：有选中就用选中的；没有就问：现在框选 / 整个项目 / 当前视图。取消返回 (None, None)。"""
     if sel_ids:
         elems = [e for e in (doc.GetElement(i) for i in sel_ids) if _is_qto(e)]
         return elems, u'框选的构件'
-    options = [u'整个项目', u'当前视图']
-    pick = forms.CommandSwitchWindow.show(options, message=u'没有框选构件，统计哪个范围？')
+    options = [u'现在框选', u'整个项目', u'当前视图']
+    pick = forms.CommandSwitchWindow.show(options, message=u'没有选中构件，统计哪个范围？')
     if not pick:
         return None, None
+    if pick == u'现在框选':
+        try:
+            got = list(uidoc.Selection.PickElementsByRectangle(_QtoFilter(), u'框选要统计的构件（梁柱墙板基础、钢筋、井、排管、导管、松木桩、垫层），框完点 Finish'))
+        except Exception:
+            return None, None
+        return [e for e in got if _is_qto(e)], u'框选的构件'
     if pick == u'当前视图':
         col = DB.FilteredElementCollector(doc, uidoc.ActiveView.Id)
         src = u'当前视图'
@@ -439,13 +898,13 @@ def _pick_elements(sel_ids):
         col = DB.FilteredElementCollector(doc)
         src = u'整个项目'
     flt = DB.ElementMulticategoryFilter(List[DB.BuiltInCategory](QTO_BICS))
-    return list(col.WherePasses(flt).WhereElementIsNotElementType().ToElements()), src
+    return [e for e in col.WherePasses(flt).WhereElementIsNotElementType().ToElements() if _is_qto(e)], src
 
 
 def _quantities(elems):
     """汇总：混凝土（楼层、类别、类型）、钢材（同上，含重量）、钢筋（楼层、直径）。
     构件多时显示进度条（读几何体积较慢），可以取消；取消返回 None（只读，不改模型）。"""
-    res = {'conc': {}, 'steel': {}, 'rebar': {}, 'skipped': 0}
+    res = {'conc': {}, 'steel': {}, 'rebar': {}, 'wells': [], 'banks': {}, 'piles': {}, 'skipped': 0}
     pb = forms.ProgressBar(title=u'正在统计工程量…（点取消可停止）', cancellable=True) if len(elems) > 300 else None
     try:
         for i, e in enumerate(elems):
@@ -483,6 +942,31 @@ def _add_one(e, res):
         row[2] += kg
         return
 
+    c = _eid(e.Category.Id)
+    if c == int(DB.BuiltInCategory.OST_GenericModel):          # 井
+        mk = _mark(e)
+        sr = wcfg_series_of(mk, WCFG, True)
+        f, t = _ftname(e)
+        res['wells'].append((mk, sr[u'label'] if sr else u'其他', f, t, _depth_mm(e), e.Id.Value))
+        return
+    if c == int(DB.BuiltInCategory.OST_Conduit) or (c == int(DB.BuiltInCategory.OST_StructuralFraming) and _is_bank(e)):
+        f, t = _ftname(e)
+        cat = u'导管' if c == int(DB.BuiltInCategory.OST_Conduit) else (u'雨水沟' if f.startswith(u'雨水沟') else u'排管')
+        a = res['banks'].setdefault((cat, f, t), [0, 0.0, 0])
+        a[0] += 1
+        a[1] += _length_m(e)
+        m = _HOLES.search(f + u' ' + t)
+        if m:
+            a[2] = int(m.group(1))
+        return
+    if c == int(DB.BuiltInCategory.OST_StructuralFoundation):
+        kind = _pile_or_pad(e)
+        if kind:
+            f, t = _ftname(e)
+            a = res['piles'].setdefault((kind, (f + u' / ' + t) if (f or t) else _u(e.Name)), [0, 0.0])
+            a[0] += 1
+            a[1] += _volume_m3(e) if kind == u'垫层' else 0.0
+            return
     lvl = _level_name(e)
     cat = _u(e.Category.Name)
     typ = _type_name(e)
@@ -533,64 +1017,61 @@ def _table_rows(res):
         (u'钢筋', [u'楼层', u'直径(mm)', u'根数', u'总长(m)', u'重量(kg)'], rebar_rows,
          [u'合计', u'', rebar_sum[0], round(rebar_sum[1], 3), round(rebar_sum[2], 3)]),
     ]
-    summary = {'conc': conc_sum, 'steel': steel_sum, 'rebar': rebar_sum}
+    # ---- 小市政：井、排管导管、桩与垫层（没有的不出标签页）
+    by, detail = {}, []
+    for mk, lab, f, t, d, eid in sorted(res['wells'], key=lambda w: wcfg_well_sort_key(w[0], WCFG)):
+        step = (math.ceil((d - 1e-6) / DEPTH_STEP) * DEPTH_STEP) if d else None
+        by[(lab, f, t, step)] = by.get((lab, f, t, step), 0) + 1
+        detail.append([mk, lab, f, t, round(d) if d else u'', int(step) if step else u'', eid])
+    if by:
+        wrows = [[k[0], k[1], k[2], int(k[3]) if k[3] else u'未取到深度', by[k]] for k in sorted(by, key=lambda k: (k[0], k[1], k[2], k[3] or 0))]
+        tables.append((u'井汇总', [u'系列', u'族', u'类型', u'深度档(mm)', u'数量'], wrows,
+                       [u'合计', u'', u'', u'', len(res['wells'])]))
+        tables.append((u'井明细', [u'井号', u'系列', u'族', u'类型', u'井内深度(mm)', u'深度档(mm)', u'构件ID'], detail, None))
+    if res['banks']:
+        brows, tl, th = [], 0.0, 0.0
+        for k in sorted(res['banks']):
+            n, L, h = res['banks'][k]
+            brows.append([k[0], k[1], k[2], n, round(L, 2), h if h else u'', round(L * h, 1) if h else u''])
+            tl += L
+            th += L * h
+        tables.append((u'排管导管', [u'类别', u'族', u'类型', u'根数', u'总长度(m)', u'孔数', u'孔·米'], brows,
+                       [u'合计', u'', u'', sum(a[0] for a in res['banks'].values()), round(tl, 2), u'', round(th, 1)]))
+    if res['piles']:
+        prows = [[k[0], k[1], v[0], round(v[1], 3) if k[0] == u'垫层' else u''] for k, v in sorted(res['piles'].items())]
+        tables.append((u'桩与垫层', [u'项目', u'族 / 类型', u'数量', u'体积(m³)'], prows, None))
+    summary = {'conc': conc_sum, 'steel': steel_sum, 'rebar': rebar_sum,
+               'wells': len(res['wells']), 'banks': sum(a[0] for a in res['banks'].values()),
+               'piles': sum(v[0] for k, v in res['piles'].items() if k[0] == u'松木桩'),
+               'pads': sum(v[0] for k, v in res['piles'].items() if k[0] == u'垫层')}
     return tables, summary
 
 
 # ============================================================
-# Excel（Excel 2003 XML，Excel 可直接打开）
+# Excel（真 xlsx，标准库直接写，不需要装 Excel）
 # ============================================================
-def _xml_escape(s):
-    s = _u(s)
-    return s.replace(u'&', u'&amp;').replace(u'<', u'&lt;').replace(u'>', u'&gt;').replace(u'"', u'&quot;')
-
-
-def _cell(v, style=None):
-    sa = (u' ss:StyleID="%s"' % style) if style else u''
-    if isinstance(v, bool):
-        v = int(v)
-    if isinstance(v, (int, float)):
-        num = (u'%.3f' % v) if isinstance(v, float) else (u'%d' % v)
-        return u'<Cell%s><Data ss:Type="Number">%s</Data></Cell>' % (sa, num)
-    return u'<Cell%s><Data ss:Type="String">%s</Data></Cell>' % (sa, _xml_escape(v))
-
-
-def _sheet(name, header, rows, total):
-    x = [u'<Worksheet ss:Name="%s"><Table>' % _xml_escape(name)]
-    x.append(u'<Row>' + u''.join(_cell(h, u'h') for h in header) + u'</Row>')
-    for r in rows:
-        x.append(u'<Row>' + u''.join(_cell(v) for v in r) + u'</Row>')
-    x.append(u'<Row>' + u''.join(_cell(v, u'h') for v in total) + u'</Row>')
-    x.append(u'</Table></Worksheet>')
-    return u''.join(x)
-
-
-def _build_xml(tables):
-    head = (u'<?xml version="1.0" encoding="UTF-8"?>\n'
-            u'<?mso-application progid="Excel.Sheet"?>\n'
-            u'<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
-            u'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">\n'
-            u'<Styles><Style ss:ID="h"><Font ss:Bold="1"/>'
-            u'<Interior ss:Color="#D9E1F2" ss:Pattern="Solid"/></Style></Styles>\n')
-    body = [_sheet(name, header, rows, total) for name, header, rows, total in tables]
-    return head + u'\n'.join(body) + u'\n</Workbook>\n'
-
-
 def _write_xlsx(tables, path):
-    """把三张表写到用户选定的路径（不自动保存到别处）。"""
-    with io.open(path, 'w', encoding='utf-8-sig') as f:
-        f.write(_build_xml(tables))
+    """把所有标签页写成一个 xlsx，每页一个工作表。"""
+    sheets = []
+    for name, header, rows, total in tables:
+        data = [list(header)] + [list(r) for r in rows] + ([list(total)] if total else [])
+        widths = []
+        for i in range(len(header)):
+            w = max(len(_u(r[i])) if i < len(r) else 0 for r in data)
+            widths.append(min(max(w * 1.6 + 2, 8), 50))
+        sheets.append((name, data, {'widths': widths, 'header_rows': 1}))
+    xlsx_write(path, sheets)
     return path
 
 
 def _ask_save_path():
     """弹出「另存为」对话框让用户选路径。取消返回 None。"""
     dlg = WF.SaveFileDialog()
-    dlg.Title = u'导出提量表格（Excel 可直接打开）'
-    dlg.Filter = u'Excel 表格 (*.xml)|*.xml'
-    dlg.DefaultExt = u'xml'
+    dlg.Title = u'导出提量表格'
+    dlg.Filter = u'Excel 表格 (*.xlsx)|*.xlsx'
+    dlg.DefaultExt = u'xlsx'
     dlg.AddExtension = True
-    dlg.FileName = u'提量_%s.xml' % time.strftime('%Y%m%d_%H%M')
+    dlg.FileName = u'提量_%s.xlsx' % time.strftime('%Y%m%d_%H%M')
     dlg.InitialDirectory = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments)
     if dlg.ShowDialog() == WF.DialogResult.OK:
         return dlg.FileName
@@ -676,11 +1157,11 @@ def _grid(headers, rows, total):
     g.AutoSizeColumnsMode = WF.DataGridViewAutoSizeColumnsMode.AllCells
     for i, h in enumerate(headers):
         g.Columns.Add(u'c%d' % i, _u(h))
-    for r in rows + [total]:
+    for r in rows + ([total] if total else []):
         idx = g.Rows.Add()
         for i, v in enumerate(r):
             g.Rows[idx].Cells[i].Value = v if not isinstance(v, str) else _u(v)
-    if total:
+    if total and g.Rows.Count:
         g.Rows[g.Rows.Count - 1].DefaultCellStyle.Font = SD.Font(g.Font, SD.FontStyle.Bold)
     return g
 
@@ -758,7 +1239,7 @@ def main():
         if elems is None:
             return
         if not elems:
-            forms.alert(u"没有找到可统计的构件（梁、柱、墙、基础、楼板、钢筋）。", title=TITLE)
+            forms.alert(u"没有找到可统计的构件（梁柱墙板基础、钢筋、井、排管、导管、松木桩、垫层）。", title=TITLE)
             return
         res = _quantities(elems)
         if res is None:

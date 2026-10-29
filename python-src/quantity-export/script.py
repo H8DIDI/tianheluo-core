@@ -2,10 +2,12 @@
 from __future__ import unicode_literals
 __title__ = "一键框选\n提量表格"
 __author__ = "KAIFA"
-__doc__ = ("框选（或整个项目、当前视图）里的梁柱墙基础楼板和钢筋，先在窗口里显示表格：\n"
-           "混凝土体积（m³）、钢材重量（t，按材料密度算）、钢筋按直径汇总（根数、总长、重量）。\n"
-           "看完可以导出 Excel；也可以在 Revit 里生成明细表（之后模型改了，明细表自动更新）。")
+__doc__ = ("框选（或整个项目、当前视图）里的构件，先在窗口里按标签页给出表格，看完可导出 Excel（xlsx）：\n"
+           "结构：混凝土体积（m³）、钢材重量（t，按材料密度算）、钢筋按直径汇总（根数、总长、重量）；\n"
+           "小市政：井按系列、族类型、深度档汇总并附逐口明细，排管和导管按族类型汇总根数、长度、孔数、孔·米，松木桩根数和垫层块数、体积。\n"
+           "排管、松木桩、垫层各自单算，不会混进混凝土表。也可以在 Revit 里生成明细表（之后模型改了自动更新）。只读，不改模型（生成明细表除外）。")
 
+import re
 import math
 import io
 import os
@@ -21,6 +23,7 @@ from System.Collections.Generic import List
 from pyrevit import revit, DB, UI, forms
 import System.Windows.Forms as WF
 import System.Drawing as SD
+from Autodesk.Revit.UI.Selection import ISelectionFilter
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -40,6 +43,8 @@ QTO_BICS = [
     DB.BuiltInCategory.OST_StructuralFoundation,
     DB.BuiltInCategory.OST_Floors,
     DB.BuiltInCategory.OST_Rebar,
+    DB.BuiltInCategory.OST_GenericModel,      # 只认井（有井号的）
+    DB.BuiltInCategory.OST_Conduit,
 ]
 QTO_CAT_IDS = set(int(b) for b in QTO_BICS)
 
@@ -70,6 +75,15 @@ SCHEDULE_SPECS = [
 
 
 # @include _shared/form_fit.py
+# @include _shared/well_config.py
+# @include _shared/xlsx_lite.py
+WCFG = wcfg_load()
+DEPTH_STEP = 500.0         # 井深度按 500 mm 一档汇总（预制井按档订货）
+_HOLES = re.compile(u'(\\d+)\\s*孔')
+PILE_KEYS = (u'松木桩', u'Φ75')
+PAD_KEYS = (u'垫层',)
+# 排管（含雨水沟）：族名以这些前缀开头，或名字里有「排管」「N孔」
+BANK_PREFIXES = (u'TELCO', u'ELV', u'LV-', u'ELE-', u'雨水沟')
 
 
 def _u(x):
@@ -91,11 +105,103 @@ def _eid(x):
             return -1
 
 
-def _is_qto(e):
+def _mark(e):
     try:
-        return e is not None and e.Category is not None and _eid(e.Category.Id) in QTO_CAT_IDS
+        p = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+        return (p.AsString() or u'').strip() if p is not None else u''
+    except Exception:
+        return u''
+
+
+def _is_well(e):
+    """井：常规模型族实例，标记（井号）属于配置里的某个井系列。"""
+    try:
+        return (isinstance(e, DB.FamilyInstance) and _eid(e.Category.Id) == int(DB.BuiltInCategory.OST_GenericModel)
+                and wcfg_series_of(_mark(e), WCFG, True) is not None)
     except Exception:
         return False
+
+
+def _ftname(e):
+    try:
+        s = e.Symbol
+        return _u(s.FamilyName), _u(s.Name)
+    except Exception:
+        try:
+            t = doc.GetElement(e.GetTypeId())
+            return (_u(t.FamilyName) if t is not None else u''), (_u(t.Name) if t is not None else u'')
+        except Exception:
+            return u'', u''
+
+
+def _is_bank(e):
+    """排管（含雨水沟）：结构框架里族名像排管的；真正的梁仍按混凝土/钢材算。"""
+    f, t = _ftname(e)
+    fu = f.upper()
+    if any(fu.startswith(k) for k in BANK_PREFIXES):
+        return True
+    return u'排管' in f or u'排管' in t or bool(_HOLES.search(f + u' ' + t))
+
+
+def _pile_or_pad(e):
+    """结构基础里的松木桩 / 垫层；其他返回 None。"""
+    f, t = _ftname(e)
+    txt = f + u' ' + t + u' ' + _u(e.Name)
+    if any(k in txt for k in PILE_KEYS):
+        return u'松木桩'
+    if any(k in txt for k in PAD_KEYS):
+        return u'垫层'
+    return None
+
+
+def _is_qto(e):
+    try:
+        if e is None or e.Category is None:
+            return False
+        c = _eid(e.Category.Id)
+        if c not in QTO_CAT_IDS:
+            return False
+        if c == int(DB.BuiltInCategory.OST_GenericModel):
+            return _is_well(e)
+        return True
+    except Exception:
+        return False
+
+
+class _QtoFilter(ISelectionFilter):
+    def AllowElement(self, e):
+        return _is_qto(e)
+
+    def AllowReference(self, r, p):
+        return False
+
+
+def _depth_mm(e):
+    """井内深度（mm）：优先「井内深度」参数，没有就用 偏移 − 井底标高。"""
+    p = e.LookupParameter(u'井内深度')
+    if p is not None and p.HasValue and p.StorageType == DB.StorageType.Double and p.AsDouble() > 0:
+        return p.AsDouble() * FT_TO_MM
+    b = e.LookupParameter(u'井底标高')
+    o = e.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
+    if b is not None and b.HasValue and o is not None and o.HasValue:
+        return (o.AsDouble() - b.AsDouble()) * FT_TO_MM
+    return None
+
+
+def _length_m(e):
+    try:
+        loc = e.Location
+        if isinstance(loc, DB.LocationCurve):
+            return loc.Curve.Length * FT_TO_M
+    except Exception:
+        pass
+    try:
+        p = e.get_Parameter(DB.BuiltInParameter.CURVE_ELEM_LENGTH)
+        if p is not None and p.HasValue:
+            return p.AsDouble() * FT_TO_M
+    except Exception:
+        pass
+    return 0.0
 
 
 def _level_name(e):
@@ -130,9 +236,20 @@ def _volume_m3(e):
     p = e.get_Parameter(DB.BuiltInParameter.HOST_VOLUME_COMPUTED)
     if p is None or not p.HasValue:
         p = e.LookupParameter(u'Volume')
-    if p is not None and p.HasValue:
+    if p is not None and p.HasValue and p.AsDouble() > 0:
         return p.AsDouble() * FT3_TO_M3
-    return 0.0
+    try:                                        # 体积参数取不到（嵌套族等）：累加几何实体
+        tot = 0.0
+        for g in e.get_Geometry(DB.Options()):
+            if isinstance(g, DB.Solid):
+                tot += g.Volume
+            elif isinstance(g, DB.GeometryInstance):
+                for x in g.GetInstanceGeometry():
+                    if isinstance(x, DB.Solid):
+                        tot += x.Volume
+        return tot * FT3_TO_M3
+    except Exception:
+        return 0.0
 
 
 def _density(e):
@@ -166,14 +283,20 @@ def _material_name(e):
 
 
 def _pick_elements(sel_ids):
-    """要统计的构件：有选中就用选中的；没有就问整个项目还是当前视图。取消返回 (None, None)。"""
+    """要统计的构件：有选中就用选中的；没有就问：现在框选 / 整个项目 / 当前视图。取消返回 (None, None)。"""
     if sel_ids:
         elems = [e for e in (doc.GetElement(i) for i in sel_ids) if _is_qto(e)]
         return elems, u'框选的构件'
-    options = [u'整个项目', u'当前视图']
-    pick = forms.CommandSwitchWindow.show(options, message=u'没有框选构件，统计哪个范围？')
+    options = [u'现在框选', u'整个项目', u'当前视图']
+    pick = forms.CommandSwitchWindow.show(options, message=u'没有选中构件，统计哪个范围？')
     if not pick:
         return None, None
+    if pick == u'现在框选':
+        try:
+            got = list(uidoc.Selection.PickElementsByRectangle(_QtoFilter(), u'框选要统计的构件（梁柱墙板基础、钢筋、井、排管、导管、松木桩、垫层），框完点 Finish'))
+        except Exception:
+            return None, None
+        return [e for e in got if _is_qto(e)], u'框选的构件'
     if pick == u'当前视图':
         col = DB.FilteredElementCollector(doc, uidoc.ActiveView.Id)
         src = u'当前视图'
@@ -181,13 +304,13 @@ def _pick_elements(sel_ids):
         col = DB.FilteredElementCollector(doc)
         src = u'整个项目'
     flt = DB.ElementMulticategoryFilter(List[DB.BuiltInCategory](QTO_BICS))
-    return list(col.WherePasses(flt).WhereElementIsNotElementType().ToElements()), src
+    return [e for e in col.WherePasses(flt).WhereElementIsNotElementType().ToElements() if _is_qto(e)], src
 
 
 def _quantities(elems):
     """汇总：混凝土（楼层、类别、类型）、钢材（同上，含重量）、钢筋（楼层、直径）。
     构件多时显示进度条（读几何体积较慢），可以取消；取消返回 None（只读，不改模型）。"""
-    res = {'conc': {}, 'steel': {}, 'rebar': {}, 'skipped': 0}
+    res = {'conc': {}, 'steel': {}, 'rebar': {}, 'wells': [], 'banks': {}, 'piles': {}, 'skipped': 0}
     pb = forms.ProgressBar(title=u'正在统计工程量…（点取消可停止）', cancellable=True) if len(elems) > 300 else None
     try:
         for i, e in enumerate(elems):
@@ -225,6 +348,31 @@ def _add_one(e, res):
         row[2] += kg
         return
 
+    c = _eid(e.Category.Id)
+    if c == int(DB.BuiltInCategory.OST_GenericModel):          # 井
+        mk = _mark(e)
+        sr = wcfg_series_of(mk, WCFG, True)
+        f, t = _ftname(e)
+        res['wells'].append((mk, sr[u'label'] if sr else u'其他', f, t, _depth_mm(e), e.Id.Value))
+        return
+    if c == int(DB.BuiltInCategory.OST_Conduit) or (c == int(DB.BuiltInCategory.OST_StructuralFraming) and _is_bank(e)):
+        f, t = _ftname(e)
+        cat = u'导管' if c == int(DB.BuiltInCategory.OST_Conduit) else (u'雨水沟' if f.startswith(u'雨水沟') else u'排管')
+        a = res['banks'].setdefault((cat, f, t), [0, 0.0, 0])
+        a[0] += 1
+        a[1] += _length_m(e)
+        m = _HOLES.search(f + u' ' + t)
+        if m:
+            a[2] = int(m.group(1))
+        return
+    if c == int(DB.BuiltInCategory.OST_StructuralFoundation):
+        kind = _pile_or_pad(e)
+        if kind:
+            f, t = _ftname(e)
+            a = res['piles'].setdefault((kind, (f + u' / ' + t) if (f or t) else _u(e.Name)), [0, 0.0])
+            a[0] += 1
+            a[1] += _volume_m3(e) if kind == u'垫层' else 0.0
+            return
     lvl = _level_name(e)
     cat = _u(e.Category.Name)
     typ = _type_name(e)
@@ -275,64 +423,61 @@ def _table_rows(res):
         (u'钢筋', [u'楼层', u'直径(mm)', u'根数', u'总长(m)', u'重量(kg)'], rebar_rows,
          [u'合计', u'', rebar_sum[0], round(rebar_sum[1], 3), round(rebar_sum[2], 3)]),
     ]
-    summary = {'conc': conc_sum, 'steel': steel_sum, 'rebar': rebar_sum}
+    # ---- 小市政：井、排管导管、桩与垫层（没有的不出标签页）
+    by, detail = {}, []
+    for mk, lab, f, t, d, eid in sorted(res['wells'], key=lambda w: wcfg_well_sort_key(w[0], WCFG)):
+        step = (math.ceil((d - 1e-6) / DEPTH_STEP) * DEPTH_STEP) if d else None
+        by[(lab, f, t, step)] = by.get((lab, f, t, step), 0) + 1
+        detail.append([mk, lab, f, t, round(d) if d else u'', int(step) if step else u'', eid])
+    if by:
+        wrows = [[k[0], k[1], k[2], int(k[3]) if k[3] else u'未取到深度', by[k]] for k in sorted(by, key=lambda k: (k[0], k[1], k[2], k[3] or 0))]
+        tables.append((u'井汇总', [u'系列', u'族', u'类型', u'深度档(mm)', u'数量'], wrows,
+                       [u'合计', u'', u'', u'', len(res['wells'])]))
+        tables.append((u'井明细', [u'井号', u'系列', u'族', u'类型', u'井内深度(mm)', u'深度档(mm)', u'构件ID'], detail, None))
+    if res['banks']:
+        brows, tl, th = [], 0.0, 0.0
+        for k in sorted(res['banks']):
+            n, L, h = res['banks'][k]
+            brows.append([k[0], k[1], k[2], n, round(L, 2), h if h else u'', round(L * h, 1) if h else u''])
+            tl += L
+            th += L * h
+        tables.append((u'排管导管', [u'类别', u'族', u'类型', u'根数', u'总长度(m)', u'孔数', u'孔·米'], brows,
+                       [u'合计', u'', u'', sum(a[0] for a in res['banks'].values()), round(tl, 2), u'', round(th, 1)]))
+    if res['piles']:
+        prows = [[k[0], k[1], v[0], round(v[1], 3) if k[0] == u'垫层' else u''] for k, v in sorted(res['piles'].items())]
+        tables.append((u'桩与垫层', [u'项目', u'族 / 类型', u'数量', u'体积(m³)'], prows, None))
+    summary = {'conc': conc_sum, 'steel': steel_sum, 'rebar': rebar_sum,
+               'wells': len(res['wells']), 'banks': sum(a[0] for a in res['banks'].values()),
+               'piles': sum(v[0] for k, v in res['piles'].items() if k[0] == u'松木桩'),
+               'pads': sum(v[0] for k, v in res['piles'].items() if k[0] == u'垫层')}
     return tables, summary
 
 
 # ============================================================
-# Excel（Excel 2003 XML，Excel 可直接打开）
+# Excel（真 xlsx，标准库直接写，不需要装 Excel）
 # ============================================================
-def _xml_escape(s):
-    s = _u(s)
-    return s.replace(u'&', u'&amp;').replace(u'<', u'&lt;').replace(u'>', u'&gt;').replace(u'"', u'&quot;')
-
-
-def _cell(v, style=None):
-    sa = (u' ss:StyleID="%s"' % style) if style else u''
-    if isinstance(v, bool):
-        v = int(v)
-    if isinstance(v, (int, float)):
-        num = (u'%.3f' % v) if isinstance(v, float) else (u'%d' % v)
-        return u'<Cell%s><Data ss:Type="Number">%s</Data></Cell>' % (sa, num)
-    return u'<Cell%s><Data ss:Type="String">%s</Data></Cell>' % (sa, _xml_escape(v))
-
-
-def _sheet(name, header, rows, total):
-    x = [u'<Worksheet ss:Name="%s"><Table>' % _xml_escape(name)]
-    x.append(u'<Row>' + u''.join(_cell(h, u'h') for h in header) + u'</Row>')
-    for r in rows:
-        x.append(u'<Row>' + u''.join(_cell(v) for v in r) + u'</Row>')
-    x.append(u'<Row>' + u''.join(_cell(v, u'h') for v in total) + u'</Row>')
-    x.append(u'</Table></Worksheet>')
-    return u''.join(x)
-
-
-def _build_xml(tables):
-    head = (u'<?xml version="1.0" encoding="UTF-8"?>\n'
-            u'<?mso-application progid="Excel.Sheet"?>\n'
-            u'<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
-            u'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">\n'
-            u'<Styles><Style ss:ID="h"><Font ss:Bold="1"/>'
-            u'<Interior ss:Color="#D9E1F2" ss:Pattern="Solid"/></Style></Styles>\n')
-    body = [_sheet(name, header, rows, total) for name, header, rows, total in tables]
-    return head + u'\n'.join(body) + u'\n</Workbook>\n'
-
-
 def _write_xlsx(tables, path):
-    """把三张表写到用户选定的路径（不自动保存到别处）。"""
-    with io.open(path, 'w', encoding='utf-8-sig') as f:
-        f.write(_build_xml(tables))
+    """把所有标签页写成一个 xlsx，每页一个工作表。"""
+    sheets = []
+    for name, header, rows, total in tables:
+        data = [list(header)] + [list(r) for r in rows] + ([list(total)] if total else [])
+        widths = []
+        for i in range(len(header)):
+            w = max(len(_u(r[i])) if i < len(r) else 0 for r in data)
+            widths.append(min(max(w * 1.6 + 2, 8), 50))
+        sheets.append((name, data, {'widths': widths, 'header_rows': 1}))
+    xlsx_write(path, sheets)
     return path
 
 
 def _ask_save_path():
     """弹出「另存为」对话框让用户选路径。取消返回 None。"""
     dlg = WF.SaveFileDialog()
-    dlg.Title = u'导出提量表格（Excel 可直接打开）'
-    dlg.Filter = u'Excel 表格 (*.xml)|*.xml'
-    dlg.DefaultExt = u'xml'
+    dlg.Title = u'导出提量表格'
+    dlg.Filter = u'Excel 表格 (*.xlsx)|*.xlsx'
+    dlg.DefaultExt = u'xlsx'
     dlg.AddExtension = True
-    dlg.FileName = u'提量_%s.xml' % time.strftime('%Y%m%d_%H%M')
+    dlg.FileName = u'提量_%s.xlsx' % time.strftime('%Y%m%d_%H%M')
     dlg.InitialDirectory = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments)
     if dlg.ShowDialog() == WF.DialogResult.OK:
         return dlg.FileName
@@ -418,11 +563,11 @@ def _grid(headers, rows, total):
     g.AutoSizeColumnsMode = WF.DataGridViewAutoSizeColumnsMode.AllCells
     for i, h in enumerate(headers):
         g.Columns.Add(u'c%d' % i, _u(h))
-    for r in rows + [total]:
+    for r in rows + ([total] if total else []):
         idx = g.Rows.Add()
         for i, v in enumerate(r):
             g.Rows[idx].Cells[i].Value = v if not isinstance(v, str) else _u(v)
-    if total:
+    if total and g.Rows.Count:
         g.Rows[g.Rows.Count - 1].DefaultCellStyle.Font = SD.Font(g.Font, SD.FontStyle.Bold)
     return g
 
@@ -500,7 +645,7 @@ def main():
         if elems is None:
             return
         if not elems:
-            forms.alert(u"没有找到可统计的构件（梁、柱、墙、基础、楼板、钢筋）。", title=TITLE)
+            forms.alert(u"没有找到可统计的构件（梁柱墙板基础、钢筋、井、排管、导管、松木桩、垫层）。", title=TITLE)
             return
         res = _quantities(elems)
         if res is None:

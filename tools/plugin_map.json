@@ -194,7 +194,7 @@
     },
     "quantity-export": {
       "group": "结构与算量",
-      "status": "proven"
+      "status": "tested"
     },
     "sheet-manager": {
       "group": "图纸视图",
@@ -241,10 +241,6 @@
       "status": "tested"
     },
     "well-list-check": {
-      "group": "井与管线",
-      "status": "tested"
-    },
-    "duct-boq": {
       "group": "井与管线",
       "status": "tested"
     },

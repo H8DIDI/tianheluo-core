@@ -6,7 +6,6 @@
 | 插件 id | 名称 | 版本 | 类型 | 作者 | 许可 |
 |---|---|---|---|---|---|
 | [`control-points`](control-points/) | 控制点坐标表 | 0.1.1 | Python | didi | MIT |
-| [`duct-boq`](duct-boq/) | 排管井工程量表 | 0.1.0 | Python | didi | MIT |
 | [`duct-elev`](duct-elev/) | 排管标高批量调整 | 0.1.0 | Python | didi | MIT |
 | [`duct-snap`](duct-snap/) | 排管贴井内壁 | 0.1.9 | C#（源码在 `plugins/`） | didi | MIT |
 | [`elv-merge`](elv-merge/) | 族类型清洗合并 | 0.2.2 | Python | didi | MIT |
@@ -17,7 +16,7 @@
 | [`pile-cleanup`](pile-cleanup/) | 清理重复松木桩垫层 | 0.2.1 | Python | didi | MIT |
 | [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.4.1 | Python | didi | MIT |
 | [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.2.1 | C#（源码在 `plugins/`） | didi | MIT |
-| [`quantity-export`](quantity-export/) | 一键框选提量导出Excel | 0.2.3 | Python | didi | MIT |
+| [`quantity-export`](quantity-export/) | 框选提量导出Excel（结构 + 井排管） | 0.3.0 | Python | didi | MIT |
 | [`rebar-3d-view`](rebar-3d-view/) | 一键钢筋三维实体显示 | 0.2.0 | Python | didi | MIT |
 | [`rebar-cage`](rebar-cage/) | 一键单构件快速配筋 | 0.3.0 | Python | didi | MIT |
 | [`rfi-pack`](rfi-pack/) | RFI 取证包 | 0.1.0 | Python | didi | MIT |
