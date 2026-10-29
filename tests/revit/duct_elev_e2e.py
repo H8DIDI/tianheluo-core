@@ -108,6 +108,52 @@ try:
         p = x['e'].get_Parameter(B.STRUCTURAL_ELEVATION_AT_TOP)
         if p is not None and p.HasValue:
             check(u'改完 Revit 的顶部高程=%.0f' % x['top'][0], abs(x['top'][0] - p.AsDouble() * FT) < 0.5)
+    # ---- 斜度排管：起点、终点分别设置
+    def run2(mode, v1, v2):
+        plans, mism = n['apply_plan'](allinfo, mode, v1, False, v2, True)
+        check(u'分别设置 写入校验无不符 %s' % mode, not mism)
+        return [n['read_bank'](g['e']) for g in allinfo]
+    allinfo = now
+    now = run2('bottom', 3000.0, 4500.0)
+    check(u'起点管底=3.000、终点管底=4.500（都变成斜的）', all(abs(x['bot'][0] - 3000) < 0.5 and abs(x['bot'][1] - 4500) < 0.5 and x['sloped'] for x in now),
+          u'%s' % [(round(x['bot'][0]), round(x['bot'][1])) for x in now])
+    allinfo = now
+    now = run2('bottom', 2000.0, None)
+    check(u'只填起点：起点管底=2.000，终点保持 4.500', all(abs(x['bot'][0] - 2000) < 0.5 and abs(x['bot'][1] - 4500) < 0.5 for x in now))
+    allinfo = now
+    def exact_tops(xs):
+        """斜度排管的断面高度 read_bank 只能估：这里在回滚的事务里拉平，读 Revit 自己的顶/底高程得精确高度，再算两端的管顶。"""
+        out = []
+        t2 = DB.Transaction(d, u'量精确高度'); t2.Start()
+        try:
+            for x in xs:
+                e = x['e']
+                o0 = e.get_Parameter(B.STRUCTURAL_BEAM_END0_ELEVATION).AsDouble()
+                e.get_Parameter(B.STRUCTURAL_BEAM_END1_ELEVATION).Set(o0)
+                d.Regenerate()
+                h = (e.get_Parameter(B.STRUCTURAL_ELEVATION_AT_TOP).AsDouble() - e.get_Parameter(B.STRUCTURAL_ELEVATION_AT_BOTTOM).AsDouble()) * FT
+                out.append((x['bot'][0] + h, x['bot'][1] + h))
+        finally:
+            t2.RollBack()
+        return out
+    now = run2('top', 6000.0, 6500.0)
+    tops = exact_tops(now)
+    check(u'斜度排管设顶：起点管顶=6.000、终点管顶=6.500（按精确断面高度）', all(abs(a - 6000) < 0.5 and abs(b2 - 6500) < 0.5 for a, b2 in tops),
+          u'%s' % [(round(a), round(b2)) for a, b2 in tops])
+    allinfo = now
+    now = run2('top', None, 5000.0)
+    tops = exact_tops(now)
+    check(u'只填终点：终点管顶=5.000，起点管顶保持 6.000', all(abs(b2 - 5000) < 0.5 and abs(a - 6000) < 0.5 for a, b2 in tops))
+    # ---- write_batch（窗口「框选并写入」背后的整批流程）：只改勾选的系统
+    before = dict((g['e'].Id.Value, (g['s_off'], g['e_off'])) for g in n['collect'](els)[0].get(u'TELCO', []) + [x for k, v in n['collect'](els)[0].items() if k != u'TELCO' for x in v])
+    st = {'mode': 'bottom', 'sys': set([u'TELCO']), 'per_end': True, 'vs': 7000.0, 've': 8000.0, 'v1': None, 'flatten': False, 'confirm': False}
+    note = n['write_batch'](els, st)
+    LOG.append(u'  write_batch：%s' % note)
+    g2, _ = n['collect'](els)
+    tel = g2.get(u'TELCO', [])
+    others = [g for k, v in g2.items() if k != u'TELCO' for g in v]
+    check(u'write_batch：TELCO 起点管底=7.000、终点=8.000', bool(tel) and all(abs(g['bot'][0] - 7000) < 0.5 and abs(g['bot'][1] - 8000) < 0.5 for g in tel))
+    check(u'write_batch：没勾选的系统没动', all(abs(g['s_off'] - before[g['e'].Id.Value][0]) < 0.01 and abs(g['e_off'] - before[g['e'].Id.Value][1]) < 0.01 for g in others))
 except Exception:
     LOG.append(traceback.format_exc())
     RES['f'] += 1

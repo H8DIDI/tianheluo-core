@@ -42,6 +42,5 @@ class _WFProxy(object):
 
 
 n['WF'] = _WFProxy()
-els = [e for e in DB.FilteredElementCollector(d).OfCategory(DB.BuiltInCategory.OST_StructuralFraming).WhereElementIsNotElementType()][:400]
-groups, bad = n['collect'](els)
-n['ask'](groups)
+st = {'mode': 'bottom', 'sys': None, 'note': u'已改 12 根（已选中，Ctrl+Z 可撤销）。示例：起点 管底 3.140 → 3.000、管顶 4.250 → 4.110；终点 管底 3.140 → 3.000、管顶 4.250 → 4.110 m'}
+n['main_dialog'](st, n['scan_systems']())
