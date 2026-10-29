@@ -497,7 +497,7 @@ def _num(txt):
     return float(t) * 1000.0 if t else None
 
 
-def main_dialog(st, systems):
+def main_dialog(st, systems, from_sel=False):
     """设置窗口（保持在最前面）。返回动作 'pick' 框选并写入 / 'sel' 写入当前选中的 / 'close'。设置存在 st 里，下次打开还在。"""
     f = WF.Form()
     f.Text = TITLE
@@ -517,7 +517,8 @@ def main_dialog(st, systems):
     f.Controls.Add(stl)
 
     lab = WF.Label()
-    lab.Text = u'只改勾上的系统（系统 = 族名前缀；注释里有线路名的分开算）：'
+    lab.Text = (u'你选中的排管，按系统分（只改勾上的；系统 = 族名前缀，注释里有线路名的分开算）：' if from_sel
+                else u'只改勾上的系统（系统 = 族名前缀；注释里有线路名的分开算），下面是整个项目里的：')
     lab.Location = SD.Point(12, 64)
     lab.Size = SD.Size(716, 20)
     lab.Anchor = tlr
@@ -533,7 +534,7 @@ def main_dialog(st, systems):
     lv.Size = SD.Size(716, 130)
     lv.Anchor = A.Top | A.Left | A.Right | A.Bottom
     lv.Columns.Add(u'系统', 440)
-    lv.Columns.Add(u'项目里共', 100)
+    lv.Columns.Add(u'选中' if from_sel else u'项目里共', 100)
     on = st.get('sys')
     for k in sorted(systems):
         it = WF.ListViewItem(k)
@@ -689,7 +690,9 @@ def main_dialog(st, systems):
             f.Close()
         return h
     _btn(u'框选排管并写入', 12, 568, 170, _go('pick'), A.Bottom | A.Left)
-    _btn(u'写入当前选中的', 190, 568, 150, _go('sel'), A.Bottom | A.Left)
+    bsel = _btn(u'写入当前选中的', 190, 568, 150, _go('sel'), A.Bottom | A.Left)
+    if from_sel:
+        f.AcceptButton = bsel
     b = _btn(u'关闭', 628, 568, 100, lambda s_, a_: f.Close(), A.Bottom | A.Right)
     f.CancelButton = b
     ff_fit(f)
@@ -831,10 +834,21 @@ def main():
             forms.alert(u'项目里没有结构框架（排管）。', title=TITLE)
             return
         st = {'mode': 'bottom', 'sys': None}
+        # 点插件时已经选中了排管：窗口里只列选中的这些，「写入当前选中的」是默认按钮
+        pre = {}
+        try:
+            for i in uidoc.Selection.GetElementIds():
+                e = doc.GetElement(i)
+                if e is not None and e.Category is not None and _idv(e.Category.Id) == FRAMING:
+                    k = system_of(e)
+                    pre[k] = pre.get(k, 0) + 1
+        except Exception:
+            pre = {}
         guard = 0
         while guard < 500:
             guard += 1
-            act = main_dialog(st, systems)
+            act = main_dialog(st, pre or systems, bool(pre))
+            pre = {}
             if act == 'close':
                 break
             try:
