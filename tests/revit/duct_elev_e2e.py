@@ -80,47 +80,11 @@ try:
         if p is not None and p.HasValue:
             check(u'顶高程与 Revit 一致 %s' % g['sys'], abs(g['top'][0] - p.AsDouble() * FT) < 0.5, u'%.1f vs %.1f' % (g['top'][0], p.AsDouble() * FT))
 
-    def run(mode, val, flat):
-        plans, mism = n['apply_plan'](allinfo, mode, val, flat)
-        check(u'写入校验无不符 %s' % mode, not mism)
-        out = []
-        for g in allinfo:
-            now = n['read_bank'](g['e'])
-            out.append(now)
-        return out
-
-    # 设底标高 5.000 m（不拉平）
-    now = run('bottom', 5000.0, False)
-    check(u'设底 5.000：每根较低底端=5000', all(abs(min(x['bot']) - 5000.0) < 0.5 for x in now), u'%s' % [round(min(x['bot'])) for x in now])
-    check(u'设底：坡度保持', all(x['sloped'] == g['sloped'] and abs(abs(x['bot'][0] - x['bot'][1]) - abs(g['bot'][0] - g['bot'][1])) < 0.5 for x, g in zip(now, allinfo)))
-    allinfo = now
-    # 设顶标高 4.000 m（拉平）
-    now = run('top', 4000.0, True)
-    check(u'设顶 4.000 拉平：两端顶=4000 且无坡', all(abs(x['top'][0] - 4000.0) < 0.5 and abs(x['top'][1] - 4000.0) < 0.5 and not x['sloped'] for x in now),
-          u'%s' % [(round(x['top'][0]), round(x['top'][1])) for x in now])
-    allinfo = now
-    # 整体升降 -0.5 m
-    before = [(x['bot'][0], x['bot'][1]) for x in allinfo]
-    now = run('shift', -500.0, False)
-    check(u'整体降 0.5 m', all(abs(x['bot'][0] - (b[0] - 500)) < 0.5 and abs(x['bot'][1] - (b[1] - 500)) < 0.5 for x, b in zip(now, before)))
-    # 顶部高程读数（Revit 自己的）与我们的一致
-    for x in now:
-        p = x['e'].get_Parameter(B.STRUCTURAL_ELEVATION_AT_TOP)
-        if p is not None and p.HasValue:
-            check(u'改完 Revit 的顶部高程=%.0f' % x['top'][0], abs(x['top'][0] - p.AsDouble() * FT) < 0.5)
-    # ---- 斜度排管：起点、终点分别设置
-    def run2(mode, v1, v2):
-        plans, mism = n['apply_plan'](allinfo, mode, v1, False, v2, True)
-        check(u'分别设置 写入校验无不符 %s' % mode, not mism)
+    def run(v):
+        plans, same, mism = n['apply_plan'](allinfo, v)
+        check(u'写入校验无不符 %s' % sorted(k for k in v if v[k] is not None), not mism)
         return [n['read_bank'](g['e']) for g in allinfo]
-    allinfo = now
-    now = run2('bottom', 3000.0, 4500.0)
-    check(u'起点管底=3.000、终点管底=4.500（都变成斜的）', all(abs(x['bot'][0] - 3000) < 0.5 and abs(x['bot'][1] - 4500) < 0.5 and x['sloped'] for x in now),
-          u'%s' % [(round(x['bot'][0]), round(x['bot'][1])) for x in now])
-    allinfo = now
-    now = run2('bottom', 2000.0, None)
-    check(u'只填起点：起点管底=2.000，终点保持 4.500', all(abs(x['bot'][0] - 2000) < 0.5 and abs(x['bot'][1] - 4500) < 0.5 for x in now))
-    allinfo = now
+
     def exact_tops(xs):
         """斜度排管的断面高度 read_bank 只能估：这里在回滚的事务里拉平，读 Revit 自己的顶/底高程得精确高度，再算两端的管顶。"""
         out = []
@@ -136,24 +100,54 @@ try:
         finally:
             t2.RollBack()
         return out
-    now = run2('top', 6000.0, 6500.0)
-    tops = exact_tops(now)
-    check(u'斜度排管设顶：起点管顶=6.000、终点管顶=6.500（按精确断面高度）', all(abs(a - 6000) < 0.5 and abs(b2 - 6500) < 0.5 for a, b2 in tops),
-          u'%s' % [(round(a), round(b2)) for a, b2 in tops])
+
+    # 两端管底都 5.000（斜的也被拉平）
+    now = run({'bs': 5000.0, 'be': 5000.0})
+    check(u'管底两端 5.000：全部水平且=5000', all(abs(x['bot'][0] - 5000) < 0.5 and abs(x['bot'][1] - 5000) < 0.5 and not x['sloped'] for x in now),
+          u'%s' % [(round(x['bot'][0]), round(x['bot'][1])) for x in now])
     allinfo = now
-    now = run2('top', None, 5000.0)
+    # 两端管顶都 4.000
+    now = run({'ts': 4000.0, 'te': 4000.0})
+    check(u'管顶两端 4.000：两端顶=4000', all(abs(x['top'][0] - 4000) < 0.5 and abs(x['top'][1] - 4000) < 0.5 for x in now),
+          u'%s' % [(round(x['top'][0]), round(x['top'][1])) for x in now])
+    allinfo = now
+    # 整体升降 -0.5 m
+    before = [(x['bot'][0], x['bot'][1]) for x in allinfo]
+    now = run({'shift': -500.0})
+    check(u'整体降 0.5 m', all(abs(x['bot'][0] - (b0[0] - 500)) < 0.5 and abs(x['bot'][1] - (b0[1] - 500)) < 0.5 for x, b0 in zip(now, before)))
+    for x in now:
+        p = x['e'].get_Parameter(B.STRUCTURAL_ELEVATION_AT_TOP)
+        if p is not None and p.HasValue:
+            check(u'改完 Revit 的顶部高程=%.0f' % x['top'][0], abs(x['top'][0] - p.AsDouble() * FT) < 0.5)
+    # ---- 斜度：起点、终点各填各的
+    allinfo = now
+    now = run({'bs': 3000.0, 'be': 4500.0})
+    check(u'起点管底=3.000、终点管底=4.500（都变成斜的）', all(abs(x['bot'][0] - 3000) < 0.5 and abs(x['bot'][1] - 4500) < 0.5 and x['sloped'] for x in now))
+    allinfo = now
+    now = run({'bs': 2000.0})
+    check(u'只填起点：起点管底=2.000，终点保持 4.500', all(abs(x['bot'][0] - 2000) < 0.5 and abs(x['bot'][1] - 4500) < 0.5 for x in now))
+    allinfo = now
+    now = run({'ts': 6000.0, 'te': 6500.0})
     tops = exact_tops(now)
-    check(u'只填终点：终点管顶=5.000，起点管顶保持 6.000', all(abs(b2 - 5000) < 0.5 and abs(a - 6000) < 0.5 for a, b2 in tops))
-    # ---- write_batch（窗口「框选并写入」背后的整批流程）：只改勾选的系统
-    before = dict((g['e'].Id.Value, (g['s_off'], g['e_off'])) for g in n['collect'](els)[0].get(u'TELCO', []) + [x for k, v in n['collect'](els)[0].items() if k != u'TELCO' for x in v])
-    st = {'mode': 'bottom', 'sys': set([u'TELCO']), 'per_end': True, 'vs': 7000.0, 've': 8000.0, 'v1': None, 'flatten': False, 'confirm': False}
-    note = n['write_batch'](els, st)
+    check(u'斜度排管设顶：起点管顶=6.000、终点管顶=6.500（按精确断面高度）', all(abs(a1 - 6000) < 0.5 and abs(b2 - 6500) < 0.5 for a1, b2 in tops),
+          u'%s' % [(round(a1), round(b2)) for a1, b2 in tops])
+    allinfo = now
+    now = run({'te': 5000.0})
+    tops = exact_tops(now)
+    check(u'只填终点管顶：终点=5.000，起点管顶保持 6.000', all(abs(b2 - 5000) < 0.5 and abs(a1 - 6000) < 0.5 for a1, b2 in tops))
+    allinfo = now
+    now = run({'bs': 1000.0, 'te': 3000.0})
+    tops = exact_tops(now)
+    check(u'起点填管底、终点填管顶（混着填）', all(abs(x['bot'][0] - 1000) < 0.5 for x in now) and all(abs(b2 - 3000) < 0.5 for a1, b2 in tops))
+    # ---- write_batch（窗口「应用」背后的整批流程）：用 collect 的结果
+    groups2, _ = n['collect'](els)
+    infos = [g for k in groups2 for g in groups2[k]]
+    note = n['write_batch'](infos, {'bs': 7000.0, 'be': 8000.0})
     LOG.append(u'  write_batch：%s' % note)
-    g2, _ = n['collect'](els)
-    tel = g2.get(u'TELCO', [])
-    others = [g for k, v in g2.items() if k != u'TELCO' for g in v]
-    check(u'write_batch：TELCO 起点管底=7.000、终点=8.000', bool(tel) and all(abs(g['bot'][0] - 7000) < 0.5 and abs(g['bot'][1] - 8000) < 0.5 for g in tel))
-    check(u'write_batch：没勾选的系统没动', all(abs(g['s_off'] - before[g['e'].Id.Value][0]) < 0.01 and abs(g['e_off'] - before[g['e'].Id.Value][1]) < 0.01 for g in others))
+    g3, _ = n['collect'](els)
+    check(u'write_batch：全部起点管底=7.000、终点=8.000', all(abs(g['bot'][0] - 7000) < 0.5 and abs(g['bot'][1] - 8000) < 0.5 for k in g3 for g in g3[k]))
+    note2 = n['write_batch']([g for k in g3 for g in g3[k]], {'bs': 7000.0, 'be': 8000.0})
+    check(u'write_batch：再写同样的值 → 提示本来就在目标上', u'本来就在' in note2, note2[:40])
 except Exception:
     LOG.append(traceback.format_exc())
     RES['f'] += 1

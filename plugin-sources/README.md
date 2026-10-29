@@ -6,7 +6,7 @@
 | 插件 id | 名称 | 版本 | 类型 | 作者 | 许可 |
 |---|---|---|---|---|---|
 | [`control-points`](control-points/) | 控制点坐标表 | 0.1.1 | Python | didi | MIT |
-| [`duct-elev`](duct-elev/) | 排管标高批量调整 | 0.2.1 | Python | didi | MIT |
+| [`duct-elev`](duct-elev/) | 排管标高批量调整 | 0.2.2 | Python | didi | MIT |
 | [`duct-snap`](duct-snap/) | 排管贴井内壁 | 0.1.9 | C#（源码在 `plugins/`） | didi | MIT |
 | [`elv-merge`](elv-merge/) | 族类型清洗合并 | 0.2.2 | Python | didi | MIT |
 | [`export-dwg`](export-dwg/) | 一键导出图纸DWG/PDF | 0.5.0 | Python | didi | MIT |

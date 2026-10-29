@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 __title__ = '排管标高批量调整'
-__doc__ = ('框选一批排管（结构框架），按系统（TELCO、ELV、LV、ELE-11KV…）批量改标高：\n'
-           '① 设底标高：管底到某个标高；② 设顶标高：管顶到某个标高（断面高度不同的排管顶对齐）；③ 整体升降：整体抬高/降低一个量。\n'
-           '有斜度的排管可以「起点、终点分别设置」：两端各写一个标高；只写一端，另一端不动。也可以只写一个值：保持坡度整体平移，或拉平成水平。\n'
-           '窗口保持在最前面，设置一次可以反复「框选 → 写入」，勾上「连续模式」框完一批马上框下一批，按 Esc 回窗口。\n'
+__doc__ = ('改你选中的排管（结构框架）的标高：先选中排管再点插件（没选就先框选一次），窗口里直接看到每个系统当前的起点/终点管底、管顶标高，\n'
+           '想改哪个就填哪个（留空不改）：底标高起点/终点、顶标高起点/终点，或者整体升降一个量。斜度排管两端各填各的；水平排管只填起点，终点自动同值。\n'
+           '改完窗口不关，数字刷新，可以接着改、或点「重新框选排管」换一批。\n'
            '为什么「顶部高程」「底部高程」是灰的：这两个是 Revit 算出来的只读值（有坡度的排管干脆是空的），不能直接输入。'
-           '本插件改的是真正能改的「起点/终点标高偏移」，按排管自己的断面高度和 Z 轴对正换算，所以不论族怎么做的都能调。\n'
-           '整次一个事务，Ctrl+Z 可撤销；只改窗口里勾选的系统。')
+           '本插件改的是真正能改的「起点/终点标高偏移」，按排管自己的断面高度和 Z 轴对正换算。整次一个事务，Ctrl+Z 可撤销。')
 
 import re
 import traceback
@@ -427,23 +425,21 @@ def read_bank(e):
             'sloped': abs(s_off - e_off) > TOL}
 
 
-def plan_change(info, mode, value, flatten, value2=None, per_end=False):
-    """算新的起点/终点偏移（mm）。mode：'bottom' 管底、'top' 管顶、'shift' 整体升降。
-    单值（per_end=False）：bottom/top 的 value 是目标标高；有坡度且不拉平 → 整体平移，让较低的管底（设底）/较高的管顶（设顶）落在目标上；拉平 → 两端都到目标。
-    分别设置（per_end=True）：value = 起点标高，value2 = 终点标高；某一端是 None 就不动那一端。返回 (新起点偏移, 新终点偏移)。"""
-    b0, b1 = info['bot']
-    t0, t1 = info['top']
-    if mode == 'shift':
-        return info['s_off'] + value, info['e_off'] + value
-    cur0, cur1 = (b0, b1) if mode == 'bottom' else (t0, t1)
-    if per_end:
-        d0 = (value - cur0) if value is not None else 0.0
-        d1 = (value2 - cur1) if value2 is not None else 0.0
-    elif flatten:
-        d0, d1 = value - cur0, value - cur1
-    else:
-        d0 = d1 = value - (min(cur0, cur1) if mode == 'bottom' else max(cur0, cur1))
-    return info['s_off'] + d0, info['e_off'] + d1
+def plan_vals(info, v):
+    """算新的起点/终点偏移（mm）。v：{'bs','be' 管底起点/终点标高, 'ts','te' 管顶起点/终点标高, 'shift' 整体升降}，None = 不改。
+    同一端的管底、管顶只会填一个（窗口里拦住了）。返回 (新起点偏移, 新终点偏移)。"""
+    sh = v.get('shift') or 0.0
+    ns = info['s_off'] + sh
+    ne = info['e_off'] + sh
+    if v.get('bs') is not None:
+        ns += v['bs'] - info['bot'][0]
+    elif v.get('ts') is not None:
+        ns += v['ts'] - info['top'][0]
+    if v.get('be') is not None:
+        ne += v['be'] - info['bot'][1]
+    elif v.get('te') is not None:
+        ne += v['te'] - info['top'][1]
+    return ns, ne
 
 
 def collect(elems):
@@ -483,128 +479,61 @@ def pick_elements():
         return None
 
 
-def scan_systems():
-    """整个项目里的排管系统和数量：{系统: 根数}。"""
-    cnt = {}
-    for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_StructuralFraming).WhereElementIsNotElementType():
-        k = system_of(e)
-        cnt[k] = cnt.get(k, 0) + 1
-    return cnt
-
-
 def _num(txt):
     t = (txt or u'').strip().replace(u'，', u'.').replace(u',', u'.')
     return float(t) * 1000.0 if t else None
 
 
-def main_dialog(st, systems, from_sel=False):
-    """设置窗口（保持在最前面）。返回动作 'pick' 框选并写入 / 'sel' 写入当前选中的 / 'close'。设置存在 st 里，下次打开还在。"""
+def _rg(vals):
+    lo, hi = min(vals) / 1000.0, max(vals) / 1000.0
+    return u'%.3f' % lo if abs(hi - lo) < 0.0005 else u'%.3f ~ %.3f' % (lo, hi)
+
+
+def main_dialog(st, groups):
+    """窗口（保持在最前面）：看选中排管当前的标高，填要改的，点应用。返回 'apply' / 'pick' / 'close'；填的数在 st 里，下次打开还在。"""
     f = WF.Form()
     f.Text = TITLE
     f.TopMost = True
     f.StartPosition = WF.FormStartPosition.CenterScreen
-    f.ClientSize = SD.Size(740, 612)
-    f.MinimumSize = SD.Size(740, 612)
+    f.ClientSize = SD.Size(780, 470)
+    f.MinimumSize = SD.Size(780, 470)
     f.Font = SD.Font(u'Microsoft YaHei UI', 9.0)
     A = WF.AnchorStyles
-    tlr = A.Top | A.Left | A.Right
+    n = sum(len(v) for v in groups.values())
 
     stl = WF.Label()
-    stl.Text = st.get('note') or u'设置好后点「框选排管并写入」。窗口会在框选时暂时收起，写完自动回来，设置保留。'
+    stl.Text = st.get('note') or (u'选中的 %d 根排管（按系统分）。在下面填要改的标高，留空的不改，点「应用到选中的排管」。' % n)
     stl.Location = SD.Point(12, 8)
-    stl.Size = SD.Size(716, 52)
-    stl.Anchor = tlr
+    stl.Size = SD.Size(756, 40)
+    stl.Anchor = A.Top | A.Left | A.Right
     f.Controls.Add(stl)
-
-    lab = WF.Label()
-    lab.Text = (u'你选中的排管，按系统分（只改勾上的；系统 = 族名前缀，注释里有线路名的分开算）：' if from_sel
-                else u'只改勾上的系统（系统 = 族名前缀；注释里有线路名的分开算），下面是整个项目里的：')
-    lab.Location = SD.Point(12, 64)
-    lab.Size = SD.Size(716, 20)
-    lab.Anchor = tlr
-    f.Controls.Add(lab)
 
     lv = WF.ListView()
     lv.View = WF.View.Details
-    lv.CheckBoxes = True
     lv.FullRowSelect = True
     lv.GridLines = True
-    lv.HideSelection = False
-    lv.Location = SD.Point(12, 86)
-    lv.Size = SD.Size(716, 130)
+    lv.Location = SD.Point(12, 52)
+    lv.Size = SD.Size(756, 140)
     lv.Anchor = A.Top | A.Left | A.Right | A.Bottom
-    lv.Columns.Add(u'系统', 440)
-    lv.Columns.Add(u'选中' if from_sel else u'项目里共', 100)
-    on = st.get('sys')
-    for k in sorted(systems):
+    for t, w in ((u'系统', 230), (u'根数', 50), (u'起点管底', 100), (u'终点管底', 100), (u'起点管顶', 100), (u'终点管顶', 100)):
+        lv.Columns.Add(t, w)
+    for k in sorted(groups):
+        gs = groups[k]
         it = WF.ListViewItem(k)
-        it.Checked = True if on is None else (k in on)
-        it.SubItems.Add(u'%d 根' % systems[k])
+        it.SubItems.Add(u'%d' % len(gs))
+        it.SubItems.Add(_rg([g['bot'][0] for g in gs]))
+        it.SubItems.Add(_rg([g['bot'][1] for g in gs]))
+        it.SubItems.Add(_rg([g['top'][0] for g in gs]))
+        it.SubItems.Add(_rg([g['top'][1] for g in gs]))
         lv.Items.Add(it)
     f.Controls.Add(lv)
 
-    def _btn(text, x, y, w, handler, anchor=A.Bottom | A.Left):
-        b = WF.Button()
-        b.Text = text
-        b.Location = SD.Point(x, y)
-        b.Size = SD.Size(w, 28)
-        b.Anchor = anchor
-        b.Click += handler
-        f.Controls.Add(b)
-        return b
-
-    def _all(v):
-        def h(s_, a_):
-            for it in lv.Items:
-                it.Checked = v
-        return h
-    _btn(u'全选', 12, 222, 70, _all(True), A.Top | A.Left)
-    _btn(u'全不选', 88, 222, 70, _all(False), A.Top | A.Left)
-
     gb = WF.GroupBox()
-    gb.Text = u'怎么调'
-    gb.Location = SD.Point(12, 256)
-    gb.Size = SD.Size(716, 236)
+    gb.Text = u'改成（单位：米，留空 = 不改）'
+    gb.Location = SD.Point(12, 200)
+    gb.Size = SD.Size(756, 176)
     gb.Anchor = A.Bottom | A.Left | A.Right
     f.Controls.Add(gb)
-
-    pm = WF.Panel()                      # 单选按钮要分两组，各放各的容器里
-    pm.Location = SD.Point(10, 20)
-    pm.Size = SD.Size(280, 100)
-    gb.Controls.Add(pm)
-    pv = WF.Panel()
-    pv.Location = SD.Point(290, 20)
-    pv.Size = SD.Size(240, 76)
-    gb.Controls.Add(pv)
-    rb = []
-    for i, txt in enumerate((u'设底标高（管底到）', u'设顶标高（管顶到）', u'整体升降（正数抬高、负数降低）')):
-        r = WF.RadioButton()
-        r.Text = txt
-        r.Location = SD.Point(4, 6 + i * 28)
-        r.Size = SD.Size(262, 22)
-        pm.Controls.Add(r)
-        rb.append(r)
-    rb[{'bottom': 0, 'top': 1, 'shift': 2}.get(st.get('mode', 'bottom'), 0)].Checked = True
-
-    rs = WF.RadioButton()
-    rs.Text = u'一个值（两端同值，或整体平移）'
-    rs.Location = SD.Point(10, 6)
-    rs.Size = SD.Size(228, 22)
-    pv.Controls.Add(rs)
-    rp = WF.RadioButton()
-    rp.Text = u'起点、终点分别设置（斜度排管）'
-    rp.Location = SD.Point(10, 42)
-    rp.Size = SD.Size(228, 22)
-    pv.Controls.Add(rp)
-    (rp if st.get('per_end') else rs).Checked = True
-
-    def _tb(x, y, w, txt):
-        t = WF.TextBox()
-        t.Location = SD.Point(x, y)
-        t.Size = SD.Size(w, 24)
-        t.Text = txt or u''
-        gb.Controls.Add(t)
-        return t
 
     def _lb(x, y, w, txt):
         l = WF.Label()
@@ -612,92 +541,87 @@ def main_dialog(st, systems, from_sel=False):
         l.Location = SD.Point(x, y)
         l.Size = SD.Size(w, 20)
         gb.Controls.Add(l)
-        return l
-    tb1 = _tb(540, 24, 90, st.get('t1'))
-    _lb(636, 28, 60, u'米（m）')
-    _lb(320, 94, 46, u'起点')
-    tbs = _tb(368, 90, 90, st.get('ts'))
-    _lb(468, 94, 46, u'终点')
-    tbe = _tb(516, 90, 90, st.get('te'))
-    _lb(612, 94, 60, u'米（m）')
-    _lb(320, 122, 380, u'只填一端，另一端保持不动。起点/终点按每根排管自己的绘制方向，多根一起写时请只框方向一致的一段。')
-    gb.Controls[gb.Controls.Count - 1].Size = SD.Size(380, 40)
 
-    fl = WF.CheckBox()
-    fl.Text = u'一个值时：有坡度的排管拉平成水平（不勾：保持坡度整体平移，较低的管底/较高的管顶落在目标上）'
-    fl.Location = SD.Point(14, 168)
-    fl.Size = SD.Size(690, 22)
-    fl.Checked = bool(st.get('flatten'))
-    gb.Controls.Add(fl)
-    nt = WF.Label()
-    nt.Text = u'标高读数同属性里的「底部高程/顶部高程」。断面高度固定：管底 + 断面高 = 管顶。把整段连着的排管都框上，接头处才不会错位。'
-    nt.Location = SD.Point(14, 194)
-    nt.Size = SD.Size(690, 34)
-    gb.Controls.Add(nt)
+    def _tb(x, y, key):
+        t = WF.TextBox()
+        t.Location = SD.Point(x, y)
+        t.Size = SD.Size(100, 24)
+        t.Text = st.get(key) or u''
+        gb.Controls.Add(t)
+        return t
+    _lb(14, 31, 90, u'管底标高')
+    _lb(110, 31, 40, u'起点')
+    tbs = _tb(152, 28, 'bs')
+    _lb(266, 31, 40, u'终点')
+    tbe = _tb(308, 28, 'be')
+    _lb(14, 67, 90, u'管顶标高')
+    _lb(110, 67, 40, u'起点')
+    tts = _tb(152, 64, 'ts')
+    _lb(266, 67, 40, u'终点')
+    tte = _tb(308, 64, 'te')
+    _lb(14, 103, 90, u'整体升降')
+    tsh = _tb(152, 100, 'sh')
+    _lb(266, 103, 200, u'正数抬高、负数降低')
+    same = WF.CheckBox()
+    same.Text = u'只填起点（或终点）时，另一端也设成同一个值（水平排管用；斜度排管请两端都填，或取消勾选只改一端）'
+    same.Location = SD.Point(14, 132)
+    same.Size = SD.Size(730, 38)
+    same.Checked = st.get('same', True)
+    gb.Controls.Add(same)
 
-    ck = WF.CheckBox()
-    ck.Text = u'连续模式：写完马上框下一批（按 Esc 回到窗口）'
-    ck.Location = SD.Point(14, 504)
-    ck.Size = SD.Size(380, 22)
-    ck.Anchor = A.Bottom | A.Left
-    ck.Checked = bool(st.get('continuous'))
-    f.Controls.Add(ck)
-    cf = WF.CheckBox()
-    cf.Text = u'写入前确认'
-    cf.Location = SD.Point(420, 504)
-    cf.Size = SD.Size(200, 22)
-    cf.Anchor = A.Bottom | A.Left
-    cf.Checked = bool(st.get('confirm'))
-    f.Controls.Add(cf)
-
-    def _refresh(s_=None, a_=None):
-        shift = rb[2].Checked
-        rs.Enabled = rp.Enabled = not shift
-        one = shift or rs.Checked
-        tb1.Enabled = one
-        tbs.Enabled = tbe.Enabled = (not shift) and rp.Checked
-        fl.Enabled = (not shift) and rs.Checked
-    for c in rb + [rs, rp]:
-        c.CheckedChanged += _refresh
-    _refresh()
-
+    def _btn(text, x, w, handler, anchor):
+        b = WF.Button()
+        b.Text = text
+        b.Location = SD.Point(x, 424)
+        b.Size = SD.Size(w, 30)
+        b.Anchor = anchor
+        b.Click += handler
+        f.Controls.Add(b)
+        return b
     res = {'act': 'close'}
 
     def _go(act):
         def h(s_, a_):
-            names = set(it.Text for it in lv.Items if it.Checked)
-            if not names:
-                WF.MessageBox.Show(u'至少勾一个系统。', TITLE)
+            if act == 'close':
+                f.Close()
                 return
-            mode = 'bottom' if rb[0].Checked else ('top' if rb[1].Checked else 'shift')
-            per = (mode != 'shift') and rp.Checked
-            try:
-                v1, vs, ve = _num(tb1.Text), _num(tbs.Text), _num(tbe.Text)
-            except Exception:
-                WF.MessageBox.Show(u'请输入数字（单位米）。', TITLE)
-                return
-            if per:
-                if vs is None and ve is None:
-                    WF.MessageBox.Show(u'起点、终点至少填一个。', TITLE)
+            st.update({'bs': tbs.Text, 'be': tbe.Text, 'ts': tts.Text, 'te': tte.Text, 'sh': tsh.Text, 'same': same.Checked})
+            if act == 'apply':
+                try:
+                    vals = dict((k, _num(t.Text)) for k, t in (('bs', tbs), ('be', tbe), ('ts', tts), ('te', tte), ('shift', tsh)))
+                except Exception:
+                    WF.MessageBox.Show(u'请输入数字（单位米）。', TITLE)
                     return
-            elif v1 is None:
-                WF.MessageBox.Show(u'请输入数值（单位米）。', TITLE)
-                return
-            st.update({'sys': names, 'mode': mode, 'per_end': per, 't1': tb1.Text, 'ts': tbs.Text, 'te': tbe.Text,
-                       'flatten': fl.Checked, 'continuous': ck.Checked, 'confirm': cf.Checked,
-                       'v1': v1, 'vs': vs, 've': ve})
+                if all(v is None for v in vals.values()):
+                    WF.MessageBox.Show(u'没有填要改的标高。', TITLE)
+                    return
+                if vals['shift'] is not None and any(vals[k] is not None for k in ('bs', 'be', 'ts', 'te')):
+                    WF.MessageBox.Show(u'「整体升降」不能和管底/管顶标高一起填，分两次改。', TITLE)
+                    return
+                if (vals['bs'] is not None and vals['ts'] is not None) or (vals['be'] is not None and vals['te'] is not None):
+                    WF.MessageBox.Show(u'同一端的管底和管顶只能填一个（断面高度固定，管底 + 断面高 = 管顶）。', TITLE)
+                    return
+                if same.Checked and vals['shift'] is None:           # 只填一端：另一端同值
+                    for a, b, c, d_ in (('bs', 'be', 'ts', 'te'),):
+                        if vals['bs'] is not None and vals['be'] is None and vals['te'] is None:
+                            vals['be'] = vals['bs']
+                        elif vals['be'] is not None and vals['bs'] is None and vals['ts'] is None:
+                            vals['bs'] = vals['be']
+                        if vals['ts'] is not None and vals['te'] is None and vals['be'] is None:
+                            vals['te'] = vals['ts']
+                        elif vals['te'] is not None and vals['ts'] is None and vals['bs'] is None:
+                            vals['ts'] = vals['te']
+                st['vals'] = vals
             res['act'] = act
             f.Close()
         return h
-    _btn(u'框选排管并写入', 12, 568, 170, _go('pick'), A.Bottom | A.Left)
-    bsel = _btn(u'写入当前选中的', 190, 568, 150, _go('sel'), A.Bottom | A.Left)
-    if from_sel:
-        f.AcceptButton = bsel
-    b = _btn(u'关闭', 628, 568, 100, lambda s_, a_: f.Close(), A.Bottom | A.Right)
-    f.CancelButton = b
+    ba = _btn(u'应用到选中的排管', 12, 190, _go('apply'), A.Bottom | A.Left)
+    _btn(u'重新框选排管', 210, 150, _go('pick'), A.Bottom | A.Left)
+    bc = _btn(u'关闭', 668, 100, _go('close'), A.Bottom | A.Right)
+    f.AcceptButton = ba
+    f.CancelButton = bc
     ff_fit(f)
     f.ShowDialog()
-    st['sys'] = set(it.Text for it in lv.Items if it.Checked)
     return res['act']
 
 
@@ -726,19 +650,24 @@ def _refine(info):
     p1.Set(info['e_off'] / FT)
 
 
-def apply_plan(infos, mode, value, flatten, value2=None, per_end=False):
-    """一个事务把这批排管改到位；出错整体回滚。infos 是 read_bank 的结果。返回 (实际改的 [(info, 新起点偏移, 新终点偏移)], 校验不符 [(图元, 说明)])。"""
+def apply_plan(infos, v):
+    """一个事务把这批排管改到位；出错整体回滚。infos 是 read_bank 的结果，v 见 plan_vals。
+    返回 (改了的 [(info, 新起点偏移, 新终点偏移)], 本来就在目标上的根数, 校验不符 [(图元, 说明)])。"""
     t = DB.Transaction(doc, u'排管标高批量调整')
     fho = t.GetFailureHandlingOptions()
     fho.SetFailuresPreprocessor(_Fails())
     t.SetFailureHandlingOptions(fho)
     t.Start()
     try:
-        plans = []
+        plans, same = [], 0
+        use_top = v.get('ts') is not None or v.get('te') is not None
         for info in infos:
-            if info['sloped'] and mode == 'top':
+            if info['sloped'] and use_top:
                 _refine(info)
-            ns, ne = plan_change(info, mode, value, flatten, value2, per_end)
+            ns, ne = plan_vals(info, v)
+            if abs(ns - info['s_off']) < TOL and abs(ne - info['e_off']) < TOL:
+                same += 1
+                continue
             e = info['e']
             e.get_Parameter(BIC.STRUCTURAL_BEAM_END0_ELEVATION).Set(ns / FT)
             e.get_Parameter(BIC.STRUCTURAL_BEAM_END1_ELEVATION).Set(ne / FT)
@@ -750,76 +679,35 @@ def apply_plan(infos, mode, value, flatten, value2=None, per_end=False):
             if 'why' in now or abs(now['s_off'] - ns) > TOL or abs(now['e_off'] - ne) > TOL:
                 bad.append((info['e'], u'写入后读回来的值不对'))
         t.Commit()
-        return plans, bad
+        return plans, same, bad
     except Exception:
         if t.HasStarted() and not t.HasEnded():
             t.RollBack()
         raise
 
 
-def _targets(st):
-    """这次写入的目标值：(value, value2, per_end)。"""
-    if st['mode'] == 'shift':
-        return st['v1'], None, False
-    if st['per_end']:
-        return st['vs'], st['ve'], True
-    return st['v1'], None, False
-
-
-def _fmt_ends(g, ns, ne):
+def _fmt(g, ns, ne):
     d0, d1 = (ns - g['s_off']) / 1000.0, (ne - g['e_off']) / 1000.0
-    return (u'起点 管底 %.3f → %.3f、管顶 %.3f → %.3f；终点 管底 %.3f → %.3f、管顶 %.3f → %.3f m'
-            % (g['bot'][0] / 1000.0, g['bot'][0] / 1000.0 + d0, g['top'][0] / 1000.0, g['top'][0] / 1000.0 + d0,
-               g['bot'][1] / 1000.0, g['bot'][1] / 1000.0 + d1, g['top'][1] / 1000.0, g['top'][1] / 1000.0 + d1))
+    return (u'起点管底 %.3f → %.3f、终点管底 %.3f → %.3f（管顶 %.3f → %.3f、%.3f → %.3f）'
+            % (g['bot'][0] / 1000.0, g['bot'][0] / 1000.0 + d0, g['bot'][1] / 1000.0, g['bot'][1] / 1000.0 + d1,
+               g['top'][0] / 1000.0, g['top'][0] / 1000.0 + d0, g['top'][1] / 1000.0, g['top'][1] / 1000.0 + d1))
 
 
-def write_batch(elems, st):
-    """把设置写到这批排管上。返回一句结果说明（窗口顶部显示）。"""
-    mode, flat = st['mode'], st['flatten']
-    v1, v2, per = _targets(st)
-    groups, bad = collect(elems)
-    if not groups:
-        return u'框里没有能调的排管（%d 个构件读不了标高或不是排管）。' % len(elems)
-    infos = [g for k in groups if k in st['sys'] for g in groups[k]]
-    skip_sys = sum(len(v) for k, v in groups.items() if k not in st['sys'])
-    if not infos:
-        return u'框到的排管都不在勾选的系统里（%d 根没动）。' % skip_sys
+def write_batch(infos, v):
+    """把 v 写到这批排管上。返回一句结果说明（窗口顶部显示）。"""
     ok_els, blocked = wg_split(doc, [g['e'] for g in infos])
     okids = set(_idv(e.Id) for e in ok_els)
-    plans, same = [], 0
-    for g in infos:
-        if _idv(g['e'].Id) not in okids:
-            continue
-        ns, ne = plan_change(g, mode, v1, flat, v2, per)
-        if abs(ns - g['s_off']) < TOL and abs(ne - g['e_off']) < TOL:
-            same += 1
-        else:
-            plans.append((g, ns, ne))
-    if not plans:
-        return u'没有需要改的：%d 根本来就在目标标高上。%s' % (same, wg_note(blocked).replace(u'\n', u' '))
-    if st.get('confirm'):
-        cnt = {}
-        for g, _, _ in plans:
-            cnt[g['sys']] = cnt.get(g['sys'], 0) + 1
-        g0, ns0, ne0 = plans[0]
-        msg = u'将改 %d 根：\n%s\n\n示例（%s）：\n%s' % (len(plans), u'\n'.join(u'  · %s：%d 根' % (k, cnt[k]) for k in sorted(cnt)),
-                                                    g0['sys'], _fmt_ends(g0, ns0, ne0))
-        if not forms.alert(msg + wg_note(blocked) + u'\n\n执行吗？（可 Ctrl+Z 撤销）', title=TITLE, ok=False, yes=True, no=True):
-            return u'已取消，没有改。'
-    done, mism = apply_plan([g for g, _, _ in plans], mode, v1, flat, v2, per)
-    try:
-        uidoc.Selection.SetElementIds(System.Collections.Generic.List[DB.ElementId]([g['e'].Id for g, _, _ in done]))
-    except Exception:
-        pass
+    todo = [g for g in infos if _idv(g['e'].Id) in okids]
+    if not todo:
+        return u'这些排管都被别人占用了，没法改。' + wg_note(blocked).replace(u'\n', u' ')
+    done, same, mism = apply_plan(todo, v)
+    if not done:
+        return u'没有需要改的：%d 根本来就在填的标高上。' % same
     g0, ns0, ne0 = done[0]
-    out = u'已改 %d 根（已选中，Ctrl+Z 可撤销）。示例：%s' % (len(done), _fmt_ends(g0, ns0, ne0))
+    out = u'已改 %d 根（Ctrl+Z 可撤销）。示例：%s' % (len(done), _fmt(g0, ns0, ne0))
     extra = []
     if same:
         extra.append(u'%d 根本来就在目标标高' % same)
-    if skip_sys:
-        extra.append(u'%d 根不在勾选的系统里' % skip_sys)
-    if bad:
-        extra.append(u'%d 个读不了标高' % len(bad))
     if blocked:
         extra.append(u'%d 根被占用没改' % len(blocked))
     if mism:
@@ -827,48 +715,50 @@ def write_batch(elems, st):
     return out + (u'  另：' + u'；'.join(extra) if extra else u'')
 
 
+def _selected():
+    els = []
+    try:
+        for i in uidoc.Selection.GetElementIds():
+            e = doc.GetElement(i)
+            if e is not None and e.Category is not None and _idv(e.Category.Id) == FRAMING:
+                els.append(e)
+    except Exception:
+        pass
+    return els
+
+
 def main():
     try:
-        systems = scan_systems()
-        if not systems:
-            forms.alert(u'项目里没有结构框架（排管）。', title=TITLE)
-            return
-        st = {'mode': 'bottom', 'sys': None}
-        # 点插件时已经选中了排管：窗口里只列选中的这些，「写入当前选中的」是默认按钮
-        pre = {}
-        try:
-            for i in uidoc.Selection.GetElementIds():
-                e = doc.GetElement(i)
-                if e is not None and e.Category is not None and _idv(e.Category.Id) == FRAMING:
-                    k = system_of(e)
-                    pre[k] = pre.get(k, 0) + 1
-        except Exception:
-            pre = {}
+        els = _selected()
+        if not els:
+            els = pick_elements()
+            if not els:
+                return
+        st = {}
         guard = 0
         while guard < 500:
             guard += 1
-            act = main_dialog(st, pre or systems, bool(pre))
-            pre = {}
+            groups, bad = collect(els)
+            if not groups:
+                forms.alert(u'选中的构件读不了标高（不是排管，或缺起点/终点标高偏移参数）。', title=TITLE)
+                return
+            try:
+                uidoc.Selection.SetElementIds(System.Collections.Generic.List[DB.ElementId]([g['e'].Id for k in groups for g in groups[k]]))
+            except Exception:
+                pass
+            act = main_dialog(st, groups)
             if act == 'close':
                 break
             try:
-                if act == 'sel':
-                    els = [doc.GetElement(i) for i in uidoc.Selection.GetElementIds()]
-                    els = [e for e in els if e is not None and e.Category is not None and _idv(e.Category.Id) == FRAMING]
-                    st['note'] = write_batch(els, st) if els else u'当前没有选中排管（结构框架）。'
+                if act == 'pick':
+                    new = pick_elements()
+                    if new:
+                        els = new
+                        st['note'] = None
                     continue
-                while True:                     # 框选；连续模式下写完马上框下一批，Esc 回窗口
-                    els = pick_elements()
-                    if els is None:
-                        st['note'] = st.get('note') if st.get('batches') else u'已取消框选。'
-                        break
-                    st['note'] = write_batch(els, st) if els else u'框里没有排管。'
-                    st['batches'] = st.get('batches', 0) + 1
-                    if not st.get('continuous'):
-                        break
+                st['note'] = write_batch([g for k in groups for g in groups[k]], st['vals'])
             except Exception:
                 st['note'] = u'出错了（已回滚，模型没被改）：' + traceback.format_exc().splitlines()[-1]
-            st['batches'] = 0
     except Exception:
         forms.alert(u'出错了：\n' + traceback.format_exc(), title=TITLE)
 
