@@ -9,7 +9,7 @@ OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
 VERSION_OVERRIDE = {"control-points": "0.1.1", "elv-merge": "0.2.2", "export-dwg": "0.5.0", "export-nwc": "0.3.0", "family-param-dim": "0.1.2",
-                    "pile-cleanup": "0.2.1", "pile-cushion": "0.4.1", "quantity-export": "0.3.0", "rebar-3d-view": "0.2.0", "rebar-cage": "0.3.0",
+                    "pile-cleanup": "0.2.1", "pile-cushion": "0.4.1", "quantity-export": "0.3.1", "rebar-3d-view": "0.2.0", "rebar-cage": "0.3.0",
                     "sheet-organize": "0.6.6", "sheet-preview": "0.1.1", "well-annotate": "0.3.38", "well-clear-marks": "0.1.3",
                     "well-config": "0.1.1", "well-depth-report": "0.1.6", "well-family-guard": "0.1.2", "well-number": "0.2.1",
                     "well-param-sync": "0.1.2", "well-sheet-fit": "0.1.3", "well-sheet-no": "0.1.7", "well-sheets": "0.5.12",

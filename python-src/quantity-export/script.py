@@ -8,6 +8,7 @@ __doc__ = ("框选（或整个项目、当前视图）里的构件，先在窗�
            "排管、松木桩、垫层各自单算，不会混进混凝土表。也可以在 Revit 里生成明细表（之后模型改了自动更新）。只读，不改模型（生成明细表除外）。")
 
 import re
+import json
 import math
 import io
 import os
@@ -307,10 +308,123 @@ def _pick_elements(sel_ids):
     return [e for e in col.WherePasses(flt).WhereElementIsNotElementType().ToElements() if _is_qto(e)], src
 
 
+# ---- 要排除的楼板（场地里的道路、绿化、开挖范围、遮罩这类面层，不是结构混凝土）
+EXCLUDE_FILE = os.path.join(OUT_DIR, u'提量排除规则.json')
+EXCLUDE_DEFAULT = {
+    u'说明': (u'floor_keywords：楼板类型名里含这些字就不算提量（道路、绿化、开挖范围、遮罩这类场地面层）；'
+            u'skip_nonstructural：楼板的「结构」没勾选也不算（这个项目的场地面层都没勾结构）。'
+            u'被排除的在窗口「已排除」标签页里列出来，并写明原因，不会悄悄消失。'),
+    u'floor_keywords': [u'道路', u'绿化', u'开挖', u'挖掘', u'遮罩', u'临时', u'场地', u'回填', u'土方', u'草坪', u'路面'],
+    u'skip_nonstructural': True,
+}
+_EXCL = {}
+
+
+def _exclude_rules():
+    if _EXCL:
+        return _EXCL
+    rules = dict(EXCLUDE_DEFAULT)
+    try:
+        if os.path.exists(EXCLUDE_FILE):
+            with io.open(EXCLUDE_FILE, 'r', encoding='utf-8-sig') as f:
+                d = json.load(f)
+            rules[u'floor_keywords'] = d.get(u'floor_keywords', rules[u'floor_keywords'])
+            rules[u'skip_nonstructural'] = bool(d.get(u'skip_nonstructural', True))
+        else:
+            if not os.path.isdir(OUT_DIR):
+                os.makedirs(OUT_DIR)
+            with io.open(EXCLUDE_FILE, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(EXCLUDE_DEFAULT, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+    _EXCL.update(rules)
+    return _EXCL
+
+
+def _exclude_reason(e):
+    """楼板是不是场地面层：是返回原因文字，否返回 None。只看楼板。"""
+    try:
+        if _eid(e.Category.Id) != int(DB.BuiltInCategory.OST_Floors):
+            return None
+        r = _exclude_rules()
+        tn = _type_name(e)
+        for k in r[u'floor_keywords']:
+            if k and k in tn:
+                return u'类型名含「%s」' % k
+        if r[u'skip_nonstructural']:
+            p = e.get_Parameter(DB.BuiltInParameter.FLOOR_PARAM_IS_STRUCTURAL)
+            if p is not None and p.AsInteger() == 0:
+                return u'非结构楼板（「结构」没勾选）'
+    except Exception:
+        pass
+    return None
+
+
+def _zrange_m(e):
+    """构件的最低、最高标高（m，项目坐标）。取不到返回 (None, None)。"""
+    bb = e.get_BoundingBox(None)
+    if bb is None:
+        return None, None
+    return bb.Min.Z * FT_TO_M, bb.Max.Z * FT_TO_M
+
+
+def _surface_m2(e):
+    """构件表面积（m²，几何实体的全部面，可当模板面积的参考）。取不到返回 0。"""
+    try:
+        tot = 0.0
+        for g in e.get_Geometry(DB.Options()):
+            if isinstance(g, DB.Solid):
+                tot += g.SurfaceArea
+            elif isinstance(g, DB.GeometryInstance):
+                for x in g.GetInstanceGeometry():
+                    if isinstance(x, DB.Solid):
+                        tot += x.SurfaceArea
+        return tot * FT_TO_M * FT_TO_M
+    except Exception:
+        return 0.0
+
+
+def _span_m(e):
+    """线状构件（梁、墙）的长度；柱取高度；板返回 0。"""
+    c = _eid(e.Category.Id)
+    if c == int(DB.BuiltInCategory.OST_StructuralColumns):
+        lo, hi = _zrange_m(e)
+        return (hi - lo) if lo is not None else 0.0
+    if c in (int(DB.BuiltInCategory.OST_StructuralFraming), int(DB.BuiltInCategory.OST_Walls)):
+        return _length_m(e)
+    return 0.0
+
+
+def _merge_z(row, i, lo, hi):
+    """row[i]、row[i+1] 存最低/最高标高。"""
+    if lo is not None:
+        row[i] = lo if row[i] is None else min(row[i], lo)
+    if hi is not None:
+        row[i + 1] = hi if row[i + 1] is None else max(row[i + 1], hi)
+
+
+_WELL_LW = re.compile(u'(\\d+)\\s*\\(L\\)\\s*x\\s*(\\d+)\\s*\\(W\\)')
+_THICK = re.compile(u'(\\d+)\\s*mm\\s*厚')
+
+
+def _well_elev_m(e):
+    """井底标高、井盖面标高（m，项目坐标）。取不到的是 None。"""
+    try:
+        lv = doc.GetElement(e.LevelId)
+        base = lv.Elevation if lv is not None else 0.0
+    except Exception:
+        base = 0.0
+    b = e.LookupParameter(u'井底标高')
+    o = e.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
+    bot = (base + b.AsDouble()) * FT_TO_M if (b is not None and b.HasValue and b.StorageType == DB.StorageType.Double) else None
+    top = (base + o.AsDouble()) * FT_TO_M if (o is not None and o.HasValue) else None
+    return bot, top
+
+
 def _quantities(elems):
-    """汇总：混凝土（楼层、类别、类型）、钢材（同上，含重量）、钢筋（楼层、直径）。
-    构件多时显示进度条（读几何体积较慢），可以取消；取消返回 None（只读，不改模型）。"""
-    res = {'conc': {}, 'steel': {}, 'rebar': {}, 'wells': [], 'banks': {}, 'piles': {}, 'skipped': 0}
+    """汇总：混凝土（楼层、类别、类型、材质）、钢材（同上，含重量）、钢筋（楼层、直径），以及井、排管导管、桩垫层、被排除的楼板。
+    构件多时显示进度条（读几何较慢），可以取消；取消返回 None（只读，不改模型）。"""
+    res = {'conc': {}, 'steel': {}, 'rebar': {}, 'wells': [], 'banks': {}, 'piles': {}, 'excluded': {}, 'skipped': 0}
     pb = forms.ProgressBar(title=u'正在统计工程量…（点取消可停止）', cancellable=True) if len(elems) > 300 else None
     try:
         for i, e in enumerate(elems):
@@ -353,61 +467,104 @@ def _add_one(e, res):
         mk = _mark(e)
         sr = wcfg_series_of(mk, WCFG, True)
         f, t = _ftname(e)
-        res['wells'].append((mk, sr[u'label'] if sr else u'其他', f, t, _depth_mm(e), e.Id.Value))
+        m = _WELL_LW.search(t) or _WELL_LW.search(f)
+        bot, top = _well_elev_m(e)
+        res['wells'].append((mk, sr[u'label'] if sr else u'其他', f, t, _depth_mm(e), e.Id.Value,
+                             int(m.group(1)) if m else None, int(m.group(2)) if m else None, bot, top))
         return
     if c == int(DB.BuiltInCategory.OST_Conduit) or (c == int(DB.BuiltInCategory.OST_StructuralFraming) and _is_bank(e)):
         f, t = _ftname(e)
-        cat = u'导管' if c == int(DB.BuiltInCategory.OST_Conduit) else (u'雨水沟' if f.startswith(u'雨水沟') else u'排管')
-        a = res['banks'].setdefault((cat, f, t), [0, 0.0, 0])
+        is_conduit = (c == int(DB.BuiltInCategory.OST_Conduit))
+        cat = u'导管' if is_conduit else (u'雨水沟' if f.startswith(u'雨水沟') else u'排管')
+        a = res['banks'].setdefault((cat, f, t), [0, 0.0, 0, 0.0, None, None])      # 根数 长度 孔数 体积 最低 最高
         a[0] += 1
         a[1] += _length_m(e)
         m = _HOLES.search(f + u' ' + t)
         if m:
             a[2] = int(m.group(1))
+        if not is_conduit:
+            a[3] += _volume_m3(e)
+        lo, hi = _zrange_m(e)
+        _merge_z(a, 4, lo, hi)
         return
     if c == int(DB.BuiltInCategory.OST_StructuralFoundation):
         kind = _pile_or_pad(e)
         if kind:
             f, t = _ftname(e)
-            a = res['piles'].setdefault((kind, (f + u' / ' + t) if (f or t) else _u(e.Name)), [0, 0.0])
+            key = (f + u' / ' + t) if (f or t) else _u(e.Name)
+            a = res['piles'].setdefault((kind, key), [0, 0.0, 0.0, None, None])          # 数量 体积 总长(桩) 最低 最高
             a[0] += 1
-            a[1] += _volume_m3(e) if kind == u'垫层' else 0.0
+            lo, hi = _zrange_m(e)
+            if kind == u'垫层':
+                a[1] += _volume_m3(e)
+            elif lo is not None:
+                a[2] += hi - lo
+            _merge_z(a, 3, lo, hi)
             return
+    why = _exclude_reason(e)
+    if why:
+        cat = _u(e.Category.Name)
+        a = res['excluded'].setdefault((cat, _type_name(e), why), [0, 0.0, 0.0])
+        a[0] += 1
+        a[1] += _volume_m3(e)
+        ap = e.get_Parameter(DB.BuiltInParameter.HOST_AREA_COMPUTED)
+        if ap is not None and ap.HasValue:
+            a[2] += ap.AsDouble() * FT_TO_M * FT_TO_M
+        return
     lvl = _level_name(e)
     cat = _u(e.Category.Name)
     typ = _type_name(e)
     vol = _volume_m3(e)
     dens = _density(e)
     mname = _material_name(e)
+    area = _surface_m2(e)
+    span = _span_m(e)
+    lo, hi = _zrange_m(e)
     is_steel = (dens is not None and dens >= STEEL_MIN_DENSITY) or (
         dens is None and (u'钢' in mname or u'steel' in mname.lower()))
     if is_steel:
         d = dens if (dens is not None and dens >= STEEL_MIN_DENSITY) else STEEL_DENSITY
-        row = res['steel'].setdefault((lvl, cat, typ), [0, 0.0, 0.0])
+        row = res['steel'].setdefault((lvl, cat, typ, mname), [0, 0.0, 0.0, 0.0, 0.0, None, None])
         row[0] += 1
         row[1] += vol
         row[2] += vol * d  # kg，导出时再换算成 t
+        row[3] += area
+        row[4] += span
+        _merge_z(row, 5, lo, hi)
     else:
-        row = res['conc'].setdefault((lvl, cat, typ), [0, 0.0])
+        row = res['conc'].setdefault((lvl, cat, typ, mname), [0, 0.0, 0.0, 0.0, None, None])
         row[0] += 1
         row[1] += vol
+        row[2] += area
+        row[3] += span
+        _merge_z(row, 4, lo, hi)
 
 
 # ============================================================
 # 表格数据（窗口和 Excel 共用）
 # ============================================================
+def _r(v, nd=3):
+    return u'' if v is None else round(v, nd)
+
+
 def _table_rows(res):
-    """返回三张表：[(标题, 表头, 行, 合计行)]。行和合计行的数字都已经是最终显示的单位。"""
+    """返回若干张表：[(标题, 表头, 行, 合计行)]。行和合计行的数字都已经是最终显示的单位。"""
     conc_rows = []
     conc_sum = 0.0
-    for (lvl, cat, typ), (n, vol) in sorted(res['conc'].items()):
-        conc_rows.append([lvl, cat, typ, n, round(vol, 3)])
+    ca = cl = 0.0
+    for (lvl, cat, typ, mat), (n, vol, area, span, lo, hi) in sorted(res['conc'].items()):
+        conc_rows.append([lvl, cat, typ, mat, n, round(vol, 3), round(area, 2), round(span, 2), _r(lo), _r(hi)])
         conc_sum += vol
+        ca += area
+        cl += span
     steel_rows = []
     steel_sum = 0.0
-    for (lvl, cat, typ), (n, vol, kg) in sorted(res['steel'].items()):
-        steel_rows.append([lvl, cat, typ, n, round(kg / 1000.0, 3)])
+    sa = sl = 0.0
+    for (lvl, cat, typ, mat), (n, vol, kg, area, span, lo, hi) in sorted(res['steel'].items()):
+        steel_rows.append([lvl, cat, typ, mat, n, round(kg / 1000.0, 3), round(vol, 3), round(area, 2), round(span, 2), _r(lo), _r(hi)])
         steel_sum += kg / 1000.0
+        sa += area
+        sl += span
     rebar_rows = []
     rebar_sum = [0, 0.0, 0.0]
     for (lvl, dia), (bars, length_m, kg) in sorted(res['rebar'].items()):
@@ -416,40 +573,65 @@ def _table_rows(res):
         rebar_sum[1] += length_m
         rebar_sum[2] += kg
     tables = [
-        (u'混凝土', [u'楼层', u'构件类别', u'类型', u'数量', u'体积(m³)'], conc_rows,
-         [u'合计', u'', u'', sum(r[3] for r in conc_rows), round(conc_sum, 3)]),
-        (u'钢材', [u'楼层', u'构件类别', u'类型', u'数量', u'重量(t)'], steel_rows,
-         [u'合计', u'', u'', sum(r[3] for r in steel_rows), round(steel_sum, 3)]),
+        (u'混凝土', [u'楼层', u'构件类别', u'类型', u'材质', u'数量', u'体积(m³)', u'表面积(m²)', u'长/高(m)', u'最低标高(m)', u'最高标高(m)'], conc_rows,
+         [u'合计', u'', u'', u'', sum(r[4] for r in conc_rows), round(conc_sum, 3), round(ca, 2), round(cl, 2), u'', u'']),
+        (u'钢材', [u'楼层', u'构件类别', u'类型', u'材质', u'数量', u'重量(t)', u'体积(m³)', u'表面积(m²)', u'长/高(m)', u'最低标高(m)', u'最高标高(m)'], steel_rows,
+         [u'合计', u'', u'', u'', sum(r[4] for r in steel_rows), round(steel_sum, 3), round(sum(v[1] for v in res['steel'].values()), 3), round(sa, 2), round(sl, 2), u'', u'']),
         (u'钢筋', [u'楼层', u'直径(mm)', u'根数', u'总长(m)', u'重量(kg)'], rebar_rows,
          [u'合计', u'', rebar_sum[0], round(rebar_sum[1], 3), round(rebar_sum[2], 3)]),
     ]
     # ---- 小市政：井、排管导管、桩与垫层（没有的不出标签页）
     by, detail = {}, []
-    for mk, lab, f, t, d, eid in sorted(res['wells'], key=lambda w: wcfg_well_sort_key(w[0], WCFG)):
+    for mk, lab, f, t, d, eid, L, W, bot, top in sorted(res['wells'], key=lambda w: wcfg_well_sort_key(w[0], WCFG)):
         step = (math.ceil((d - 1e-6) / DEPTH_STEP) * DEPTH_STEP) if d else None
-        by[(lab, f, t, step)] = by.get((lab, f, t, step), 0) + 1
-        detail.append([mk, lab, f, t, round(d) if d else u'', int(step) if step else u'', eid])
+        a = by.setdefault((lab, f, t, L, W, step), [0, None, None, None])      # 口数 最小深 最大深 最低井底
+        a[0] += 1
+        if d:
+            a[1] = d if a[1] is None else min(a[1], d)
+            a[2] = d if a[2] is None else max(a[2], d)
+        if bot is not None:
+            a[3] = bot if a[3] is None else min(a[3], bot)
+        detail.append([mk, lab, f, t, L if L else u'', W if W else u'', round(d) if d else u'', int(step) if step else u'', _r(bot), _r(top), eid])
     if by:
-        wrows = [[k[0], k[1], k[2], int(k[3]) if k[3] else u'未取到深度', by[k]] for k in sorted(by, key=lambda k: (k[0], k[1], k[2], k[3] or 0))]
-        tables.append((u'井汇总', [u'系列', u'族', u'类型', u'深度档(mm)', u'数量'], wrows,
-                       [u'合计', u'', u'', u'', len(res['wells'])]))
-        tables.append((u'井明细', [u'井号', u'系列', u'族', u'类型', u'井内深度(mm)', u'深度档(mm)', u'构件ID'], detail, None))
+        def _k(k):
+            return (k[0], k[1], k[2], k[3] or 0, k[4] or 0, k[5] or 0)
+        wrows = []
+        for k in sorted(by, key=_k):
+            n, dmin, dmax, bmin = by[k]
+            wrows.append([k[0], k[1], k[2], k[3] or u'', k[4] or u'', int(k[5]) if k[5] else u'未取到深度', n,
+                          round(dmin) if dmin else u'', round(dmax) if dmax else u'', _r(bmin)])
+        tables.append((u'井汇总', [u'系列', u'族', u'类型', u'长(mm)', u'宽(mm)', u'深度档(mm)', u'数量', u'最小井深(mm)', u'最大井深(mm)', u'最低井底标高(m)'], wrows,
+                       [u'合计', u'', u'', u'', u'', u'', len(res['wells']), u'', u'', u'']))
+        tables.append((u'井明细', [u'井号', u'系列', u'族', u'类型', u'长(mm)', u'宽(mm)', u'井内深度(mm)', u'深度档(mm)', u'井底标高(m)', u'井盖面标高(m)', u'构件ID'], detail, None))
     if res['banks']:
-        brows, tl, th = [], 0.0, 0.0
+        brows, tl, th, tv = [], 0.0, 0.0, 0.0
         for k in sorted(res['banks']):
-            n, L, h = res['banks'][k]
-            brows.append([k[0], k[1], k[2], n, round(L, 2), h if h else u'', round(L * h, 1) if h else u''])
+            n, L, h, vol, lo, hi = res['banks'][k]
+            brows.append([k[0], k[1], k[2], n, round(L, 2), round(L / n, 2) if n else u'', h if h else u'', round(L * h, 1) if h else u'',
+                          round(vol, 3) if vol else u'', _r(lo), _r(hi)])
             tl += L
             th += L * h
-        tables.append((u'排管导管', [u'类别', u'族', u'类型', u'根数', u'总长度(m)', u'孔数', u'孔·米'], brows,
-                       [u'合计', u'', u'', sum(a[0] for a in res['banks'].values()), round(tl, 2), u'', round(th, 1)]))
+            tv += vol
+        tables.append((u'排管导管', [u'类别', u'族', u'类型', u'根数', u'总长度(m)', u'平均单根长(m)', u'孔数', u'孔·米', u'混凝土体积(m³)', u'最低底标高(m)', u'最高顶标高(m)'], brows,
+                       [u'合计', u'', u'', sum(a[0] for a in res['banks'].values()), round(tl, 2), u'', u'', round(th, 1), round(tv, 3), u'', u'']))
     if res['piles']:
-        prows = [[k[0], k[1], v[0], round(v[1], 3) if k[0] == u'垫层' else u''] for k, v in sorted(res['piles'].items())]
-        tables.append((u'桩与垫层', [u'项目', u'族 / 类型', u'数量', u'体积(m³)'], prows, None))
+        prows = []
+        for k, v in sorted(res['piles'].items()):
+            m = _THICK.search(k[1])
+            area = (v[1] / (int(m.group(1)) / 1000.0)) if (k[0] == u'垫层' and m and v[1]) else None
+            prows.append([k[0], k[1], v[0], round(v[1], 3) if k[0] == u'垫层' else u'', _r(area, 1), round(v[2], 2) if k[0] == u'松木桩' else u'',
+                          _r(v[3]), _r(v[4])])
+        tables.append((u'桩与垫层', [u'项目', u'族 / 类型', u'数量', u'体积(m³)', u'面积(m²，体积÷厚度)', u'桩总长(m)', u'最低标高(m)', u'最高标高(m)'], prows, None))
+    if res['excluded']:
+        erows = [[k[0], k[1], k[2], v[0], round(v[1], 1), round(v[2], 1)] for k, v in sorted(res['excluded'].items())]
+        tables.append((u'已排除', [u'类别', u'类型', u'排除原因', u'数量', u'体积(m³)', u'面积(m²)'], erows,
+                       [u'合计', u'', u'', sum(v[0] for v in res['excluded'].values()), round(sum(v[1] for v in res['excluded'].values()), 1),
+                        round(sum(v[2] for v in res['excluded'].values()), 1)]))
     summary = {'conc': conc_sum, 'steel': steel_sum, 'rebar': rebar_sum,
                'wells': len(res['wells']), 'banks': sum(a[0] for a in res['banks'].values()),
                'piles': sum(v[0] for k, v in res['piles'].items() if k[0] == u'松木桩'),
-               'pads': sum(v[0] for k, v in res['piles'].items() if k[0] == u'垫层')}
+               'pads': sum(v[0] for k, v in res['piles'].items() if k[0] == u'垫层'),
+               'excluded': sum(v[0] for v in res['excluded'].values())}
     return tables, summary
 
 
@@ -653,7 +835,7 @@ def main():
         tables, summary = _table_rows(res)
         if res['skipped']:
             forms.alert(u'有 %d 个构件读取失败，已跳过。' % res['skipped'], title=TITLE)
-        _show_window(tables, summary, u'%s（%d 个构件）' % (src_txt, len(elems)), res)
+        _show_window(tables, summary, u'%s（%d 个构件%s）' % (src_txt, len(elems), (u'，已排除场地楼板 %d 块' % summary['excluded']) if summary['excluded'] else u''), res)
     except Exception as e:
         forms.alert(u'提量过程发生异常：\n%s\n\n%s' % (e, traceback.format_exc()), title=TITLE)
 

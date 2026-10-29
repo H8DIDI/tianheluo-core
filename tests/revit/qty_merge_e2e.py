@@ -70,6 +70,15 @@ try:
     conc_types = u' '.join(k[2] for k in res['conc']) + u' ' + u' '.join(k[2] for k in res['steel'])
     check(u'混凝土/钢材表里没有排管、雨水沟类型', not any(k in conc_types for k in (u'TELCO', u'ELV-', u'LV-', u'11KV', u'BX')), conc_types[:120])
     check(u'混凝土表里没有松木桩/垫层', not any((u'松木桩' in k[2] or u'垫层' in k[2]) for k in list(res['conc']) + list(res['steel'])))
+    fl = [e for e in allel if e.Category.Id.Value == int(DB.BuiltInCategory.OST_Floors)]
+    check(u'场地楼板被排除（已排除页有数据）', summ['excluded'] > 0 and u'已排除' in names, u'排除 %d / 楼板共 %d' % (summ['excluded'], len(fl)))
+    check(u'混凝土表里不再有道路/绿化/开挖/遮罩/临时/标高数字名楼板',
+          not any(any(k in x[2] for k in (u'道路', u'绿化', u'开挖', u'挖掘', u'遮罩', u'临时')) or x[2].replace('.', '').isdigit() for x in res['conc'].keys()),
+          u'%s' % [k[2] for k in res['conc'] if k[1] == u'楼板'])
+    check(u'混凝土总量回到合理范围（< 5000 m³）', summ['conc'] < 5000, u'%.1f m³' % summ['conc'])
+    hdr = dict((t[0], t[1]) for t in tables)
+    check(u'新增字段：混凝土页有材质/表面积/标高；排管页有体积/标高；井明细有井底标高',
+          u'材质' in hdr[u'混凝土'] and u'表面积(m²)' in hdr[u'混凝土'] and u'最高顶标高(m)' in hdr[u'排管导管'] and u'井底标高(m)' in hdr[u'井明细'])
     gm = [e for e in allel if e.Category.Id.Value == int(DB.BuiltInCategory.OST_GenericModel)]
     check(u'井口数一致', summ['wells'] == len(gm), u'%d vs %d' % (summ['wells'], len(gm)))
     for t in tables:
