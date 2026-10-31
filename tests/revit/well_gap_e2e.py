@@ -158,6 +158,22 @@ try:
     check(u'再跑一遍：没有要删的、没有要新增的', not plan2['delete'] and not plan2['create'], u'删 %d 增 %d 跳过 %d' % (len(plan2['delete']), len(plan2['create']), len(plan2['skip'])))
     # ---- 标注方向与方向规则
     check(u'所有新建标注的参照都是井中心面', all(not D['problems'] for D in dims2), u'%s' % [D['problems'] for D in dims2 if D['problems']][:3])
+    # ---- 斜向：沿两井连线标真实中心距（不可见辅助线 + 对齐标注）；再规划应视为已覆盖
+    ids6 = sorted(wells)
+    item_ob = {'kind': 'oblique', 'ids': [ids6[0], ids6[-1]]}
+    t = DB.Transaction(tmp, u'斜向'); t.Start()
+    try:
+        d_ob, e3 = n['create_dim'](view, wells, item_ob, dtype, off)
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+    import math
+    ca, cb = wells[ids6[0]]['c'], wells[ids6[-1]]['c']
+    check(u'斜向标注建成、数值 = 两井中心真实距离', d_ob is not None and abs(d_ob.Value - math.hypot(cb[0] - ca[0], cb[1] - ca[1])) < 0.002, u'%s %s' % (e3, (d_ob.Value * FT / 1000) if d_ob else None))
+    cov = n['oblique_covered'](view, wells)
+    check(u'斜向标注被识别为已覆盖（不会重复新增）', (min(ids6[0], ids6[-1]), max(ids6[0], ids6[-1])) in cov)
 except Exception:
     LOG.append(traceback.format_exc())
     RES['f'] += 1

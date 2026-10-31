@@ -4,7 +4,7 @@ __doc__ = ('在当前平面视图里，自动给「同一条排管路由上相�
            '先按排管的连接关系找出同一条排管上相邻的井（排管是一段一段的，端点相接、走向基本不拐的连成一条，到井为止；拐到别的支线上的井不算），'
            '同一直线上连续的井合并成一条连续标注，参照的是井族自带的「中心（左/右）」「中心（前/后）」参照平面，数值是准的、井挪了会跟着变。\n'
            '视图里已经手工标好且正确的不重复标；标错的（参照的不是井中心、两口井之间没有排管连接、同一口井参了两次、标注文字被手改）可以一并删掉重标。'
-           '先在窗口里列出「要删什么、要新增什么、哪些没法标」，确认后一次执行，整次一个事务，Ctrl+Z 可撤销。')
+           '先在窗口里列出「要删什么、要新增什么」，确认后一次执行，整次一个事务，Ctrl+Z 可撤销。')
 
 import re
 import math
@@ -267,6 +267,7 @@ def _pair(a, b):
 def make_plan(view, wells, edges, dims, off_ft):
     """规划：保留/删除哪些旧标注，新增哪些。返回 dict。"""
     plan = {'keep': [], 'delete': [], 'create': [], 'skip': [], 'covered': set()}
+    plan['covered'].update(oblique_covered(view, wells))
     for D in dims:
         ps = [_pair(D['ids'][i], D['ids'][i + 1]) for i in range(len(D['ids']) - 1)]
         probs = list(D['problems'])
@@ -285,8 +286,7 @@ def make_plan(view, wells, edges, dims, off_ft):
         wa, wb = wells[e[0]], wells[e[1]]
         ax = edge_axis(wa, wb)
         if ax is None:
-            dx, dy = (wb['c'][0] - wa['c'][0]) * FT / 1000.0, (wb['c'][1] - wa['c'][1]) * FT / 1000.0
-            plan['skip'].append((e, u'斜向（Δ %.1f, %.1f m），井中心面和标注方向对不上，没法用中心参照标' % (dx, dy)))
+            plan['create'].append({'kind': 'oblique', 'ids': [e[0], e[1]]})      # 斜向：沿两井连线标真实中心距
             continue
         by_axis.setdefault(_akey(ax), (ax, []))[1].append(e)
     for key, (ax, es) in by_axis.items():
@@ -328,6 +328,84 @@ class _Fails(DB.IFailuresPreprocessor):
         return DB.FailureProcessingResult.Continue
 
 
+AUX_NOTE = u'井间距辅助线（自动）'
+
+
+def _invisible_style():
+    try:
+        cats = doc.Settings.Categories.get_Item(DB.BuiltInCategory.OST_Lines).SubCategories
+        for c in cats:
+            if c.Name in (u'<不可见线>', u'<隐藏>', u'<Invisible lines>', u'<Hidden>'):      # 中文版里「不可见线」叫 <隐藏>；<隐藏线> 是另一种（虚线）
+                return c.GetGraphicsStyle(DB.GraphicsStyleType.Projection)
+    except Exception:
+        pass
+    return None
+
+
+def oblique_covered(view, wells):
+    """视图里已经做过的斜向标注（辅助线两端各落在一口井中心上）覆盖的井对。"""
+    out = set()
+    inv = _invisible_style()
+    for dc in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.CurveElement):
+        try:
+            if not isinstance(dc, DB.DetailCurve):
+                continue
+            if inv is not None and dc.LineStyle is not None and dc.LineStyle.Id != inv.Id:
+                continue                                     # 辅助线用的是「不可见线」样式；别的详图线不碰
+            c = dc.GeometryCurve
+            ends = []
+            for k in (0, 1):
+                q = c.GetEndPoint(k)
+                best = None
+                for i, w in wells.items():
+                    dd = math.hypot(q.X - w['c'][0], q.Y - w['c'][1])
+                    if dd < 0.2 / 0.3048 and (best is None or dd < best[0]):
+                        best = (dd, i)
+                ends.append(best[1] if best else None)
+            if None not in ends and ends[0] != ends[1]:
+                out.add(_pair(ends[0], ends[1]))
+        except Exception:
+            continue
+    return out
+
+
+def create_oblique(view, wells, item, dtype, off_ft):
+    """斜向：在两口井中心之间画一条不可见的辅助详图线，沿它标注（真实的中心到中心距离）。井挪了要重跑本插件更新。"""
+    a, b = item['ids']
+    ca, cb = wells[a]['c'], wells[b]['c']
+    z = _view_z(view, wells, item['ids'])
+    p0, p1 = DB.XYZ(ca[0], ca[1], z), DB.XYZ(cb[0], cb[1], z)
+    try:
+        dc = doc.Create.NewDetailCurve(view, DB.Line.CreateBound(p0, p1))
+    except Exception as ex:
+        return None, (u'%s' % ex).splitlines()[0][:80]
+    st = _invisible_style()
+    if st is not None:
+        try:
+            dc.LineStyle = st
+        except Exception:
+            pass
+    try:
+        dc.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS).Set(AUX_NOTE)
+    except Exception:
+        pass
+    ln = dc.GeometryCurve
+    arr = DB.ReferenceArray()
+    arr.Append(ln.GetEndPointReference(0))
+    arr.Append(ln.GetEndPointReference(1))
+    L = math.hypot(cb[0] - ca[0], cb[1] - ca[1])
+    u = ((cb[0] - ca[0]) / L, (cb[1] - ca[1]) / L)
+    perp = (-u[1], u[0])
+    q0 = DB.XYZ(p0.X + perp[0] * off_ft, p0.Y + perp[1] * off_ft, z)
+    q1 = DB.XYZ(p1.X + perp[0] * off_ft, p1.Y + perp[1] * off_ft, z)
+    try:
+        dm = doc.Create.NewDimension(view, DB.Line.CreateBound(q0, q1), arr, dtype) if dtype is not None else doc.Create.NewDimension(view, DB.Line.CreateBound(q0, q1), arr)
+    except Exception as ex:
+        doc.Delete(dc.Id)
+        return None, (u'%s' % ex).splitlines()[0][:80]
+    return dm, None
+
+
 def _view_z(view, wells, ids):
     try:
         return view.GenLevel.ProjectElevation
@@ -337,6 +415,8 @@ def _view_z(view, wells, ids):
 
 def create_dim(view, wells, item, dtype, off_ft):
     """按一条规划建标注。返回 (标注, 错误说明)。"""
+    if item.get('kind') == 'oblique':
+        return create_oblique(view, wells, item, dtype, off_ft)
     ax, ids = item['ax'], item['ids']
     perp = (-ax[1], ax[0])
     s = [_dot(wells[i]['c'], ax) for i in ids]
@@ -369,6 +449,7 @@ def apply_plan(view, wells, plan, dtype, off_ft, do_delete, do_create):
                 doc.Delete(e.Id)
                 ndel += 1
         made, fails, badval = 0, [], 0
+        made_dims = []
         if do_create:
             for item in plan['create']:
                 dm, err = create_dim(view, wells, item, dtype, off_ft)
@@ -377,14 +458,22 @@ def apply_plan(view, wells, plan, dtype, off_ft, do_delete, do_create):
                     fails.append((names, err))
                     continue
                 made += 1
-                try:      # 数值核对：每段应该等于井中心在标注方向上的距离
+                made_dims.append((dm, item))
+            doc.Regenerate()
+            for dm, item in made_dims:
+                try:      # 数值核对：每段应该等于井中心在标注方向上的距离（斜向：真实中心距）
+                    if item.get('kind') == 'oblique':
+                        ca, cb = wells[item['ids'][0]]['c'], wells[item['ids'][1]]['c']
+                        if abs(dm.Value - math.hypot(cb[0] - ca[0], cb[1] - ca[1])) > 0.002:
+                            badval += 1
+                        continue
                     s = [_dot(wells[i]['c'], item['ax']) for i in item['ids']]
                     want = [abs(s[i + 1] - s[i]) for i in range(len(s) - 1)]
                     if dm.NumberOfSegments and dm.NumberOfSegments > 0:
                         got = sorted(dm.Segments.get_Item(i).Value for i in range(dm.NumberOfSegments))
                     else:
                         got = [dm.Value]
-                    if any(abs(a - b) > 0.002 for a, b in zip(sorted(want), got)):
+                    if len(got) != len(want) or any(abs(a - b) > 0.002 for a, b in zip(sorted(want), got)):
                         badval += 1
                 except Exception:
                     pass
@@ -439,10 +528,11 @@ def show_dialog(view, wells, plan, types, dtype0, edges):
     A = WF.AnchorStyles
     head = WF.Label()
     nch = sum(1 for c in plan['create'] if len(c['ids']) > 2)
+    nob = sum(1 for c in plan['create'] if c.get('kind') == 'oblique')
     head.Text = (u'视图「%s」：井 %d 口，排管路由上相邻的井 %d 对。已有正确标注 %d 条（覆盖 %d 对，不重复标）；不对的旧标注 %d 条；'
-                 u'新增标注 %d 条（其中连续标注 %d 条）；没法用中心参照标的 %d 对。'
+                 u'新增标注 %d 条（其中连续标注 %d 条、斜向 %d 条）。'
                  % (view.Name, len(wells), len(edges), len(plan['keep']), len(plan['covered']), len(plan['delete']),
-                    len(plan['create']), nch, len(plan['skip'])))
+                    len(plan['create']), nch, nob))
     head.Location = SD.Point(12, 8)
     head.Size = SD.Size(836, 54)
     head.Anchor = A.Top | A.Left | A.Right
@@ -466,6 +556,15 @@ def show_dialog(view, wells, plan, types, dtype0, edges):
         it.SubItems.Add(u'；'.join(probs))
         lv.Items.Add(it)
     for c in plan['create']:
+        if c.get('kind') == 'oblique':
+            ca, cb = wells[c['ids'][0]]['c'], wells[c['ids'][1]]['c']
+            it = WF.ListViewItem(u'新增')
+            it.Checked = True
+            it.Tag = c
+            it.SubItems.Add(_names(wells, c['ids']))
+            it.SubItems.Add(u'斜向，沿两井连线标真实中心距 %.2f m（带一条不可见辅助线）' % (math.hypot(cb[0] - ca[0], cb[1] - ca[1]) * FT / 1000.0))
+            lv.Items.Add(it)
+            continue
         s = [_dot(wells[i]['c'], c['ax']) for i in c['ids']]
         segs = u' + '.join(u'%.2f' % (abs(s[i + 1] - s[i]) * FT / 1000.0) for i in range(len(s) - 1))
         it = WF.ListViewItem(u'新增')
@@ -524,7 +623,7 @@ def show_dialog(view, wells, plan, types, dtype0, edges):
     tbo.Anchor = A.Bottom | A.Left
     f.Controls.Add(tbo)
     note = WF.Label()
-    note.Text = u'连续标注：同一直线上相邻的井合成一条，参照井族的「中心（左/右）」「中心（前/后）」面。标得不理想的可以在视图里拖动标注线。'
+    note.Text = u'连续标注：同一直线上相邻的井合成一条，参照井族的「中心（左/右）」「中心（前/后）」面。斜向的沿两井连线标真实中心距（用一条不可见的辅助线，井挪了要重跑本插件）。标得不理想的可以在视图里拖动标注线。'
     note.Location = SD.Point(12, 506)
     note.Size = SD.Size(836, 40)
     note.Anchor = A.Bottom | A.Left | A.Right
