@@ -251,6 +251,10 @@
     "duct-elev": {
       "group": "井与管线",
       "status": "tested"
+    },
+    "duct-route": {
+      "group": "井与管线",
+      "status": "beta"
     }
   }
 }

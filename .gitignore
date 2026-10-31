@@ -25,3 +25,7 @@ __pycache__/
 # 根目录下的临时数据/报表（如核对 CSV），不进仓库
 /*.csv
 /*.xlsx
+
+plugins/*/worker-out/
+plugins/*/worker/bin/
+plugins/*/worker/obj/

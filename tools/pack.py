@@ -21,4 +21,9 @@ for mf in sorted((root / "plugins").glob("*/plugin.json")):
         detzip.write(z, dll, m["dll"])
         pdb = dll.with_suffix(".pdb")
         if pdb.exists(): detzip.write(z, pdb, pdb.name)
+        # 带独立求解进程的插件（如 duct-route）：把 worker-out/ 整个放进包里的 worker/ 目录
+        wo = d / "worker-out"
+        if wo.is_dir():
+            for f in sorted(x for x in wo.rglob("*") if x.is_file() and x.suffix != ".pdb"):
+                detzip.write(z, f, "worker/" + f.relative_to(wo).as_posix())
     print(f'{pkg.name}  {pkg.stat().st_size/1024:.1f} KB')

@@ -1,0 +1,3 @@
+<Project>
+  <!-- 独立求解进程：不继承 plugins 目录里的 Revit 引用 -->
+</Project>

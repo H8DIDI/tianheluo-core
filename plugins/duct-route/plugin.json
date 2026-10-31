@@ -1,0 +1,15 @@
+{
+  "id": "duct-route",
+  "name": "排管竖向避让优化",
+  "version": "0.1.0",
+  "description": "框选排管或选一个范围框，一键算出每根排管两端的标高（不动平面）：避开井、雨水沟和别的排管，路面下顶标高距路面不小于 1.2 m（可改），首尾相连的排管接头对齐，能平就平、坡放长。先在窗口里看结果，再一次写入，可 Ctrl+Z 撤销，也可按备份一键还原。规则在 Documents\\KaifaTools\\管综排管路由规则.json。",
+  "category": "井与管线",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "DuctRoute.dll",
+  "entry": "KaifaTools.Commands.DuctRouteCommand",
+  "glyph": "避",
+  "color": "#F97316",
+  "author": "didi",
+  "license": "MIT"
+}

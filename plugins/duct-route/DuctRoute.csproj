@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>DuctRoute</AssemblyName>
+    <RootNamespace>KaifaTools</RootNamespace>
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\_shared\DpiFit.cs" Link="DpiFit.cs" />
+    <!-- 求解在独立进程里（worker\），插件本身不引用 OR-Tools -->
+    <Compile Remove="worker\**" />
+    <Compile Remove="Solver.cs" />
+    <Compile Remove="Geometry.cs" />
+  </ItemGroup>
+</Project>
