@@ -5,14 +5,14 @@
 
 | 插件 id | 名称 | 版本 | 类型 | 作者 | 许可 |
 |---|---|---|---|---|---|
-| [`bank-break`](bank-break/) | 排管打断 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`bank-clash`](bank-clash/) | 排管碰撞检查 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`bank-detour`](bank-detour/) | 排管平面绕行 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`bank-hop`](bank-hop/) | 排管过障翻弯 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`bank-restore`](bank-restore/) | 排管还原 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-break`](bank-break/) | 排管打断 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-clash`](bank-clash/) | 排管碰撞检查 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-detour`](bank-detour/) | 排管平面绕行 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-hop`](bank-hop/) | 排管过障翻弯 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-restore`](bank-restore/) | 排管还原 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`control-points`](control-points/) | 控制点坐标表 | 0.1.1 | Python | didi | MIT |
 | [`duct-elev`](duct-elev/) | 排管标高批量调整 | 0.2.2 | Python | didi | MIT |
-| [`duct-route`](duct-route/) | 排管竖向避让优化 | 0.1.5 | C#（源码在 `plugins/`） | didi | MIT |
+| [`duct-route`](duct-route/) | 排管竖向避让优化 | 0.1.6 | C#（源码在 `plugins/`） | didi | MIT |
 | [`duct-snap`](duct-snap/) | 排管贴井内壁 | 0.1.9 | C#（源码在 `plugins/`） | didi | MIT |
 | [`elv-merge`](elv-merge/) | 族类型清洗合并 | 0.2.2 | Python | didi | MIT |
 | [`export-dwg`](export-dwg/) | 一键导出图纸DWG/PDF | 0.5.0 | Python | didi | MIT |

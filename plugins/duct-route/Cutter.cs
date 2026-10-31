@@ -15,6 +15,10 @@ public static class Cutter
     const double Ft = 0.3048;
     static readonly BuiltInParameter P0 = BuiltInParameter.STRUCTURAL_BEAM_END0_ELEVATION, P1 = BuiltInParameter.STRUCTURAL_BEAM_END1_ELEVATION;
 
+    /// <summary>Stops Revit from joining (and extending) this end of a framing member to its neighbours.</summary>
+    public static void NoJoin(Element e, int end) { try { if (e is FamilyInstance fi) Autodesk.Revit.DB.Structure.StructuralFramingUtils.DisallowJoinAtEnd(fi, end); } catch { } }
+    public static void AllowJoin(Element e, int end) { try { if (e is FamilyInstance fi) Autodesk.Revit.DB.Structure.StructuralFramingUtils.AllowJoinAtEnd(fi, end); } catch { } }
+
     public static List<CutPlan> Plan(Scene s, double minPieceM, out List<string> skipped)
     {
         skipped = new(); var plans = new List<CutPlan>(); var tw = s.Wells.Where(w => w.Kind == "TELCO").ToList();
@@ -65,6 +69,7 @@ public static class Cutter
                     var a = i == 0 ? p : p + (q - p) * fa; var b = i == pl.Pieces.Count - 1 ? q : p + (q - p) * fb;
                     ((LocationCurve)els[i].Location).Curve = Line.CreateBound(a, b);
                     els[i].get_Parameter(P0).Set(e0 + (e1 - e0) * fa); els[i].get_Parameter(P1).Set(e0 + (e1 - e0) * fb);
+                    if (i > 0) NoJoin(els[i], 0); if (i < pl.Pieces.Count - 1) NoJoin(els[i], 1);          // a joined end would be pulled back to the neighbour at regeneration: the cut would not stay where it was made
                 }
                 if (t.Commit() == TransactionStatus.Committed)
                 {
@@ -99,6 +104,7 @@ public static class Cutter
                 t.Start(); var fo = t.GetFailureHandlingOptions(); fo.SetFailuresPreprocessor(pre); t.SetFailureHandlingOptions(fo);
                 foreach (var nid in it.GetProperty("news").EnumerateArray()) { var ne = doc.GetElement(new ElementId(nid.GetInt64())); if (ne is not null) doc.Delete(ne.Id); }
                 ((LocationCurve)e.Location).Curve = Line.CreateBound(new XYZ(pp[0], pp[1], pp[2]), new XYZ(qq[0], qq[1], qq[2]));
+                AllowJoin(e, 0); AllowJoin(e, 1);
                 e.get_Parameter(P0).Set(it.GetProperty("e0").GetDouble()); e.get_Parameter(P1).Set(it.GetProperty("e1").GetDouble());
                 if (t.Commit() == TransactionStatus.Committed) ok++; else failed.Add($"{id}：被回滚");
             }

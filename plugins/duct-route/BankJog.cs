@@ -140,6 +140,7 @@ public static partial class Jogger
                 {
                     ((LocationCurve)els[i].Location).Curve = Line.CreateBound(new XYZ(pl.V[i].X, pl.V[i].Y, pl.V[i].Z), new XYZ(pl.V[i + 1].X, pl.V[i + 1].Y, pl.V[i + 1].Z));
                     els[i].get_Parameter(BP0).Set(pl.V[i].E); els[i].get_Parameter(BP1).Set(pl.V[i + 1].E);
+                    if (i > 0) Cutter.NoJoin(els[i], 0); if (i < n - 1) Cutter.NoJoin(els[i], 1);
                 }
                 if (t.Commit() == TransactionStatus.Committed)
                 { ok++; items.Add(new { id = pl.Id, p = new[] { pl.P0.X, pl.P0.Y, pl.P0.Z }, q = new[] { pl.P1.X, pl.P1.Y, pl.P1.Z }, e0 = pl.E0, e1 = pl.E1, news = els.Skip(1).Select(x => x.Id.Value).ToArray() }); }

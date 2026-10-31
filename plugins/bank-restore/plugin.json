@@ -1,7 +1,7 @@
 {
   "id": "bank-restore",
   "name": "排管还原",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "把最近一次排管绕行或打断接回原样：删掉多出来的段，原排管恢复原长度和两端标高。",
   "category": "井与管线",
   "revit": "2026",

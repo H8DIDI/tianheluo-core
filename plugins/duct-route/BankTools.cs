@@ -97,21 +97,33 @@ public static class BankTools
         return Run(app, "排管平面绕行", parallel ? "一束平行排管用同一个平移量一起绕开，保持互相平行；两端仍接原来的井。" : "沿障碍的真实外形外扩一圈绕过去，多个转折点，两端仍接原来的井。", plans, notes);
     }
 
+    /// <summary>Splits one bank at the point (projected onto its axis). Returns an error text, or null when it worked.</summary>
+    public static string? BreakAtPoint(Document doc, Element bank, XYZ pt, UIApplication app)
+    {
+        if (!Jogger.IsBankLike(bank)) return "不是直线的结构框架";
+        var ln = (Line)((LocationCurve)bank.Location).Curve; var p0 = ln.GetEndPoint(0);
+        double t = (pt - p0).DotProduct(ln.Direction) * 0.3048, L = ln.Length * 0.3048;
+        if (t < 0.5 || t > L - 0.5) return "离管端太近（两边都要留 0.5 m）";
+        var r = Cutter.Apply(doc, new List<CutPlan> { new CutPlan(bank.Id.Value, "", L, new List<(double, double)> { (0, Math.Round(t, 3)), (Math.Round(t, 3), Math.Round(L, 3)) }, new List<string>()) }, app);
+        return r.cut == 1 ? null : string.Join("；", r.failed);
+    }
+
+    /// <summary>Like Revit's SL (Split Element): click a bank where it should be cut, again and again, Esc to finish. No windows, no pre-selection.</summary>
     public static Result Break(UIApplication app)
     {
-        var uidoc = app.ActiveUIDocument; var doc = uidoc.Document;
-        var bs = Banks(uidoc, "选要打断的一根排管", false); if (bs is null) return Result.Cancelled;
-        XYZ pt;
-        try { pt = uidoc.Selection.PickPoint("在排管上点打断位置"); } catch (Autodesk.Revit.Exceptions.OperationCanceledException) { return Result.Cancelled; }
-        var ln = (Line)((LocationCurve)bs[0].Location).Curve; var p0 = ln.GetEndPoint(0); var u = ln.Direction;
-        double t = (pt - p0).DotProduct(u) * 0.3048, L = ln.Length * 0.3048;
-        if (t < 0.5 || t > L - 0.5) { Say("排管打断", "断点离管端太近（两边都要留 0.5 m 以上）"); return Result.Cancelled; }
-        var keep = uidoc.Selection.GetElementIds(); uidoc.Selection.SetElementIds(new List<ElementId>());
-        (int cut, List<string> failed, string backup) r;
-        try { r = Cutter.Apply(doc, new List<CutPlan> { new CutPlan(bs[0].Id.Value, "", L, new List<(double, double)> { (0, Math.Round(t, 3)), (Math.Round(t, 3), Math.Round(L, 3)) }, new List<string>()) }, app); }
-        finally { try { uidoc.Selection.SetElementIds(keep); } catch { } }
-        Say("排管打断", r.cut == 1 ? $"已在 {t:0.00} m 处断开，两段标高连续。可 Ctrl+Z，或用“排管还原”接回。" : "失败：" + string.Join("；", r.failed));
-        return r.cut == 1 ? Result.Succeeded : Result.Failed;
+        var uidoc = app.ActiveUIDocument; var doc = uidoc.Document; int done = 0; string last = "";
+        while (true)
+        {
+            Reference r;
+            try { r = uidoc.Selection.PickObject(ObjectType.Element, new BankFilter(), $"点排管上要断开的位置（已断 {done} 处{last}，Esc 结束）"); }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException) { break; }
+            var bank = doc.GetElement(r.ElementId); var keep = uidoc.Selection.GetElementIds();
+            string? err;
+            try { err = BreakAtPoint(doc, bank, r.GlobalPoint, app); }
+            catch (Exception ex) { err = ex.Message; }
+            if (err is null) { done++; last = ""; } else last = "，上一次：" + err;
+        }
+        return done > 0 ? Result.Succeeded : Result.Cancelled;
     }
 
     public static Result Restore(UIApplication app)
