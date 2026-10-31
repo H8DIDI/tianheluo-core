@@ -48,6 +48,7 @@
 | [`well-depth-report`](well-depth-report/) | 井深统计报表 | 0.1.6 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.4 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-family-guard`](well-family-guard/) | 井族体检 | 0.1.2 | Python | didi | MIT |
+| [`well-gap-dim`](well-gap-dim/) | 井间距自动标注 | 0.1.0 | Python | didi | MIT |
 | [`well-list-check`](well-list-check/) | 井表核对 | 0.1.0 | Python | didi | MIT |
 | [`well-number`](well-number/) | 一键编号 | 0.2.1 | Python | didi | MIT |
 | [`well-param-sync`](well-param-sync/) | 井参数同步 | 0.1.2 | Python | didi | MIT |

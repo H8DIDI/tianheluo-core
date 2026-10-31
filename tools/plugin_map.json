@@ -253,6 +253,10 @@
       "group": "井与管线",
       "status": "tested"
     },
+    "well-gap-dim": {
+      "group": "井与管线",
+      "status": "beta"
+    },
     "duct-elev": {
       "group": "井与管线",
       "status": "tested"
