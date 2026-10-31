@@ -189,6 +189,132 @@ public static class Jogger
         return plans;
     }
 
+    // ------------------------------------------------------------------------------------------------------------------
+    // Corridor coordination: several runs at once. Every unit (a run, or a bundle of parallel runs) gets candidates
+    // (up, down, left, right); candidates whose plan path crosses a path that another unit keeps or takes are refused;
+    // the cheapest consistent choice wins. Staying in plan (up / down) is preferred, moving in plan is the fallback.
+    // ------------------------------------------------------------------------------------------------------------------
+    sealed record Cand(string Way, List<JogPlan> Plans, double Cost, List<(XYZ a, XYZ b)> PlanPath, double HalfWidthFt, List<(double r, double hw)> Dims);
+
+    static List<(XYZ a, XYZ b)> PathOf(JogPlan p)
+    {
+        var u = (p.P1 - p.P0).Normalize(); var xy = new XYZ(p.Offset.X, p.Offset.Y, 0);
+        var pa = p.P0 + u * (p.TaFt - p.RunFt); var pa2 = p.P0 + u * p.TaFt + xy; var pb2 = p.P0 + u * p.TbFt + xy; var pb = p.P0 + u * (p.TbFt + p.RunFt);
+        var pts = new[] { p.P0, pa, pa2, pb2, pb, p.P1 }; var l = new List<(XYZ, XYZ)>();
+        for (int i = 0; i + 1 < pts.Length; i++) l.Add((new XYZ(pts[i].X, pts[i].Y, 0), new XYZ(pts[i + 1].X, pts[i + 1].Y, 0)));
+        return l;
+    }
+
+    static double SegDist2D(XYZ a, XYZ b, XYZ c, XYZ d)
+    {
+        double Pt(XYZ p, XYZ s, XYZ e) { var v = e - s; double L2 = v.X * v.X + v.Y * v.Y; double t = L2 < 1e-12 ? 0 : Math.Max(0, Math.Min(1, ((p.X - s.X) * v.X + (p.Y - s.Y) * v.Y) / L2)); return Math.Sqrt(Math.Pow(p.X - s.X - t * v.X, 2) + Math.Pow(p.Y - s.Y - t * v.Y, 2)); }
+        bool Cross(XYZ p1, XYZ p2, XYZ p3, XYZ p4)
+        {
+            double d1 = (p4 - p3).X * (p1 - p3).Y - (p4 - p3).Y * (p1 - p3).X, d2 = (p4 - p3).X * (p2 - p3).Y - (p4 - p3).Y * (p2 - p3).X, d3 = (p2 - p1).X * (p3 - p1).Y - (p2 - p1).Y * (p3 - p1).X, d4 = (p2 - p1).X * (p4 - p1).Y - (p2 - p1).Y * (p4 - p1).X;
+            return d1 * d2 < 0 && d3 * d4 < 0;
+        }
+        if (Cross(a, b, c, d)) return 0;
+        return Math.Min(Math.Min(Pt(a, c, d), Pt(b, c, d)), Math.Min(Pt(c, a, b), Pt(d, a, b)));
+    }
+
+    /// <summary>Height of the run's axis above its own start level at a plan point: 0 outside the jog, the full lift on the flat part, linear on the slopes.</summary>
+    static double LiftAt(JogPlan p, XYZ pt)
+    {
+        var u = (p.P1 - p.P0).Normalize(); double t = (new XYZ(pt.X, pt.Y, 0) - new XYZ(p.P0.X, p.P0.Y, 0)).DotProduct(u), dz = p.Offset.Z;
+        if (Math.Abs(dz) < 1e-9) return 0;
+        double a0 = p.TaFt - p.RunFt, a1 = p.TaFt, b0 = p.TbFt, b1 = p.TbFt + p.RunFt;
+        if (t <= a0 || t >= b1) return 0; if (t < a1) return dz * (t - a0) / (a1 - a0); if (t <= b0) return dz; return dz * (b1 - t) / (b1 - b0);
+    }
+
+    static bool Intersect2D(XYZ a, XYZ b, XYZ c, XYZ d, out XYZ pt)
+    {
+        pt = a; double r = (b - a).X * (d - c).Y - (b - a).Y * (d - c).X; if (Math.Abs(r) < 1e-12) return false;
+        double t = ((c - a).X * (d - c).Y - (c - a).Y * (d - c).X) / r, s = ((c - a).X * (b - a).Y - (c - a).Y * (b - a).X) / r;
+        if (t < 0 || t > 1 || s < 0 || s > 1) return false; pt = a + (b - a) * t; return true;
+    }
+
+    /// <summary>Two choices conflict when, at a crossing (or where they run side by side), the two axes are closer in height than their sizes plus the clearance.</summary>
+    static bool Conflict(Cand x, Cand y, double clrFt)
+    {
+        for (int i = 0; i < x.Plans.Count; i++)
+            for (int k = 0; k < y.Plans.Count; k++)
+            {
+                var px = x.Plans[i]; var py = y.Plans[k]; var (rx, hx) = x.Dims[i]; var (ry, hy) = y.Dims[k];
+                foreach (var (a, b) in PathOf(px)) foreach (var (c, d) in PathOf(py))
+                {
+                    if (Intersect2D(a, b, c, d, out var pt))
+                    {
+                        double zx = px.P0.Z + LiftAt(px, pt), zy = py.P0.Z + LiftAt(py, pt);
+                        if (Math.Abs(zx - zy) < rx + ry + clrFt) return true;
+                    }
+                    else if (SegDist2D(a, b, c, d) < hx + hy + clrFt)
+                    {
+                        var ma = (a + b) / 2; var mc = (c + d) / 2;
+                        if (Math.Abs(px.P0.Z + LiftAt(px, ma) - (py.P0.Z + LiftAt(py, mc))) < rx + ry + clrFt) return true;
+                    }
+                }
+            }
+        return false;
+    }
+
+    public static List<JogPlan> PlanCoordinated(Document doc, IList<MEPCurve> ms, JogOptions o, out List<string> notes)
+    {
+        notes = new(); var result = new List<JogPlan>();
+        // units: bundles of parallel, close runs with overlapping windows; everything else alone
+        var first = new List<(MEPCurve m, JogPlan p)>();
+        foreach (var m in ms) { var p = Plan(doc, m, new JogOptions { Mode = "vertical", Direction = "auto", ClearanceM = o.ClearanceM, AngleDeg = o.AngleDeg, MarginM = o.MarginM, MinOffsetM = o.MinOffsetM }, out var err); if (p is null) { var q = Plan(doc, m, new JogOptions { Mode = "plane", ClearanceM = o.ClearanceM, AngleDeg = o.AngleDeg, MarginM = o.MarginM, MinOffsetM = o.MinOffsetM }, out var err2); if (q is null) { notes.Add($"{m.Id}：{err}"); continue; } p = q; } first.Add((m, p)); }
+        var par = Enumerable.Range(0, first.Count).ToArray(); int Find(int x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; }
+        for (int i = 0; i < first.Count; i++) for (int k = i + 1; k < first.Count; k++)
+        {
+            var a = first[i].p; var b = first[k].p; var ua = (a.P1 - a.P0).Normalize(); var ub = (b.P1 - b.P0).Normalize();
+            if (ua.CrossProduct(ub).GetLength() > 0.02) continue;
+            var nn = new XYZ(-ua.Y, ua.X, 0).Normalize(); if (Math.Abs((b.P0 - a.P0).DotProduct(nn)) > 6 / Ft) continue;
+            double off = (b.P0 - a.P0).DotProduct(ua) * Math.Sign(ua.DotProduct(ub));
+            if (Math.Max(a.TaFt - a.RunFt, b.TaFt - b.RunFt + off) <= Math.Min(a.TbFt + a.RunFt, b.TbFt + b.RunFt + off)) par[Find(i)] = Find(k);
+        }
+        var units = new List<List<MEPCurve>>();
+        foreach (var g in first.Select((s, i) => (s, i)).GroupBy(x => Find(x.i))) units.Add(g.Select(x => x.s.m).ToList());
+        double clr = o.ClearanceM / Ft;
+        var cands = new List<List<Cand>>();
+        foreach (var u in units)
+        {
+            var list = new List<Cand>();
+            foreach (var (mode, dir) in new[] { ("vertical", "up"), ("vertical", "down"), ("plane", "left"), ("plane", "right") })
+            {
+                var oo = new JogOptions { Mode = mode, Direction = dir, ClearanceM = o.ClearanceM, AngleDeg = o.AngleDeg, MarginM = o.MarginM, MinOffsetM = o.MinOffsetM };
+                List<JogPlan>? plans = u.Count == 1 ? (Plan(doc, u[0], oo, out _) is { } p ? new List<JogPlan> { p } : null) : PlanBundle(doc, u, oo, out _);
+                if (plans is null) continue;
+                double dist = plans.Max(p => p.Offset.GetLength()) * Ft, cost = mode == "vertical" ? dist : dist + 5;
+                list.Add(new Cand($"{mode}-{dir}", plans, cost, plans.SelectMany(PathOf).ToList(), u.Max(HalfWidthFt), u.Select(mm => (HalfHeightFt(mm), HalfWidthFt(mm))).ToList()));
+            }
+            cands.Add(list);
+        }
+        // straight paths of the runs that stay as they are (selected but with no way out) also count as obstacles for the others
+        int n = units.Count; var best = new int[n]; double bestCost = double.MaxValue; var cur = new int[n];
+        void Dfs(int i, double cost)
+        {
+            if (cost >= bestCost) return;
+            if (i == n) { bestCost = cost; Array.Copy(cur, best, n); return; }
+            if (cands[i].Count == 0) { cur[i] = -1; Dfs(i + 1, cost + 1000); return; }
+            foreach (var (c, k) in cands[i].Select((c, k) => (c, k)).OrderBy(x => x.c.Cost))
+            {
+                bool bad = false; for (int j = 0; j < i && !bad; j++) if (cur[j] >= 0) bad = Conflict(c, cands[j][cur[j]], clr);
+                if (bad) continue; cur[i] = k; Dfs(i + 1, cost + c.Cost);
+            }
+            cur[i] = -1; Dfs(i + 1, cost + 1000);      // nothing consistent: leave this unit alone
+        }
+        if (n <= 10) Dfs(0, 0);
+        else for (int i = 0; i < n; i++) { best[i] = cands[i].Count > 0 ? 0 : -1; }
+        for (int i = 0; i < n; i++)
+        {
+            if (best[i] < 0 || cands[i].Count == 0) { notes.Add($"{string.Join("、", units[i].Select(x => x.Id))}：没有互不冲突的绕法，保持原样"); continue; }
+            var c = cands[i][best[i]]; result.AddRange(c.Plans);
+            string way = c.Way switch { "vertical-up" => "从上面", "vertical-down" => "从下面", "plane-left" => "从左边（改平面）", _ => "从右边（改平面）" };
+            notes.Add($"{(units[i].Count > 1 ? $"{units[i].Count} 根并成一束：" : "")}{string.Join("、", units[i].Select(x => x.Id))} → {way}，{c.Cost:0.0} 分");
+        }
+        return result;
+    }
+
     static bool SameRun(Element a, Element b)
     {
         try

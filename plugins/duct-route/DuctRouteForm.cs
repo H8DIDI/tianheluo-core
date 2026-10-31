@@ -4,7 +4,7 @@ using System.Windows.Forms;
 namespace KaifaTools.DuctRoute;
 
 public enum ScopeKind { Selection, ScopeBox, WholeModel }
-public enum ReqKind { Compute, Apply, Restore, Select, Cancel, DeleteDimsAndRetry, ImportResult, PickOne, CutWells, RestoreCuts, Round, Align, Check, GeneralCheck, JogPick, JogRestore, JogPlane, JogBundle, JogAuto }
+public enum ReqKind { Compute, Apply, Restore, Select, Cancel, DeleteDimsAndRetry, ImportResult, PickOne, CutWells, RestoreCuts, Round, Align, Check, GeneralCheck, JogPick, JogRestore, JogPlane, JogBundle, JogAuto, JogCorridor }
 public sealed record RouteRequest(ReqKind Kind, ScopeKind Scope = ScopeKind.Selection, long ScopeBoxId = 0, long SelectId = 0, RouteRules? Rules = null, string? Path = null);
 
 public sealed class DuctRouteForm : Form
@@ -21,7 +21,7 @@ public sealed class DuctRouteForm : Form
     readonly Button _go = new() { Text = "1 计算", Width = 90, Height = 30 }, _apply = new() { Text = "2 写入 Revit", Width = 110, Height = 30, Enabled = false },
         _restore = new() { Text = "还原上一次", Width = 100, Height = 30 }, _dims = new() { Text = "删标注并重写", Width = 170, Height = 30, Visible = false }, _import = new() { Text = "导入 Rhino 结果…", Width = 150, Height = 30 },
         _pick = new() { Text = "点选一根避让", Width = 140, Height = 30 }, _cut = new() { Text = "井处断开", Width = 100, Height = 30 }, _restoreCut = new() { Text = "还原断开", Width = 100, Height = 30 },
-        _round = new() { Text = "标高取整", Width = 100, Height = 30 }, _align = new() { Text = "接头对齐", Width = 100, Height = 30 }, _check = new() { Text = "碰撞检查", Width = 100, Height = 30 }, _gcheck = new() { Text = "水管/风管/桥架/线管碰撞检查", Width = 260, Height = 30 }, _jog = new() { Text = "点选管线绕行(Jog)", Width = 170, Height = 30 }, _jogRestore = new() { Text = "还原绕行", Width = 100, Height = 30 }, _jogPlane = new() { Text = "点选管线平面绕行", Width = 170, Height = 30 }, _jogBundle = new() { Text = "选中一束一起平面绕行", Width = 220, Height = 30 }, _jogAuto = new() { Text = "自动规划多根绕行(并线)", Width = 230, Height = 30 }, _stop = new() { Text = "停止", Width = 60, Height = 30, Enabled = false };
+        _round = new() { Text = "标高取整", Width = 100, Height = 30 }, _align = new() { Text = "接头对齐", Width = 100, Height = 30 }, _check = new() { Text = "碰撞检查", Width = 100, Height = 30 }, _gcheck = new() { Text = "水管/风管/桥架/线管碰撞检查", Width = 260, Height = 30 }, _jog = new() { Text = "点选管线绕行(Jog)", Width = 170, Height = 30 }, _jogRestore = new() { Text = "还原绕行", Width = 100, Height = 30 }, _jogPlane = new() { Text = "点选管线平面绕行", Width = 170, Height = 30 }, _jogBundle = new() { Text = "选中一束一起平面绕行", Width = 220, Height = 30 }, _jogAuto = new() { Text = "自动规划多根绕行(并线)", Width = 230, Height = 30 }, _jogCorridor = new() { Text = "走廊协调绕行(自动选上/下/左/右)", Width = 290, Height = 30 }, _stop = new() { Text = "停止", Width = 60, Height = 30, Enabled = false };
     readonly DataGridView _grid = new() { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoGenerateColumns = false };
     readonly Label _status = new() { Dock = DockStyle.Fill, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft };
     readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
@@ -63,7 +63,7 @@ public sealed class DuctRouteForm : Form
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 400 };
         split.Panel1.Controls.Add(_grid); split.Panel2.Controls.Add(_log);
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 34 }; bottom.Controls.Add(_status);
-        tools.Controls.AddRange(new Control[] { _pick, _cut, _restoreCut, _round, _align, _check, _gcheck, _jog, _jogPlane, _jogBundle, _jogAuto, _jogRestore });
+        tools.Controls.AddRange(new Control[] { _pick, _cut, _restoreCut, _round, _align, _check, _gcheck, _jog, _jogPlane, _jogBundle, _jogAuto, _jogCorridor, _jogRestore });
         Controls.Add(split); Controls.Add(bottom); Controls.Add(tools); Controls.Add(btns); Controls.Add(rules1); Controls.Add(top);
 
         _go.Click += (_, _) => { Busy(true); Requested?.Invoke(new RouteRequest(ReqKind.Compute, CurrentScope(), BoxId(), Rules: ReadRules(rules))); };
@@ -84,7 +84,7 @@ public sealed class DuctRouteForm : Form
                 Busy(true); Requested?.Invoke(new RouteRequest(k, CurrentScope(), BoxId(), Rules: ReadRules(rules)));
             };
         }
-        Tool(_pick, ReqKind.PickOne); Tool(_cut, ReqKind.CutWells); Tool(_round, ReqKind.Round); Tool(_align, ReqKind.Align); Tool(_check, ReqKind.Check); Tool(_gcheck, ReqKind.GeneralCheck); Tool(_jog, ReqKind.JogPick); Tool(_jogAuto, ReqKind.JogAuto); Tool(_jogBundle, ReqKind.JogBundle, "先在 Revit 里选中平行的几根管线（一束），再点确定。它们会一起平移，保持平行。继续？"); Tool(_jogPlane, ReqKind.JogPlane, "平面绕行会改这根管线的平面位置（向左或向右绕开障碍）。继续点选？"); Tool(_jogRestore, ReqKind.JogRestore, "按最近一次备份，撤销上一次绕行？");
+        Tool(_pick, ReqKind.PickOne); Tool(_cut, ReqKind.CutWells); Tool(_round, ReqKind.Round); Tool(_align, ReqKind.Align); Tool(_check, ReqKind.Check); Tool(_gcheck, ReqKind.GeneralCheck); Tool(_jog, ReqKind.JogPick); Tool(_jogAuto, ReqKind.JogAuto); Tool(_jogCorridor, ReqKind.JogCorridor); Tool(_jogBundle, ReqKind.JogBundle, "先在 Revit 里选中平行的几根管线（一束），再点确定。它们会一起平移，保持平行。继续？"); Tool(_jogPlane, ReqKind.JogPlane, "平面绕行会改这根管线的平面位置（向左或向右绕开障碍）。继续点选？"); Tool(_jogRestore, ReqKind.JogRestore, "按最近一次备份，撤销上一次绕行？");
         Tool(_restoreCut, ReqKind.RestoreCuts, "按最近一次备份，把断开的排管接回去（删除多出来的段）？");
         _onlyChanged.CheckedChanged += (_, _) => Fill(_all);
         DpiFit.Apply(this);

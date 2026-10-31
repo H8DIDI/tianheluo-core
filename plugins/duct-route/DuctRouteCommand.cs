@@ -93,6 +93,22 @@ public sealed class RouteHandler : IExternalEventHandler
                         catch (Autodesk.Revit.Exceptions.OperationCanceledException) { form.ShowMessage("已取消点选"); }
                         form.Busy(false); break;
                     }
+                case ReqKind.JogCorridor:
+                    {
+                        var ms = uidoc.Selection.GetElementIds().Select(i => doc.GetElement(i)).OfType<MEPCurve>().ToList();
+                        if (ms.Count == 0) { form.ShowMessage("请先在 Revit 里选要协调的水管、风管、桥架、线管（可以很多根，互相交叉也行）"); form.Busy(false); break; }
+                        form.ShowMessage("协调规划中 …"); form.Refresh();
+                        var plans = Jogger.PlanCoordinated(doc, ms, new JogOptions(), out var notes);
+                        foreach (var n in notes) form.Log("  " + n);
+                        foreach (var p in plans) form.Log("    " + p.Summary);
+                        if (plans.Count == 0) { form.ShowMessage("没有能绕行的（见日志）"); form.Busy(false); break; }
+                        var td = new Autodesk.Revit.UI.TaskDialog("走廊协调绕行") { MainContent = $"选了 {ms.Count} 根，协调后 {plans.Count} 根要绕行（优先上下错开，不行才改平面；平行的并成一束；互相冲突的方案已排除）。一次确认全部执行，可用“还原绕行”一次接回。继续？", CommonButtons = TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No };
+                        if (td.Show() != TaskDialogResult.Yes) { form.ShowMessage("已取消"); form.Busy(false); break; }
+                        var keep = uidoc.Selection.GetElementIds(); uidoc.Selection.SetElementIds(new List<ElementId>());
+                        (bool ok, string message) res;
+                        try { res = Jogger.ApplyBundle(doc, plans, app); } finally { try { uidoc.Selection.SetElementIds(keep); } catch { } }
+                        form.ShowMessage(res.message); form.Busy(false); break;
+                    }
                 case ReqKind.JogAuto:
                     {
                         var ms = uidoc.Selection.GetElementIds().Select(i => doc.GetElement(i)).OfType<MEPCurve>().ToList();
