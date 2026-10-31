@@ -13,7 +13,7 @@ public static class GeneralCheck
     static readonly BuiltInCategory[] Hits =
     {
         BuiltInCategory.OST_PipeCurves, BuiltInCategory.OST_DuctCurves, BuiltInCategory.OST_CableTray, BuiltInCategory.OST_Conduit,
-        BuiltInCategory.OST_StructuralFraming, BuiltInCategory.OST_StructuralColumns, BuiltInCategory.OST_Floors, BuiltInCategory.OST_Walls, BuiltInCategory.OST_GenericModel,
+        BuiltInCategory.OST_StructuralFraming, BuiltInCategory.OST_StructuralColumns, BuiltInCategory.OST_StructuralFoundation, BuiltInCategory.OST_Floors, BuiltInCategory.OST_Walls, BuiltInCategory.OST_GenericModel,
         BuiltInCategory.OST_MechanicalEquipment, BuiltInCategory.OST_ElectricalEquipment
     };
 

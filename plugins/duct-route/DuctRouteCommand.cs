@@ -93,6 +93,22 @@ public sealed class RouteHandler : IExternalEventHandler
                         catch (Autodesk.Revit.Exceptions.OperationCanceledException) { form.ShowMessage("已取消点选"); }
                         form.Busy(false); break;
                     }
+                case ReqKind.JogPath:
+                    {
+                        var ms = uidoc.Selection.GetElementIds().Select(i => doc.GetElement(i)).OfType<MEPCurve>().ToList();
+                        if (ms.Count == 0) { form.ShowMessage("请先在 Revit 里选要绕行的管线（可以多根）"); form.Busy(false); break; }
+                        var plans = new List<JogPlan>(); var notes = new List<string>();
+                        foreach (var m in ms) { var p = Jogger.PlanPath(doc, m, new JogOptions(), out var err); if (p is null) notes.Add($"{m.Id}：{err}"); else plans.Add(p); }
+                        foreach (var n in notes) form.Log("  " + n);
+                        foreach (var p in plans) form.Log("  " + p.Summary);
+                        if (plans.Count == 0) { form.ShowMessage("没有能绕行的（见日志）"); form.Busy(false); break; }
+                        var td = new Autodesk.Revit.UI.TaskDialog("沿障碍外沿绕行") { MainContent = $"{plans.Count} 根管线沿障碍外沿绕过去（障碍按真实外形外扩，走最短路，多个转折点，每个转折点生成弯头；会改平面位置）。可用“还原绕行”一次接回。继续？", CommonButtons = TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No };
+                        if (td.Show() != TaskDialogResult.Yes) { form.ShowMessage("已取消"); form.Busy(false); break; }
+                        var keep = uidoc.Selection.GetElementIds(); uidoc.Selection.SetElementIds(new List<ElementId>());
+                        (bool ok, string message) res;
+                        try { res = Jogger.ApplyBundle(doc, plans, app); } finally { try { uidoc.Selection.SetElementIds(keep); } catch { } }
+                        form.ShowMessage(res.message); form.Busy(false); break;
+                    }
                 case ReqKind.JogCorridor:
                     {
                         var ms = uidoc.Selection.GetElementIds().Select(i => doc.GetElement(i)).OfType<MEPCurve>().ToList();

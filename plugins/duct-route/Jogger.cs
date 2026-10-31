@@ -18,19 +18,19 @@ public sealed class JogOptions
     public double? FixedOffsetM { get; set; }         // bundle: the common signed shift (plane) or lift (vertical)    // smallest lift / shift (the slopes must be long enough for the elbow fittings)       // extra length kept on each side of the clash window
 }
 
-public sealed record JogPlan(long Id, string Category, XYZ P0, XYZ P1, XYZ Offset, double TaFt, double TbFt, double RunFt, List<(long id, string cat)> Obstacles, string Summary);
+public sealed record JogPlan(long Id, string Category, XYZ P0, XYZ P1, XYZ Offset, double TaFt, double TbFt, double RunFt, List<(long id, string cat)> Obstacles, string Summary, List<XYZ>? Points = null);
 
 /// <summary>
 /// Tool "绕行 (Jog)" for pipes, ducts, conduits and cable trays (the straight run is cut, the middle part goes over or under the obstacle on two slopes,
 /// the four joints get elbow fittings, the far end is reconnected). Everything happens in one transaction group; any failure rolls it all back.
 /// </summary>
-public static class Jogger
+public static partial class Jogger
 {
     const double Ft = 0.3048;
     static readonly BuiltInCategory[] Hits =
     {
         BuiltInCategory.OST_PipeCurves, BuiltInCategory.OST_DuctCurves, BuiltInCategory.OST_CableTray, BuiltInCategory.OST_Conduit,
-        BuiltInCategory.OST_StructuralFraming, BuiltInCategory.OST_StructuralColumns, BuiltInCategory.OST_Floors, BuiltInCategory.OST_Walls, BuiltInCategory.OST_GenericModel,
+        BuiltInCategory.OST_StructuralFraming, BuiltInCategory.OST_StructuralColumns, BuiltInCategory.OST_StructuralFoundation, BuiltInCategory.OST_Floors, BuiltInCategory.OST_Walls, BuiltInCategory.OST_GenericModel,
         BuiltInCategory.OST_MechanicalEquipment, BuiltInCategory.OST_ElectricalEquipment
     };
 
@@ -198,6 +198,7 @@ public static class Jogger
 
     static List<(XYZ a, XYZ b)> PathOf(JogPlan p)
     {
+        if (p.Points is { Count: >= 2 } ps) { var l2 = new List<(XYZ, XYZ)>(); for (int i = 0; i + 1 < ps.Count; i++) l2.Add((new XYZ(ps[i].X, ps[i].Y, 0), new XYZ(ps[i + 1].X, ps[i + 1].Y, 0))); return l2; }
         var u = (p.P1 - p.P0).Normalize(); var xy = new XYZ(p.Offset.X, p.Offset.Y, 0);
         var pa = p.P0 + u * (p.TaFt - p.RunFt); var pa2 = p.P0 + u * p.TaFt + xy; var pb2 = p.P0 + u * p.TbFt + xy; var pb = p.P0 + u * (p.TbFt + p.RunFt);
         var pts = new[] { p.P0, pa, pa2, pb2, pb, p.P1 }; var l = new List<(XYZ, XYZ)>();
@@ -287,13 +288,18 @@ public static class Jogger
                 double dist = plans.Max(p => p.Offset.GetLength()) * Ft, cost = mode == "vertical" ? dist : dist + 5;
                 list.Add(new Cand($"{mode}-{dir}", plans, cost, plans.SelectMany(PathOf).ToList(), u.Max(HalfWidthFt), u.Select(mm => (HalfHeightFt(mm), HalfWidthFt(mm))).ToList()));
             }
+            if (u.Count == 1 && PlanPath(doc, u[0], new JogOptions { ClearanceM = o.ClearanceM, AngleDeg = o.AngleDeg, MarginM = o.MarginM, MinOffsetM = o.MinOffsetM }, out _) is { } pp)
+            {
+                double ex = pp.Points!.Zip(pp.Points.Skip(1), (a, b) => (b - a).GetLength()).Sum() - (pp.P1 - pp.P0).GetLength();
+                list.Add(new Cand("plane-path", new List<JogPlan> { pp }, ex * Ft + 5, PathOf(pp), HalfWidthFt(u[0]), new() { (HalfHeightFt(u[0]), HalfWidthFt(u[0])) }));
+            }
             cands.Add(list);
         }
         // straight paths of the runs that stay as they are (selected but with no way out) also count as obstacles for the others
-        int n = units.Count; var best = new int[n]; double bestCost = double.MaxValue; var cur = new int[n];
+        int n = units.Count; var best = new int[n]; double bestCost = double.MaxValue; var cur = new int[n]; var sw = System.Diagnostics.Stopwatch.StartNew();
         void Dfs(int i, double cost)
         {
-            if (cost >= bestCost) return;
+            if (cost >= bestCost || sw.ElapsedMilliseconds > 6000) return;      // anytime search: the best found so far is kept when the time is up
             if (i == n) { bestCost = cost; Array.Copy(cur, best, n); return; }
             if (cands[i].Count == 0) { cur[i] = -1; Dfs(i + 1, cost + 1000); return; }
             foreach (var (c, k) in cands[i].Select((c, k) => (c, k)).OrderBy(x => x.c.Cost))
@@ -303,8 +309,10 @@ public static class Jogger
             }
             cur[i] = -1; Dfs(i + 1, cost + 1000);      // nothing consistent: leave this unit alone
         }
-        if (n <= 10) Dfs(0, 0);
-        else for (int i = 0; i < n; i++) { best[i] = cands[i].Count > 0 ? 0 : -1; }
+        // greedy first answer (cheapest consistent candidate per unit) gives the search a bound to prune with
+        { double g = 0; var gi = new int[n]; for (int i = 0; i < n; i++) { gi[i] = -1; foreach (var (c, k) in cands[i].Select((c, k) => (c, k)).OrderBy(x => x.c.Cost)) { bool bad = false; for (int jx = 0; jx < i && !bad; jx++) if (gi[jx] >= 0) bad = Conflict(c, cands[jx][gi[jx]], clr); if (!bad) { gi[i] = k; g += c.Cost; break; } } if (gi[i] < 0) g += 1000; } bestCost = g + 1e-6; Array.Copy(gi, best, n); }
+        Dfs(0, 0);
+        if (sw.ElapsedMilliseconds > 6000) notes.Add($"单元较多（{n} 个），搜索到时间上限，取已找到的最好方案");
         for (int i = 0; i < n; i++)
         {
             if (best[i] < 0 || cands[i].Count == 0) { notes.Add($"{string.Join("、", units[i].Select(x => x.Id))}：没有互不冲突的绕法，保持原样"); continue; }
@@ -364,6 +372,7 @@ public static class Jogger
         var farOwners = far.Select(c => c.Owner.Id.Value).ToList();
         var xyz = pl.Offset;
         var pa = pl.P0 + u * (pl.TaFt - pl.RunFt); var pa2 = pl.P0 + u * pl.TaFt + xyz; var pb2 = pl.P0 + u * pl.TbFt + xyz; var pb = pl.P0 + u * (pl.TbFt + pl.RunFt);
+        var pts = pl.Points ?? new List<XYZ> { pl.P0, pa, pa2, pb2, pb, pl.P1 };
         var created = new List<long>(); stamp ??= DateTime.Now.ToString("yyyyMMdd-HHmmss"); string file = Path.Combine(Writer.BackupDir, $"jog-{stamp}-{index}.json"); Directory.CreateDirectory(Writer.BackupDir);
         string sysBefore = SysName(m); var ins = InsulationOf(doc, m);
         using var tg = new TransactionGroup(doc, "排管/管线绕行"); tg.Start();
@@ -371,20 +380,19 @@ public static class Jogger
         {
             using var t = new Transaction(doc, "绕行"); t.Start();
             var fo = t.GetFailureHandlingOptions(); fo.SetFailuresPreprocessor(new Writer.DropWarnings()); t.SetFailureHandlingOptions(fo);
-            ((LocationCurve)m.Location).Curve = Line.CreateBound(pl.P0, pa);
-            var s1 = Create(doc, m, pa, pa2); var b = Create(doc, m, pa2, pb2); var s2 = Create(doc, m, pb2, pb); var c = Create(doc, m, pb, pl.P1);
-            created.AddRange(new[] { s1.Id.Value, b.Id.Value, s2.Id.Value, c.Id.Value });
-            foreach (var piece in new[] { s1, b, s2, c }) AddInsulation(doc, piece, ins);
-            var seq = new (Element a, XYZ pt, Element b)[] { (m, pa, s1), (s1, pa2, b), (b, pb2, s2), (s2, pb, c) };
-            foreach (var (x, pt, y) in seq) created.Add(doc.Create.NewElbowFitting(Near(x, pt), Near(y, pt)).Id.Value);
-            var cc = Near(c, pl.P1); foreach (var r in far) { try { cc.ConnectTo(r); } catch { } }
+            ((LocationCurve)m.Location).Curve = Line.CreateBound(pts[0], pts[1]);
+            var pieces = new List<MEPCurve> { m };
+            for (int i = 1; i + 1 < pts.Count; i++) pieces.Add(Create(doc, m, pts[i], pts[i + 1]));
+            foreach (var piece in pieces.Skip(1)) { created.Add(piece.Id.Value); AddInsulation(doc, piece, ins); }
+            for (int i = 1; i + 1 < pts.Count; i++) created.Add(doc.Create.NewElbowFitting(Near(pieces[i - 1], pts[i]), Near(pieces[i], pts[i])).Id.Value);
+            var cc = Near(pieces[^1], pl.P1); foreach (var r in far) { try { cc.ConnectTo(r); } catch { } }
             if (t.Commit() != TransactionStatus.Committed) { tg.RollBack(); return (false, "被回滚（Revit 没接受这次绕行）", ""); }
         }
         catch (Exception ex) { try { tg.RollBack(); } catch { } return (false, "失败，已全部撤销：" + ex.Message, ""); }
         tg.Assimilate();
         var report = Review(doc, m, created, pl, sysBefore, ins is not null);
         File.WriteAllText(file, JsonSerializer.Serialize(new { doc = doc.Title, time = DateTime.Now, id = pl.Id, p0 = new[] { pl.P0.X, pl.P0.Y, pl.P0.Z }, p1 = new[] { pl.P1.X, pl.P1.Y, pl.P1.Z }, created, farOwners }));
-        return (true, $"已绕行：新建 {created.Count} 个（4 段管线 + 4 个弯头）。{report}可 Ctrl+Z 撤销或用“还原绕行”", file);
+        return (true, $"已绕行：新建 {created.Count} 个（{pts.Count - 2} 段管线 + {pts.Count - 2} 个弯头）。{report}可 Ctrl+Z 撤销或用“还原绕行”", file);
     }
 
     sealed record Ins(ElementId TypeId, double Thickness, bool IsPipe);
