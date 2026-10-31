@@ -1,0 +1,15 @@
+{
+  "id": "mep-outline",
+  "name": "管线沿障碍外沿绕行",
+  "version": "0.1.0",
+  "description": "障碍是什么形状就沿什么形状绕（L 形楼板、斜管线也行），走最短路，每个转折点自动生成弯头，会改平面位置。",
+  "category": "管线调整",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "MepOutline.dll",
+  "entry": "KaifaTools.Commands.MepOutlineCommand",
+  "glyph": "沿",
+  "color": "#FBBF24",
+  "author": "didi",
+  "license": "MIT"
+}

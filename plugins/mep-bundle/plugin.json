@@ -1,0 +1,15 @@
+{
+  "id": "mep-bundle",
+  "name": "管线并线绕行",
+  "version": "0.1.0",
+  "description": "选一束互相平行的管线，保持间距一起平移绕开障碍，一次完成，不会各绕各的互相打架。",
+  "category": "管线调整",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "MepBundle.dll",
+  "entry": "KaifaTools.Commands.MepBundleCommand",
+  "glyph": "并",
+  "color": "#A78BFA",
+  "author": "didi",
+  "license": "MIT"
+}

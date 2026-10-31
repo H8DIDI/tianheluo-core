@@ -1,0 +1,15 @@
+{
+  "id": "mep-corridor",
+  "name": "管线多根协调绕行",
+  "version": "0.1.0",
+  "description": "一次选很多根、互相交叉也行：自动选上/下/左/右，保证改完之后互相不冲突，再统一执行。",
+  "category": "管线调整",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "MepCorridor.dll",
+  "entry": "KaifaTools.Commands.MepCorridorCommand",
+  "glyph": "协",
+  "color": "#F472B6",
+  "author": "didi",
+  "license": "MIT"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "mep-hop",
+  "name": "管线过障翻弯",
+  "version": "0.1.0",
+  "description": "选水管、风管、桥架或线管，从碰到的障碍上面或下面翻过去，不改平面位置，接头自动生成 45° 弯头，系统和保温跟着走。",
+  "category": "管线调整",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "MepHop.dll",
+  "entry": "KaifaTools.Commands.MepHopCommand",
+  "glyph": "翻",
+  "color": "#38BDF8",
+  "author": "didi",
+  "license": "MIT"
+}

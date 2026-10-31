@@ -12,6 +12,11 @@
       "desc": "井和排管的建模整理：编号、井深、排管贴井、分区、参数、族、垫层、控制点，以及井表核对、工程量、RFI 取证。"
     },
     {
+      "name": "管线调整",
+      "color": "#14B8A6",
+      "desc": "水管、风管、桥架、线管的小工具：翻弯、绕行、并线、打断、还原、碰撞和连续性检查。每个工具只做一件事，各自独立。"
+    },
+    {
       "name": "结构与算量",
       "color": "#10B981",
       "desc": "柱和基础配筋、钢筋三维查看、框选提量。"
@@ -254,6 +259,42 @@
     },
     "duct-route": {
       "group": "井与管线",
+      "status": "beta"
+    },
+    "mep-hop": {
+      "group": "管线调整",
+      "status": "beta"
+    },
+    "mep-detour": {
+      "group": "管线调整",
+      "status": "beta"
+    },
+    "mep-bundle": {
+      "group": "管线调整",
+      "status": "beta"
+    },
+    "mep-outline": {
+      "group": "管线调整",
+      "status": "beta"
+    },
+    "mep-corridor": {
+      "group": "管线调整",
+      "status": "beta"
+    },
+    "mep-break": {
+      "group": "管线调整",
+      "status": "beta"
+    },
+    "mep-restore": {
+      "group": "管线调整",
+      "status": "beta"
+    },
+    "mep-clash": {
+      "group": "管线调整",
+      "status": "beta"
+    },
+    "mep-continuity": {
+      "group": "管线调整",
       "status": "beta"
     }
   }
