@@ -48,6 +48,48 @@ public static partial class Jogger
         return new() { (bb.Min.X, bb.Min.Y), (bb.Max.X, bb.Min.Y), (bb.Max.X, bb.Max.Y), (bb.Min.X, bb.Max.Y) };
     }
 
+    /// <summary>
+    /// Plan outline as a list of CONVEX pieces: the triangles of the upward faces of the element's solids (so an L-shaped slab stays L-shaped).
+    /// Falls back to the convex hull when no face can be read.
+    /// </summary>
+    public static List<List<(double x, double y)>> Pieces(Element e)
+    {
+        var tris = new List<List<(double x, double y)>>();
+        try
+        {
+            var opt = new Options { ComputeReferences = false, DetailLevel = ViewDetailLevel.Coarse };
+            void Walk(GeometryElement? ge)
+            {
+                if (ge is null) return;
+                foreach (GeometryObject go in ge)
+                    switch (go)
+                    {
+                        case Solid s when s.Volume > 1e-9:
+                            foreach (Face f in s.Faces)
+                            {
+                                if (f is not PlanarFace pf || Math.Abs(pf.FaceNormal.Z) < 0.5) continue;
+                                var mesh = f.Triangulate(0.3);
+                                for (int i = 0; i < mesh.NumTriangles; i++)
+                                {
+                                    var t = mesh.get_Triangle(i); var tri = new List<(double x, double y)> { (t.get_Vertex(0).X, t.get_Vertex(0).Y), (t.get_Vertex(1).X, t.get_Vertex(1).Y), (t.get_Vertex(2).X, t.get_Vertex(2).Y) };
+                                    double cr = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) - (tri[1].y - tri[0].y) * (tri[2].x - tri[0].x);
+                                    if (Math.Abs(cr) < 1e-9) continue; if (cr < 0) tri.Reverse(); tris.Add(tri);
+                                }
+                            }
+                            break;
+                        case GeometryInstance gi: Walk(gi.GetInstanceGeometry()); break;
+                    }
+            }
+            Walk(e.get_Geometry(opt));
+        }
+        catch { }
+        // keep one face of each stacked pair (top and bottom triangles coincide in plan) and cap the count
+        var uniq = new List<List<(double x, double y)>>(); var seen = new HashSet<string>();
+        foreach (var t in tris) { var key = string.Join("|", t.Select(q => $"{Math.Round(q.x, 2)},{Math.Round(q.y, 2)}").OrderBy(z => z)); if (seen.Add(key)) uniq.Add(t); }
+        if (uniq.Count == 0 || uniq.Count > 60) { var h = Footprint(e); return h.Count >= 3 ? new() { h } : new(); }
+        return uniq;
+    }
+
     /// <summary>The footprint grown by d on every side (octagon that contains the disk of radius d).</summary>
     static List<(double x, double y)> Grow(List<(double x, double y)> hull, double d)
     {
@@ -76,7 +118,7 @@ public static partial class Jogger
     public static List<XYZ>? ShortestPath(XYZ s, XYZ e, List<List<(double x, double y)>> grown, out string error)
     {
         error = ""; var nodes = new List<(double x, double y)> { (s.X, s.Y), (e.X, e.Y) };
-        foreach (var poly in grown) nodes.AddRange(poly);
+        foreach (var poly in grown) foreach (var v in poly) if (!grown.Any(o => !ReferenceEquals(o, poly) && PointInside(v, o))) nodes.Add(v);
         foreach (var poly in grown)
         {
             if (InsideLen(nodes[0], nodes[0], poly) > 0) { }
@@ -113,12 +155,13 @@ public static partial class Jogger
     public static JogPlan? PlanPath(Document doc, MEPCurve m, JogOptions o, out string error)
     {
         error = ""; if (m.Location is not LocationCurve lc || lc.Curve is not Line ln) { error = "只支持直线段"; return null; }
-        var p0 = ln.GetEndPoint(0); var p1 = ln.GetEndPoint(1); if (Math.Abs(p1.Z - p0.Z) > 0.05 * ln.Length) { error = "这一段有坡度，先不支持"; return null; }
+        var p0 = ln.GetEndPoint(0); var p1 = ln.GetEndPoint(1); if (Math.Abs(p1.Z - p0.Z) > 0.15 * ln.Length) { error = "这一段坡度太大（超过 15%），先不支持"; return null; }
         var hits = new FilteredElementCollector(doc).WherePasses(new ElementMulticategoryFilter(Hits)).WherePasses(new ElementIntersectsElementFilter(m)).ToElements().Where(x => x.Id != m.Id && !SameRun(m, x)).ToList();
         if (hits.Count == 0) { error = "这一段没有碰撞"; return null; }
         double d = o.ClearanceM / Ft + HalfWidthFt(m); var grown = new List<List<(double x, double y)>>();
-        foreach (var h in hits) { var f = Footprint(h); if (f.Count >= 3) grown.Add(Grow(f, d)); }
+        foreach (var h in hits) foreach (var piece in Pieces(h)) if (piece.Count >= 3) grown.Add(Grow(piece, d));
         var path = ShortestPath(p0, p1, grown, out error); if (path is null) return null;
+        { var u2 = new XYZ(p1.X - p0.X, p1.Y - p0.Y, 0); double L2 = u2.GetLength(); u2 = u2.Normalize(); for (int i = 1; i + 1 < path.Count; i++) { double t = Math.Max(0, Math.Min(1, (new XYZ(path[i].X - p0.X, path[i].Y - p0.Y, 0)).DotProduct(u2) / L2)); path[i] = new XYZ(path[i].X, path[i].Y, p0.Z + (p1.Z - p0.Z) * t); } }
         for (int i = 0; i + 1 < path.Count; i++) if ((path[i + 1] - path[i]).GetLength() < 0.6 / Ft) { error = "绕行路径里有太短的一段（小于 0.6 m），弯头放不下"; return null; }
         double extra = 0, straight = ln.Length; for (int i = 0; i + 1 < path.Count; i++) extra += (path[i + 1] - path[i]).GetLength(); extra -= straight;
         var obs = hits.Select(x => (x.Id.Value, x.Category?.Name ?? "")).ToList();

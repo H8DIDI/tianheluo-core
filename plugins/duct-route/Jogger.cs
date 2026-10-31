@@ -65,7 +65,7 @@ public static partial class Jogger
     {
         error = ""; if (m.Location is not LocationCurve lc || lc.Curve is not Line ln) { error = "只支持直线段"; return null; }
         var p0 = ln.GetEndPoint(0); var p1 = ln.GetEndPoint(1); double L = ln.Length; var u = (p1 - p0).Normalize();
-        if (Math.Abs(u.Z) > 0.02) { error = "这一段本身有坡度，先不支持"; return null; }
+        if (Math.Abs(u.Z) > 0.15) { error = "这一段坡度太大（超过 15%），先不支持"; return null; }
         var nrm = new XYZ(-u.Y, u.X, 0).Normalize(); bool plane = o.Mode == "plane";
         double r = HalfHeightFt(m), z0 = p0.Z, clr = o.ClearanceM / Ft;
         var hits = new FilteredElementCollector(doc).WherePasses(new ElementMulticategoryFilter(Hits)).WherePasses(new ElementIntersectsElementFilter(m)).ToElements()
@@ -80,6 +80,7 @@ public static partial class Jogger
                 { var q = new XYZ(x, y, z0) - p0; double t = q.DotProduct(u); a = Math.Min(a, t); b = Math.Max(b, t); double l = q.DotProduct(nrm); lmax = Math.Max(lmax, l); lmin = Math.Min(lmin, l); }
             tmin = Math.Min(tmin, Math.Max(a, 0)); tmax = Math.Max(tmax, Math.Min(b, L)); top = Math.Max(top, bb.Max.Z); bot = Math.Min(bot, bb.Min.Z); obs.Add((h.Id.Value, h.Category?.Name ?? ""));
         }
+        z0 = p0.Z + u.Z * ((tmin + tmax) / 2);                           // axis height in the middle of the clash window (the run may slope)
         double up = top + clr + r - z0, down = bot - clr - r - z0;        // down is negative
         double dz = o.Direction == "up" ? up : o.Direction == "down" ? down : (Math.Abs(down) < up ? down : up);
         double half = HalfWidthFt(m), left = lmax + clr + half, right = lmin - clr - half;   // right is negative
