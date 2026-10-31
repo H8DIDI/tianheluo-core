@@ -1,7 +1,7 @@
 {
   "id": "mep-continuity",
   "name": "管线连续性检查",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "只读：选管线，查有没有开口、接口没对上、邻接构件属于别的系统，导出清单，并把有问题的选中。",
   "category": "管线调整",
   "revit": "2026",

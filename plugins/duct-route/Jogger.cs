@@ -15,6 +15,8 @@ public sealed class JogOptions
     public double AngleDeg { get; set; } = 45;        // bend angle of the two slopes
     public double MarginM { get; set; } = 0.30;
     public double MinOffsetM { get; set; } = 0.60;
+    public double BankSlopePct { get; set; } = 8;        // 排管: slope of the lead-in / lead-out pieces of a vertical hop
+    public double BankPlanAngleDeg { get; set; } = 30;   // 排管: bend angle of a plan detour
     public double? FixedOffsetM { get; set; }         // bundle: the common signed shift (plane) or lift (vertical)    // smallest lift / shift (the slopes must be long enough for the elbow fittings)       // extra length kept on each side of the clash window
 }
 

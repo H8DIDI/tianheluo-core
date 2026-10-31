@@ -1,7 +1,7 @@
 {
   "id": "mep-restore",
   "name": "管线还原",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "把最近一次绕行或打断接回原样：删掉新生成的管线和接头，原管线恢复原长度并接回原来的邻居。",
   "category": "管线调整",
   "revit": "2026",

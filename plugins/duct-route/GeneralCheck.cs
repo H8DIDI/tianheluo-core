@@ -27,7 +27,7 @@ public static class GeneralCheck
         var filter = new ElementMulticategoryFilter(Hits);
         foreach (var id in ids)
         {
-            var e = doc.GetElement(id); if (e is null || !(IsMember(e) || Extractor.BankKind((e as FamilyInstance)?.Symbol?.FamilyName ?? "") is not null)) continue;
+            var e = doc.GetElement(id); if (e is null || !(IsMember(e) || e.Category?.Id.Value == (long)BuiltInCategory.OST_StructuralFraming)) continue;
             if (++n > max) { log?.Invoke($"只检查前 {max} 个构件"); break; }
             var hit = new FilteredElementCollector(doc).WherePasses(filter).WherePasses(new ElementIntersectsElementFilter(e)).ToElements()
                 .Where(o => o.Id != e.Id && !IsSameRun(e, o)).Select(o => (o.Id.Value, o.Category?.Name ?? "", o.Name)).ToList();

@@ -5,24 +5,29 @@
 
 | 插件 id | 名称 | 版本 | 类型 | 作者 | 许可 |
 |---|---|---|---|---|---|
+| [`bank-break`](bank-break/) | 排管打断 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-clash`](bank-clash/) | 排管碰撞检查 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-detour`](bank-detour/) | 排管平面绕行 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-hop`](bank-hop/) | 排管过障翻弯 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
+| [`bank-restore`](bank-restore/) | 排管还原 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
 | [`control-points`](control-points/) | 控制点坐标表 | 0.1.1 | Python | didi | MIT |
 | [`duct-elev`](duct-elev/) | 排管标高批量调整 | 0.2.2 | Python | didi | MIT |
-| [`duct-route`](duct-route/) | 排管竖向避让优化 | 0.1.4 | C#（源码在 `plugins/`） | didi | MIT |
+| [`duct-route`](duct-route/) | 排管竖向避让优化 | 0.1.5 | C#（源码在 `plugins/`） | didi | MIT |
 | [`duct-snap`](duct-snap/) | 排管贴井内壁 | 0.1.9 | C#（源码在 `plugins/`） | didi | MIT |
 | [`elv-merge`](elv-merge/) | 族类型清洗合并 | 0.2.2 | Python | didi | MIT |
 | [`export-dwg`](export-dwg/) | 一键导出图纸DWG/PDF | 0.5.0 | Python | didi | MIT |
 | [`export-nwc`](export-nwc/) | 一键导出NWC | 0.3.0 | Python | didi | MIT |
 | [`family-param-dim`](family-param-dim/) | 族尺寸参数化 | 0.1.2 | Python | didi | MIT |
 | [`issue-manager`](issue-manager/) | 图纸签发管理 | 0.2.1 | Python | lewismconte (Sendit) | MIT |
-| [`mep-break`](mep-break/) | 管线打断 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`mep-bundle`](mep-bundle/) | 管线并线绕行 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`mep-clash`](mep-clash/) | 管线碰撞检查 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`mep-continuity`](mep-continuity/) | 管线连续性检查 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`mep-corridor`](mep-corridor/) | 管线多根协调绕行 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`mep-detour`](mep-detour/) | 管线平面绕行 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`mep-hop`](mep-hop/) | 管线过障翻弯 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`mep-outline`](mep-outline/) | 管线沿障碍外沿绕行 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
-| [`mep-restore`](mep-restore/) | 管线还原 | 0.1.0 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-break`](mep-break/) | 管线打断 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-bundle`](mep-bundle/) | 管线并线绕行 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-clash`](mep-clash/) | 管线碰撞检查 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-continuity`](mep-continuity/) | 管线连续性检查 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-corridor`](mep-corridor/) | 管线多根协调绕行 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-detour`](mep-detour/) | 管线平面绕行 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-hop`](mep-hop/) | 管线过障翻弯 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-outline`](mep-outline/) | 管线沿障碍外沿绕行 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
+| [`mep-restore`](mep-restore/) | 管线还原 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`pile-cleanup`](pile-cleanup/) | 清理重复松木桩垫层 | 0.2.1 | Python | didi | MIT |
 | [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.4.1 | Python | didi | MIT |
 | [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.2.1 | C#（源码在 `plugins/`） | didi | MIT |

@@ -1,0 +1,15 @@
+{
+  "id": "bank-hop",
+  "name": "排管过障翻弯",
+  "version": "0.1.0",
+  "description": "选结构框架做的排管，碰到障碍时从上面或下面翻过去：先坡下去或坡上来，中间一段平着过，再坡回来。两端仍接原来的井，不改平面，标高取 0.1 m 一档。",
+  "category": "井与管线",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "BankHop.dll",
+  "entry": "KaifaTools.Commands.BankHopCommand",
+  "glyph": "翻",
+  "color": "#38BDF8",
+  "author": "didi",
+  "license": "MIT"
+}

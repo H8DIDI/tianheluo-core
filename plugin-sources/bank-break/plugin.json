@@ -1,0 +1,15 @@
+{
+  "id": "bank-break",
+  "name": "排管打断",
+  "version": "0.1.0",
+  "description": "在一根结构框架排管上点一个位置把它断成两段，两段标高连续、接头对齐。",
+  "category": "井与管线",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "BankBreak.dll",
+  "entry": "KaifaTools.Commands.BankBreakCommand",
+  "glyph": "断",
+  "color": "#FB7185",
+  "author": "didi",
+  "license": "MIT"
+}

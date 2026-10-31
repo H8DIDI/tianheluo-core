@@ -1,7 +1,7 @@
 {
   "id": "mep-bundle",
   "name": "管线并线绕行",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "选一束互相平行的管线，保持间距一起平移绕开障碍，一次完成，不会各绕各的互相打架。",
   "category": "管线调整",
   "revit": "2026",

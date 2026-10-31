@@ -1,0 +1,15 @@
+{
+  "id": "bank-clash",
+  "name": "排管碰撞检查",
+  "version": "0.1.0",
+  "description": "只读：选结构框架排管，用 Revit 自带的实体相交检查它们碰到了什么，导出清单，并把有碰撞的选中。",
+  "category": "井与管线",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "BankClash.dll",
+  "entry": "KaifaTools.Commands.BankClashCommand",
+  "glyph": "撞",
+  "color": "#F97316",
+  "author": "didi",
+  "license": "MIT"
+}

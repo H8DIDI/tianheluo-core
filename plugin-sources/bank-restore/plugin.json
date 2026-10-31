@@ -1,0 +1,15 @@
+{
+  "id": "bank-restore",
+  "name": "排管还原",
+  "version": "0.1.0",
+  "description": "把最近一次排管绕行或打断接回原样：删掉多出来的段，原排管恢复原长度和两端标高。",
+  "category": "井与管线",
+  "revit": "2026",
+  "hostApi": 1,
+  "dll": "BankRestore.dll",
+  "entry": "KaifaTools.Commands.BankRestoreCommand",
+  "glyph": "还",
+  "color": "#94A3B8",
+  "author": "didi",
+  "license": "MIT"
+}

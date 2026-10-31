@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>BankBreak</AssemblyName>
+    <RootNamespace>KaifaTools</RootNamespace>
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\_shared\DpiFit.cs" Link="DpiFit.cs" />
+    <Compile Include="..\duct-route\Model.cs" Link="Model.cs" />
+    <Compile Include="..\duct-route\Extract.cs" Link="Extract.cs" />
+    <Compile Include="..\duct-route\Writer.cs" Link="Writer.cs" />
+    <Compile Include="..\duct-route\GeneralCheck.cs" Link="GeneralCheck.cs" />
+    <Compile Include="..\duct-route\Cutter.cs" Link="Cutter.cs" />
+    <Compile Include="..\duct-route\Jogger.cs" Link="Jogger.cs" />
+    <Compile Include="..\duct-route\JoggerPath.cs" Link="JoggerPath.cs" />
+    <Compile Include="..\duct-route\JoggerBreak.cs" Link="JoggerBreak.cs" />
+    <Compile Include="..\duct-route\MepTools.cs" Link="MepTools.cs" />
+    <Compile Include="..\duct-route\BankJog.cs" Link="BankJog.cs" />
+    <Compile Include="..\duct-route\BankTools.cs" Link="BankTools.cs" />
+  </ItemGroup>
+</Project>

@@ -296,6 +296,26 @@
     "mep-continuity": {
       "group": "管线调整",
       "status": "beta"
+    },
+    "bank-hop": {
+      "group": "井与管线",
+      "status": "beta"
+    },
+    "bank-detour": {
+      "group": "井与管线",
+      "status": "beta"
+    },
+    "bank-break": {
+      "group": "井与管线",
+      "status": "beta"
+    },
+    "bank-restore": {
+      "group": "井与管线",
+      "status": "beta"
+    },
+    "bank-clash": {
+      "group": "井与管线",
+      "status": "beta"
     }
   }
 }
