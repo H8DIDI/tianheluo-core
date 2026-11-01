@@ -78,8 +78,8 @@ try:
     m = re.search(u'(\\d{3,5})\\D+(\\d{3,5})', tname)
     LOG.append(u'井类型 %s ；梁 %s' % (tname, beams[0].Name))
     # ---- 井表核对
-    n = load('well-list-check')
-    mod_wells = n['model_wells']()
+    n = load('well-audit')
+    mod_wells = n['_lc_model_wells']()
     check(u'井表核对 模型井识别', sorted(mod_wells) == [u'A-1', u'A-2', u'A-3'], u'%s' % sorted(mod_wells))
     L = float(m.group(1)) if m else 3000.0
     W = float(m.group(2)) if m else 3000.0
@@ -88,9 +88,9 @@ try:
         [1, u'11KV混凝土井\n编号:A-001', u'JC9C-%d(L)x%d(W)x3500(D)' % (L, W), u'座'],
         [2, u'11KV混凝土井\n编号:A-002', u'JC9C-%d(L)x%d(W)x3500(D)' % (L + 500, W), u'座'],
         [3, u'11KV混凝土井\n编号:A-9', u'JC9C-%d(L)x%d(W)x2000(D)' % (L, W), u'座']], {})])
-    table, dup = n['parse_list'](os.path.join(OUT, u'清单.xlsx'))
+    table, dup = n['_lc_parse_list'](os.path.join(OUT, u'清单.xlsx'))
     check(u'井表核对 解析清单（A-001 归一成 A-1）', sorted(table) == [u'A-1', u'A-2', u'A-9'], u'%s' % sorted(table))
-    rows = n['compare'](table, mod_wells)
+    rows = n['_lc_compare'](table, mod_wells)
     kinds = sorted((r[0], r[1]) for r in rows)
     LOG.append(u'  核对结果：%s' % kinds)
     check(u'井表核对 报「清单有、模型没有」A-9', (u'清单有、模型没有', u'A-9') in kinds)

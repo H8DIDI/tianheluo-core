@@ -9,8 +9,8 @@ OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
 VERSION_OVERRIDE = {"control-points": "0.1.1", "export-dwg": "0.5.0", "export-nwc": "0.3.0", "family-param-dim": "0.1.2",
-                    "pile-cleanup": "0.2.1", "pile-cushion": "0.4.1", "quantity-export": "0.4.1", "rebar-3d-view": "0.2.0", "rebar-cage": "0.3.0",
-                    "sheet-organize": "0.6.6", "sheet-preview": "0.1.1", "well-annotate": "0.3.38",
+                    "pile-cushion": "0.5.0", "quantity-export": "0.4.1", "rebar-3d-view": "0.2.0", "rebar-cage": "0.3.0",
+                    "sheet-organize": "0.6.6", "sheet-preview": "0.1.1", "well-annotate": "0.3.38", "well-audit": "0.2.0",
                     "well-config": "0.1.1", "well-family-guard": "0.1.2", "well-number": "0.3.0",
                     "well-param-sync": "0.1.2", "well-sheet-fit": "0.1.3", "well-sheet-no": "0.1.7", "well-sheets": "0.5.12",
                     "well-spec-table": "0.1.5", "well-zone": "0.1.5", "duct-elev": "0.2.2", "well-gap-dim": "0.1.2"}
@@ -23,7 +23,6 @@ PLUGINS = {
     "一键井展开图":       ("well-sheets",     "出图打印", "展"),
     "一键井大样标注":     ("well-annotate",   "出图打印", "标"),
     "一键布置松木桩垫层": ("pile-cushion",    "市政管线", "桩"),
-    "清理重复松木桩垫层": ("pile-cleanup",    "市政管线", "清"),
     "一键编号":           ("well-number",     "数据处理", "号"),
     "井分区标记":         ("well-zone",       "数据处理", "区"),
     "井参数同步":         ("well-param-sync", "数据处理", "同"),
@@ -43,7 +42,6 @@ PLUGINS = {
     "图纸快速预览":       ("sheet-preview",   "出图打印", "览"),
     "井大样变动同步": ("well-sync", "井大样出图", "同"),
     "井大样体检": ("well-audit", "井大样出图", "检"),
-    "井表核对": ("well-list-check", "井与管线", "核"),
     "RFI 取证包": ("rfi-pack", "井与管线", "证"),
     "井间距自动标注": ("well-gap-dim", "井与管线", "距"),
     "排管标高批量调整": ("duct-elev", "井与管线", "标"),

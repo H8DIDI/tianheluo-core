@@ -296,10 +296,10 @@ try:
         if not fds:
             check(u'清理重复 模板里没有基础族，跳过', True)
             return
-        n = load('pile-cleanup', d, v3)
-        n_piles, pd, dd, fd = n['scan']()
+        n = load('pile-cushion', d, v3)
+        n_piles, pd, dd, fd = n['_dup_scan']()
         check(u'清理重复 找到 1 个重复（3 个里 2 个重合）', len(pd) + len(fd) == 1, u'桩 %d 垫层族 %d' % (len(pd), len(fd)))
-    run(u'清理重复松木桩垫层', t_pile)
+    run(u'清理重复松木桩垫层（已并入一键布置松木桩垫层）', t_pile)
 
     # ---------------- 图纸快速预览：把图纸渲染成图片
     def t_prev():

@@ -169,10 +169,6 @@
       "group": "井与管线",
       "status": "proven"
     },
-    "pile-cleanup": {
-      "group": "井与管线",
-      "status": "tested"
-    },
     "control-points": {
       "group": "井与管线",
       "status": "tested"
@@ -231,10 +227,6 @@
     },
     "well-audit": {
       "group": "井大样出图",
-      "status": "tested"
-    },
-    "well-list-check": {
-      "group": "井与管线",
       "status": "tested"
     },
     "rfi-pack": {

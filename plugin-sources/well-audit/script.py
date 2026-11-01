@@ -3,8 +3,10 @@ __title__ = '井大样体检'
 __doc__ = ('出图前一键检查井和井大样图纸，列出问题清单（可导出 Excel、可在模型里选中有问题的井）：\n'
            '井没有图纸、图纸找不到井、井号重复、一口井多张图纸；平面/南北西东视图不全、视图框没围着井（井挪了/转了）、视图里没有尺寸；'
            '井盖外沿到井内壁一个方向上没有一侧是 300 mm（放爬梯留的）；井底标高、井内深度和偏移对不上、井深超出范围。\n'
-           '只读，不改模型。')
+           '只读，不改模型。\n'
+           '另有「井表核对」（原插件已并入）：读设计方/厂家的井清单 Excel，和模型逐口核对缺井、多井、长宽、深度。')
 
+import re
 import time
 import math
 from pyrevit import revit, DB, UI, forms
@@ -1007,6 +1009,88 @@ def xlsx_write(path, sheets):
         z.close()
     return path
 # ---- xlsx_lite 结束 ------------------------------------------------------------
+
+# ---- xlsx_read（天河落共用片段，打包时内联进脚本）------------------------------------
+# 读 .xlsx（不需要装 Excel）：xlsx_read(path) -> [(工作表名, [[单元格文字, ...], ...]), ...]
+# 合并单元格：被合并的空格子会填上左上角的值（比如一个规格合并了好几行）。公式取缓存的结果。
+import zipfile as _xr_zip
+import re as _xr_re
+import xml.etree.ElementTree as _xr_et
+
+_XR_NS = u'{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+_XR_RNS = u'{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+
+
+def _xr_col(ref):
+    m = _xr_re.match(u'([A-Z]+)(\\d+)', ref)
+    n = 0
+    for ch in m.group(1):
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1, int(m.group(2)) - 1
+
+
+def _xr_text(el):
+    return u''.join(t.text or u'' for t in el.iter(_XR_NS + u't'))
+
+
+def xlsx_read(path):
+    z = _xr_zip.ZipFile(path)
+    try:
+        shared = []
+        if u'xl/sharedStrings.xml' in z.namelist():
+            root = _xr_et.fromstring(z.read(u'xl/sharedStrings.xml'))
+            shared = [_xr_text(si) for si in root.iter(_XR_NS + u'si')]
+        wb = _xr_et.fromstring(z.read(u'xl/workbook.xml'))
+        rels = _xr_et.fromstring(z.read(u'xl/_rels/workbook.xml.rels'))
+        target = {}
+        for r in rels:
+            target[r.get(u'Id')] = r.get(u'Target')
+        out = []
+        for sh in wb.iter(_XR_NS + u'sheet'):
+            rid = sh.get(_XR_RNS + u'id')
+            t = target.get(rid, u'')
+            name = (u'xl/' + t.lstrip(u'/')) if not t.startswith(u'/xl/') else t.lstrip(u'/')
+            if name.startswith(u'xl/xl/'):
+                name = name[3:]
+            root = _xr_et.fromstring(z.read(name))
+            grid = {}
+            maxc = 0
+            maxr = 0
+            for c in root.iter(_XR_NS + u'c'):
+                ref = c.get(u'r')
+                if not ref:
+                    continue
+                ci, ri = _xr_col(ref)
+                tp = c.get(u't')
+                v = c.find(_XR_NS + u'v')
+                if tp == u's' and v is not None:
+                    txt = shared[int(v.text)]
+                elif tp == u'inlineStr':
+                    txt = _xr_text(c)
+                elif v is not None and v.text is not None:
+                    txt = v.text
+                else:
+                    txt = u''
+                grid[(ri, ci)] = txt
+                maxc = max(maxc, ci)
+                maxr = max(maxr, ri)
+            for mc in root.iter(_XR_NS + u'mergeCell'):
+                a, b = (mc.get(u'ref') + u':' + mc.get(u'ref')).split(u':')[:2]
+                c0, r0 = _xr_col(a)
+                c1, r1 = _xr_col(b)
+                v0 = grid.get((r0, c0), u'')
+                for rr in range(r0, r1 + 1):
+                    for cc in range(c0, c1 + 1):
+                        if (rr, cc) != (r0, c0) and not grid.get((rr, cc)):
+                            grid[(rr, cc)] = v0
+                            maxc = max(maxc, cc)
+                            maxr = max(maxr, rr)
+            rows = [[grid.get((r, c), u'') for c in range(maxc + 1)] for r in range(maxr + 1)]
+            out.append((sh.get(u'name'), rows))
+        return out
+    finally:
+        z.close()
+# ---- xlsx_read 结束 ------------------------------------------------------------------
 
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]
@@ -3984,13 +4068,171 @@ def _ndims_view(v):
     return len(list(DB.FilteredElementCollector(doc, v.Id).OfClass(DB.Dimension)))
 
 
+TITLE_LC = u'井表核对'
+_LC_TOL_SIZE = 20.0          # 长、宽差在这个范围内算一致（mm）
+_LC_TOL_DEPTH = 250.0        # 深度差在这个范围内算一致（mm）：预制井深度常按 500 一档取整
+
+_LC_MARK = re.compile(u'([A-Za-z]{1,3}-\\d+(?:-\\d+)?)')
+_LC_SPEC = re.compile(u'(\\d{3,5})\\s*(?:\\(\\s*L\\s*\\))?\\s*[xX×*]\\s*(\\d{3,5})\\s*(?:\\(\\s*W\\s*\\))?(?:\\s*[xX×*]\\s*(\\d{3,5})\\s*(?:\\(\\s*D\\s*\\))?)?')
+_LC_SPEC_STRICT = re.compile(u'(\\d{3,5})\\s*\\(\\s*L\\s*\\)\\s*[xX×*]\\s*(\\d{3,5})\\s*\\(\\s*W\\s*\\)(?:\\s*[xX×*]\\s*(\\d{3,5})\\s*\\(\\s*D\\s*\\))?')
+
+
+def _lc_norm(mk):
+    """井号的数字部分去掉前导 0：清单里写 A-005，模型里是 A-5，算同一口井。"""
+    return re.sub(u'-0+(\\d)', u'-\\1', mk or u'')
+
+
+def _lc_parse_list(path):
+    """从 Excel 里取出 {井号: (长, 宽, 深或None, 工作表, 行号)}。同一行里有井号和规格才算。"""
+    out = {}
+    dup = []
+    for sname, rows in xlsx_read(path):
+        for ri, row in enumerate(rows):
+            mark = None
+            spec = None
+            for c in row:
+                c = c or u''
+                if mark is None and (u'编号' in c or _LC_MARK.fullmatch(c.strip() or u'x')):
+                    m = _LC_MARK.search(c)
+                    if m:
+                        mark = m.group(1)
+                if spec is None:
+                    m = _LC_SPEC_STRICT.search(c)
+                    if m:
+                        spec = (float(m.group(1)), float(m.group(2)), float(m.group(3)) if m.group(3) else None)
+            if mark and spec:
+                mark = _lc_norm(mark)
+                if mark in out:
+                    dup.append(mark)
+                out[mark] = (spec[0], spec[1], spec[2], sname, ri + 1)
+    return out, sorted(set(dup))
+
+
+def _lc_model_wells():
+    """模型里的井：{井号: 构件}，井 = 常规模型里「标记」属于井号系列的构件。"""
+    out = {}
+    for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType():
+        try:
+            p = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+            mk = (p.AsString() or u'').strip() if p is not None else u''
+        except Exception:
+            mk = u''
+        if mk and wcfg_series_of(mk, WCFG, True) is not None and _lc_norm(mk) not in out:
+            out[_lc_norm(mk)] = e
+    return out
+
+
+def _lc_well_size(e):
+    """类型名里的 长×宽（mm）。取不到返回 None。"""
+    try:
+        nm = e.Symbol.Name
+    except Exception:
+        return None
+    m = _LC_SPEC_STRICT.search(nm) or _LC_SPEC.search(nm)
+    return (float(m.group(1)), float(m.group(2))) if m else None
+
+
+def _lc_well_depth(e):
+    p = e.LookupParameter(u'井内深度')
+    if p is not None and p.HasValue and p.StorageType == DB.StorageType.Double and p.AsDouble() > 0:
+        return p.AsDouble() * FT
+    b = e.LookupParameter(u'井底标高')
+    o = e.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
+    if b is not None and b.HasValue and o is not None and o.HasValue:
+        return (o.AsDouble() - b.AsDouble()) * FT
+    return None
+
+
+def _lc_compare(table, wells):
+    rows = []
+    prefixes = set()
+    for mk in table:
+        sr = wcfg_series_of(mk, WCFG, True)
+        if sr is not None:
+            prefixes.add(sr[u'prefix'])
+    for mk in sorted(table, key=lambda m: wcfg_well_sort_key(m, WCFG)):
+        L, W, D, sn, rn = table[mk]
+        e = wells.get(mk)
+        where = u'%s 第 %d 行' % (sn, rn)
+        if e is None:
+            rows.append([u'清单有、模型没有', mk, u'', u'规格 %d×%d%s' % (L, W, u'×%d' % D if D else u''), where, None])
+            continue
+        sz = _lc_well_size(e)
+        if sz is not None:
+            same = (abs(sz[0] - L) <= _LC_TOL_SIZE and abs(sz[1] - W) <= _LC_TOL_SIZE) or (abs(sz[0] - W) <= _LC_TOL_SIZE and abs(sz[1] - L) <= _LC_TOL_SIZE)
+            if not same:
+                rows.append([u'长宽对不上', mk, e.Symbol.Name, u'清单 %d×%d，模型类型 %d×%d' % (L, W, sz[0], sz[1]), where, e.Id])
+        else:
+            rows.append([u'类型名里没有长宽', mk, e.Symbol.Name, u'清单 %d×%d，没法核对尺寸' % (L, W), where, e.Id])
+        if D:
+            md = _lc_well_depth(e)
+            if md is None:
+                rows.append([u'模型里没有深度', mk, e.Symbol.Name, u'清单深度 %d' % D, where, e.Id])
+            elif abs(md - D) > _LC_TOL_DEPTH:
+                rows.append([u'深度差得多', mk, e.Symbol.Name, u'清单 %d，模型 %.0f（差 %.0f mm）' % (D, md, md - D), where, e.Id])
+    for mk, e in sorted(wells.items(), key=lambda kv: wcfg_well_sort_key(kv[0], WCFG)):
+        sr = wcfg_series_of(mk, WCFG, True)
+        if mk not in table and sr is not None and sr[u'prefix'] in prefixes:
+            rows.append([u'模型有、清单没有', mk, e.Symbol.Name, u'', u'', e.Id])
+    return rows
+
+
+def _lc_main():
+    try:
+        dlg = WF.OpenFileDialog()
+        dlg.Title = TITLE_LC + u' · 选择井清单（Excel）'
+        dlg.Filter = u'Excel 表格 (*.xlsx)|*.xlsx'
+        if dlg.ShowDialog() != WF.DialogResult.OK:
+            return
+        table, dup = _lc_parse_list(dlg.FileName)
+        if not table:
+            forms.alert(u'这个 Excel 里没有找到「井号 + 规格」同在一行的数据。\n\n需要：某个格子里有井号（如 E-008 或「编号:E-008」），同一行另一个格子里有规格（如 JC9C-1770(L)x1120(W)x3500(D)）。', title=TITLE_LC)
+            return
+        wells = _lc_model_wells()
+        rows = _lc_compare(table, wells)
+        head = u'清单：%d 口井（%s）\n模型：%d 口井\n' % (len(table), os.path.basename(dlg.FileName), len(wells))
+        if dup:
+            head += u'清单里井号重复：%s\n' % u'、'.join(dup[:10])
+        cnt = {}
+        for r in rows:
+            cnt[r[0]] = cnt.get(r[0], 0) + 1
+        if not rows:
+            forms.alert(head + u'\n逐口核对：长宽、深度都对得上，清单和模型的井一一对应。', title=TITLE_LC)
+            return
+        head += u'\n发现 %d 处不一致：\n' % len(rows) + u''.join(u'  %s：%d\n' % (k, v) for k, v in sorted(cnt.items(), key=lambda kv: -kv[1]))
+        head += u'\n前几条：\n' + u'\n'.join(u'  %s %s：%s' % (r[0], r[1], r[3]) for r in rows[:8])
+        head += u'\n\n导出完整清单到 Excel？'
+        if forms.alert(head, title=TITLE_LC, ok=False, yes=True, no=True):
+            sd = WF.SaveFileDialog()
+            sd.Title = TITLE_LC
+            sd.Filter = u'Excel 表格 (*.xlsx)|*.xlsx'
+            sd.FileName = u'井表核对_%s.xlsx' % time.strftime(u'%Y%m%d_%H%M')
+            if sd.ShowDialog() == WF.DialogResult.OK:
+                data = [[u'问题', u'井号', u'模型类型', u'说明', u'清单位置', u'构件ID']] + \
+                       [[r[0], r[1], r[2], r[3], r[4], r[5].Value if r[5] is not None else u''] for r in rows]
+                xlsx_write(sd.FileName, [(u'核对结果', data, {'widths': [18, 12, 34, 56, 20, 12], 'header_rows': 1})])
+                try:
+                    System.Diagnostics.Process.Start(u'explorer.exe', u'/select,"%s"' % sd.FileName)
+                except Exception:
+                    pass
+        ids = [r[5] for r in rows if r[5] is not None]
+        if ids and forms.alert(u'要在模型里选中这 %d 口有出入的井吗？' % len(ids), title=TITLE_LC, ok=False, yes=True, no=True):
+            from System.Collections.Generic import List
+            uidoc.Selection.SetElementIds(List[DB.ElementId](ids))
+    except Exception:
+        forms.alert(u'出错了：\n' + traceback.format_exc(), title=TITLE_LC)
+
+
 def main():
     if not wcfg_first_run(TITLE):
         return
     try:
         _apply_settings()
-        pick = forms.CommandSwitchWindow.show([u'快速体检（不含井盖距内壁）', u'完整体检（含井盖距内壁，几百口井要几分钟）'], message=TITLE)
+        pick = forms.CommandSwitchWindow.show([u'快速体检（不含井盖距内壁）', u'完整体检（含井盖距内壁，几百口井要几分钟）', u'井表核对（对照设计方/厂家的井清单 Excel）'], message=TITLE)
         if not pick:
+            return
+        if pick.startswith(u'井表核对'):
+            _lc_main()
             return
         full = pick.startswith(u'完整')
         t0 = time.time()

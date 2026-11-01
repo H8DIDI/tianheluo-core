@@ -27,8 +27,7 @@
 | [`mep-hop`](mep-hop/) | 管线过障翻弯 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`mep-outline`](mep-outline/) | 管线沿障碍外沿绕行 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`mep-restore`](mep-restore/) | 管线还原 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
-| [`pile-cleanup`](pile-cleanup/) | 清理重复松木桩垫层 | 0.2.1 | Python | didi | MIT |
-| [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.4.1 | Python | didi | MIT |
+| [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.5.0 | Python | didi | MIT |
 | [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.2.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`quantity-export`](quantity-export/) | 框选提量导出Excel | 0.4.1 | Python | didi | MIT |
 | [`rebar-3d-view`](rebar-3d-view/) | 一键钢筋三维实体显示 | 0.2.0 | Python | didi | MIT |
@@ -41,12 +40,11 @@
 | [`tag-check`](tag-check/) | 标注检查 | 0.2.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`view-manager`](view-manager/) | 视图管理 | 0.2.1 | Python | lewismconte (Sendit) | MIT |
 | [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.38 | Python | didi | MIT |
-| [`well-audit`](well-audit/) | 井大样体检 | 0.1.0 | Python | didi | MIT |
+| [`well-audit`](well-audit/) | 井大样体检 | 0.2.0 | Python | didi | MIT |
 | [`well-config`](well-config/) | 井大样项目配置 | 0.1.1 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.4 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-family-guard`](well-family-guard/) | 井族体检 | 0.1.2 | Python | didi | MIT |
 | [`well-gap-dim`](well-gap-dim/) | 井间距自动标注 | 0.1.2 | Python | didi | MIT |
-| [`well-list-check`](well-list-check/) | 井表核对 | 0.1.0 | Python | didi | MIT |
 | [`well-number`](well-number/) | 一键编号 / 清除标记 | 0.3.0 | Python | didi | MIT |
 | [`well-param-sync`](well-param-sync/) | 井参数同步 | 0.1.2 | Python | didi | MIT |
 | [`well-sheet-fit`](well-sheet-fit/) | 井图比例排版 | 0.1.3 | Python | didi | MIT |

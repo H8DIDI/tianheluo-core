@@ -6,7 +6,7 @@ __doc__ = ("一键布置松木桩与垫层（天河落插件版）。\n"
            "框选了构件：只处理选中的；没有选中：按「规则」里的范围（默认整个项目）处理全部可布置构件。\n"
            "排管/管道等线式构件：沿实体走向布置 100mm 厚垫层（各边外挑）与松木桩；井/基础等点式构件：按实体外包布置。\n"
            "规则（垫层厚度、外挑、桩径、桩长、桩距、单排/双排阈值、构件类别、范围、底标高过滤）运行前可以修改并保存。\n"
-           "已布置过的构件先清理旧垫层与旧桩再重新生成；每批在一个事务里提交，单个构件出错只回滚它自己。")
+           "已布置过的构件先清理旧垫层与旧桩再重新生成；另有「清理重复松木桩与垫层」（原清理重复插件已并入）：全项目扫重复重合的桩和垫层，每处只留最早生成的一套，先列数量再确认；每批在一个事务里提交，单个构件出错只回滚它自己。")
 
 import math
 import os
@@ -2348,6 +2348,7 @@ HIDE_KEYWORD = u"宿主"
 OP_LAYOUT = u"布置松木桩与垫层"
 OP_HIDE = u"一键隐藏所有视图的松木桩和垫层"
 OP_SHOW = u"一键显示所有视图的松木桩和垫层（取消隐藏）"
+OP_CLEAN = u"清理重复松木桩与垫层（原「清理重复松木桩垫层」）"
 _SKIP_VIEW_TYPES = ('Legend', 'ProjectBrowser', 'SystemBrowser', 'Internal', 'Report', 'DrawingSheet', 'Schedule')
 
 
@@ -2677,13 +2678,131 @@ def _layout_flow():
 
 
 
+TITLE_DUP = u'清理重复松木桩垫层'
+_DUP_PILE_KEYS = (u'松木桩', u'Φ75')
+_DUP_PAD_KEYS = (u'市政_井垫层', u'井垫层')
+
+
+def _dup_eid(x):
+    try:
+        return x.Value
+    except Exception:
+        return x.IntegerValue
+
+
+def _dup_comment(e):
+    try:
+        p = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+        return (p.AsString() or u"") if p is not None else u""
+    except Exception:
+        return u""
+
+
+def _dup_type_text(inst):
+    out = []
+    try:
+        sym = inst.Symbol
+        out.append(sym.FamilyName or u"")
+        out.append(sym.Name or u"")
+    except Exception:
+        pass
+    return u" ".join(out)
+
+
+def _dup_key_pt(p, step):
+    return (round(p.X * 304.8 / step), round(p.Y * 304.8 / step), round(p.Z * 304.8 / step))
+
+
+def _dup_dups(groups):
+    """每组按 Id 从小到大，保留第一个（最早生成的），其余为重复。"""
+    out = []
+    for ids in groups.values():
+        if len(ids) > 1:
+            ids.sort(key=_dup_eid)
+            out.extend(ids[1:])
+    return out
+
+
+def _dup_scan():
+    piles, pads, fampads = {}, {}, {}
+    n_piles = 0
+    for inst in DB.FilteredElementCollector(doc).OfClass(DB.FamilyInstance)\
+            .OfCategory(DB.BuiltInCategory.OST_StructuralFoundation):
+        txt = _dup_type_text(inst)
+        com = _dup_comment(inst)
+        loc = getattr(inst, "Location", None)
+        if not isinstance(loc, DB.LocationPoint):
+            continue
+        is_pile = any(k in txt for k in _DUP_PILE_KEYS) or (u"宿主" in com and u"松木桩" in com)
+        is_pad = any(k in txt for k in _DUP_PAD_KEYS) or (u"宿主" in com and u"垫层" in com)
+        if is_pile:
+            n_piles += 1
+            piles.setdefault(_dup_key_pt(loc.Point, 5.0), []).append(inst.Id)
+        elif is_pad:
+            # 井垫层按外包框比：同一插入点但尺寸不同（不同井）的不算重复
+            bb = inst.get_BoundingBox(None)
+            key = (_dup_key_pt(bb.Min, 10.0) + _dup_key_pt(bb.Max, 10.0)) if bb is not None else _dup_key_pt(loc.Point, 10.0)
+            fampads.setdefault(key, []).append(inst.Id)
+    for ds in DB.FilteredElementCollector(doc).OfClass(DB.DirectShape)\
+            .OfCategory(DB.BuiltInCategory.OST_StructuralFoundation):
+        if not (ds.ApplicationId == APP_ID or u"垫层" in (ds.Name or u"") or
+                (u"宿主" in _dup_comment(ds) and u"垫层" in _dup_comment(ds))):
+            continue
+        bb = ds.get_BoundingBox(None)
+        if bb is None:
+            continue
+        pads.setdefault(_dup_key_pt(bb.Min, 10.0) + _dup_key_pt(bb.Max, 10.0), []).append(ds.Id)
+    return n_piles, _dup_dups(piles), _dup_dups(pads), _dup_dups(fampads)
+
+
+def _dup_main():
+    try:
+        n_piles, pile_dups, ds_dups, fampad_dups = _dup_scan()
+        total = len(pile_dups) + len(ds_dups) + len(fampad_dups)
+        if total == 0:
+            forms.alert(u"没有发现重复重合的松木桩或垫层。\n\n现有松木桩 {} 根，位置都不重复。".format(n_piles), title=TITLE_DUP)
+            return
+        msg = (u"扫描结果：\n\n"
+               u"• 重合的松木桩：{} 根（共 {} 根）\n"
+               u"• 重合的垫层（DirectShape）：{} 块\n"
+               u"• 重合的井垫层族：{} 块\n\n"
+               u"每处位置只保留最早生成的一套，删除其余 {} 个图元。整次可以 Ctrl+Z 撤销。"
+               ).format(len(pile_dups), n_piles, len(ds_dups), len(fampad_dups), total)
+        dups = pile_dups + ds_dups + fampad_dups
+        go_del = u"删除这 {} 个重复图元".format(total)
+        go_sel = u"先在模型里选中它们（不删除，看一下再决定）"
+        pick = forms.CommandSwitchWindow.show([go_del, go_sel], message=msg)
+        if pick == go_sel:
+            uidoc.Selection.SetElementIds(List[DB.ElementId](dups))
+            forms.alert(u"已选中 {} 个重复图元。看过没问题后再运行本插件删除。".format(total), title=TITLE_DUP)
+            return
+        if pick != go_del:
+            return
+        t = DB.Transaction(doc, u"清理重复松木桩与垫层")
+        t.Start()
+        try:
+            doc.Delete(List[DB.ElementId](dups))
+            t.Commit()
+        except Exception:
+            if t.HasStarted() and not t.HasEnded():
+                t.RollBack()
+            raise
+        forms.alert(u"清理完成：删除重复松木桩 {} 根、重复垫层 {} 块，共 {} 个图元。".format(
+            len(pile_dups), len(ds_dups) + len(fampad_dups), total), title=TITLE_DUP)
+    except Exception as e:
+        forms.alert(u"清理出错，模型未改动：\n" + str(e) + u"\n\n" + traceback.format_exc(), title=TITLE_DUP)
+
+
 def main():
     try:
-        op = forms.CommandSwitchWindow.show([OP_LAYOUT, OP_HIDE, OP_SHOW], message=u'请选择操作：')
+        op = forms.CommandSwitchWindow.show([OP_LAYOUT, OP_CLEAN, OP_HIDE, OP_SHOW], message=u'请选择操作：')
         if not op:
             return
         if op == OP_LAYOUT:
             _layout_flow()
+            return
+        if op == OP_CLEAN:
+            _dup_main()
             return
         hide = (op == OP_HIDE)
         n, fails = set_pile_filter_hidden(hide)
