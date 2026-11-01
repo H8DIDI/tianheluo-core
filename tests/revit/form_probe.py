@@ -191,6 +191,7 @@ class _FakeWell(object):
 
 def _quantity(n):
     res = n['_quantities']([])
+    res['wells'] = [(u'A-1', u'强电井', u'EM2', u'EM2-2000(L)x1200(W)', 4800.0, 1, 2000, 1200, 1.0, 5.8), (u'A-2', u'强电井', u'EM2', u'EM2-2000(L)x1200(W)', 2800.0, 2, 2000, 1200, 2.0, 4.8)]
     tables, summary = n['_table_rows'](res)
     n['_show_window'](tables, summary, u'测试（0 个构件）', res)
 
@@ -214,7 +215,6 @@ CASES = [
     ('well-sheet-fit', u'设置', lambda n: n['open_settings']()),
     ('well-spec-table', u'设置', lambda n: n['open_settings']()),
     ('elv-merge', u'设置', lambda n: n['open_settings']()),
-    ('well-depth-report', u'设置', lambda n: n['open_settings']()),
     ('well-family-guard', u'设置', lambda n: n['open_settings']()),
     ('well-param-sync', u'设置', lambda n: n['open_settings']()),
     ('family-param-dim', u'设置', lambda n: n['open_settings']()),

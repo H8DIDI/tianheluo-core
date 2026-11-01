@@ -4,7 +4,7 @@ __title__ = "一键框选\n提量表格"
 __author__ = "KAIFA"
 __doc__ = ("框选（或整个项目、当前视图）里的构件，先在窗口里按标签页给出表格，看完可导出 Excel（xlsx）：\n"
            "结构：混凝土体积（m³）、钢材重量（t，按材料密度算）、钢筋按直径汇总（根数、总长、重量）；\n"
-           "小市政：井按系列、族类型、深度档汇总并附逐口明细，排管和导管按族类型汇总根数、长度、孔数、孔·米，松木桩根数和垫层块数、体积。\n"
+           "小市政：井按系列、族类型、深度档汇总并附逐口明细，另有井深统计（最小/最大/平均、缺深度）和深井清单（阈值可设，可一键在模型里选中），排管和导管按族类型汇总根数、长度、孔数、孔·米，松木桩根数和垫层块数、体积。\n"
            "排管、松木桩、垫层各自单算，不会混进混凝土表。也可以在 Revit 里生成明细表（之后模型改了自动更新）。只读，不改模型（生成明细表除外）。")
 
 import re
@@ -672,7 +672,298 @@ def xlsx_write(path, sheets):
     return path
 # ---- xlsx_lite 结束 ------------------------------------------------------------
 
+# ---- settings_ui（天河落共用片段，打包时内联进脚本）-----------------------------
+# 图形化「设置」窗口：每个参数一行（中文名、输入框/下拉框/勾选、单位和说明），保存、恢复默认、取消。
+# 依赖 form_fit（插件里要先 include _shared/form_fit.py）。
+# 用法：su_fields_dialog(标题, 说明, 字段列表, 当前值, 默认值) -> 新值字典 或 None（取消）。
+# 字段 dict：key、label、kind（header 分组标题 / num 数字 / text 文本 / list 逗号分隔的列表 / choice 下拉（只能选）/
+#           combo 下拉（可选可手填）/ bool 勾选 / palette 颜色列表「R,G,B; R,G,B」/ lines 多行文本，每行一项，rows 行高）、hint 说明、
+#           choices [(值, 显示文字), ...]、min、max、int（数字取整）。
+import re as _su_re
+import clr as _su_clr
+_su_clr.AddReference('System.Windows.Forms')
+_su_clr.AddReference('System.Drawing')
+import System.Windows.Forms as _SUW
+import System.Drawing as _SUD
+import System.Diagnostics as _SUDG
+
+
+def su_open_file(path):
+    """用记事本打开设置文件。"""
+    try:
+        _SUDG.Process.Start(u"notepad.exe", path)
+    except Exception:
+        pass
+
+
+def _su_split(text):
+    return [x.strip() for x in _su_re.split(u"[,，;；\\n\\r]+", text or u"") if x.strip()]
+
+
+def _su_to_text(fld, val):
+    kind = fld.get(u"kind", u"text")
+    if kind == u"list":
+        return u", ".join(u"%s" % x for x in (val or []))
+    if kind == u"lines":
+        return u"\r\n".join(u"%s" % x for x in (val or []))
+    if kind == u"palette":
+        return u"; ".join(u"%d,%d,%d" % tuple(c[:3]) for c in (val or []))
+    if kind == u"num":
+        try:
+            v = float(val)
+            return (u"%d" % v) if v == int(v) else (u"%g" % v)
+        except Exception:
+            return u"" if val is None else u"%s" % val
+    return u"" if val is None else u"%s" % val
+
+
+def su_fields_dialog(title, intro, fields, values, defaults=None, extra_buttons=None, width=680, height=640):
+    """弹出设置窗口。extra_buttons: [(按钮文字, 回调)]，回调不带参数（如「用记事本打开文件」）。返回新值 dict 或 None。"""
+    f = _SUW.Form()
+    f.Text = title
+    f.Font = _SUD.Font(u"Microsoft YaHei UI", 9.0)
+    f.StartPosition = _SUW.FormStartPosition.CenterScreen
+    f.FormBorderStyle = _SUW.FormBorderStyle.FixedDialog
+    f.MaximizeBox = False
+    f.MinimizeBox = False
+    f.ClientSize = _SUD.Size(width, height)
+    lb = _SUW.Label()
+    lb.Text = intro
+    lb.Location = _SUD.Point(14, 10)
+    lb.Size = _SUD.Size(width - 28, 44)
+    f.Controls.Add(lb)
+    panel = _SUW.Panel()
+    panel.Location = _SUD.Point(10, 58)
+    panel.Size = _SUD.Size(width - 20, height - 58 - 54)
+    panel.AutoScroll = True
+    panel.BorderStyle = _SUW.BorderStyle.FixedSingle
+    f.Controls.Add(panel)
+
+    ctrls = {}
+    y = 8
+    for fld in fields:
+        kind = fld.get(u"kind", u"text")
+        if kind == u"header":
+            l = _SUW.Label()
+            l.Text = fld[u"label"]
+            l.Font = _SUD.Font(f.Font, _SUD.FontStyle.Bold)
+            l.Location = _SUD.Point(6, y + 6)
+            l.Size = _SUD.Size(width - 60, 22)
+            panel.Controls.Add(l)
+            y += 34
+            continue
+        l = _SUW.Label()
+        l.Text = fld[u"label"]
+        l.Location = _SUD.Point(6, y + 3)
+        l.Size = _SUD.Size(250, 34)
+        panel.Controls.Add(l)
+        key = fld[u"key"]
+        if kind in (u"choice", u"combo"):
+            c = _SUW.ComboBox()
+            c.DropDownStyle = _SUW.ComboBoxStyle.DropDownList if kind == u"choice" else _SUW.ComboBoxStyle.DropDown
+            for _v, _t in fld.get(u"choices", []):
+                c.Items.Add(_t)
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, 24)
+        elif kind == u"bool":
+            c = _SUW.CheckBox()
+            c.Text = fld.get(u"bool_text", u"启用")
+            c.Location = _SUD.Point(264, y + 2)
+            c.Size = _SUD.Size(width - 310, 22)
+        elif kind == u"lines":
+            c = _SUW.TextBox()
+            c.Multiline = True
+            c.ScrollBars = _SUW.ScrollBars.Both
+            c.WordWrap = False
+            c.AcceptsReturn = True
+            c.Font = _SUD.Font(u"Consolas", 9.0)
+            rows = int(fld.get(u"rows", 6))
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, rows * 18 + 8)
+        else:
+            c = _SUW.TextBox()
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, 24)
+        panel.Controls.Add(c)
+        ctrls[key] = c
+        y += (int(fld.get(u"rows", 6)) * 18 + 14) if kind == u"lines" else 30
+        if fld.get(u"hint"):
+            h = _SUW.Label()
+            h.Text = fld[u"hint"]
+            h.ForeColor = _SUD.Color.FromArgb(110, 110, 110)
+            h.Location = _SUD.Point(264, y - 2)
+            h.Size = _SUD.Size(width - 310, 34)
+            panel.Controls.Add(h)
+            y += 36
+        y += 6
+
+    def put(fld, val):
+        c = ctrls.get(fld[u"key"])
+        if c is None:
+            return
+        kind = fld.get(u"kind", u"text")
+        if kind == u"bool":
+            c.Checked = bool(val)
+        elif kind in (u"choice", u"combo"):
+            chs = fld.get(u"choices", [])
+            idx = [i for i, (v, t) in enumerate(chs) if v == val]
+            if idx:
+                c.SelectedIndex = idx[0]
+            elif kind == u"combo":
+                c.Text = u"" if val is None else u"%s" % val
+            elif chs:
+                c.SelectedIndex = 0
+        else:
+            c.Text = _su_to_text(fld, val)
+
+    def get(fld):
+        """读控件的值并校验；不合格抛 ValueError(说明)。"""
+        c = ctrls[fld[u"key"]]
+        kind = fld.get(u"kind", u"text")
+        name = fld[u"label"]
+        if kind == u"bool":
+            return bool(c.Checked)
+        if kind == u"choice":
+            chs = fld.get(u"choices", [])
+            return chs[c.SelectedIndex][0] if 0 <= c.SelectedIndex < len(chs) else None
+        if kind == u"combo":
+            txt = (c.Text or u"").strip()
+            for v, t in fld.get(u"choices", []):
+                if t == txt:
+                    return v
+            return txt
+        txt = (c.Text or u"").strip()
+        if kind == u"num":
+            try:
+                v = float(txt)
+            except Exception:
+                raise ValueError(u"「%s」要填数字。" % name)
+            if fld.get(u"min") is not None and v < fld[u"min"]:
+                raise ValueError(u"「%s」不能小于 %s。" % (name, fld[u"min"]))
+            if fld.get(u"max") is not None and v > fld[u"max"]:
+                raise ValueError(u"「%s」不能大于 %s。" % (name, fld[u"max"]))
+            return int(round(v)) if fld.get(u"int") else v
+        if kind == u"list":
+            return _su_split(txt)
+        if kind == u"lines":
+            return [x.strip() for x in (c.Text or u"").splitlines() if x.strip()]
+        if kind == u"palette":
+            out = []
+            for part in [x.strip() for x in _su_re.split(u"[;；\n\r]+", txt) if x.strip()]:
+                nums = [x for x in _su_re.split(u"[ ,]+", part) if x]
+                try:
+                    rgb = [int(x) for x in nums[:3]]
+                except Exception:
+                    rgb = []
+                if len(rgb) != 3 or any(n < 0 or n > 255 for n in rgb):
+                    raise ValueError(u"「%s」里「%s」不是有效的颜色，格式是 R,G,B（0–255），多个颜色用分号隔开。" % (name, part))
+                out.append(rgb)
+            if not out:
+                raise ValueError(u"「%s」至少要有一个颜色。" % name)
+            return out
+        if fld.get(u"required") and not txt:
+            raise ValueError(u"「%s」不能为空。" % name)
+        return txt
+
+    for fld in fields:
+        if fld.get(u"kind") != u"header":
+            put(fld, values.get(fld[u"key"]))
+
+    result = {u"v": None}
+    b_ok = _SUW.Button()
+    b_ok.Text = u"保存"
+    b_ok.Name = u"su_ok"
+    b_ok.Location = _SUD.Point(width - 200, height - 44)
+    b_ok.Size = _SUD.Size(88, 30)
+    b_ca = _SUW.Button()
+    b_ca.Text = u"取消"
+    b_ca.Name = u"su_cancel"
+    b_ca.Location = _SUD.Point(width - 100, height - 44)
+    b_ca.Size = _SUD.Size(88, 30)
+    f.Controls.Add(b_ok)
+    f.Controls.Add(b_ca)
+    f.CancelButton = b_ca
+    bx = 14
+    if defaults:
+        b_def = _SUW.Button()
+        b_def.Text = u"恢复默认"
+        b_def.Name = u"su_default"
+        b_def.Location = _SUD.Point(bx, height - 44)
+        b_def.Size = _SUD.Size(88, 30)
+        f.Controls.Add(b_def)
+        bx += 96
+
+        def _on_def(s, e):
+            for fld in fields:
+                if fld.get(u"kind") != u"header" and fld[u"key"] in defaults:
+                    put(fld, defaults[fld[u"key"]])
+        b_def.Click += _on_def
+    for text, cb in (extra_buttons or []):
+        b = _SUW.Button()
+        b.Text = text
+        b.Location = _SUD.Point(bx, height - 44)
+        b.Size = _SUD.Size(130, 30)
+        f.Controls.Add(b)
+        bx += 138
+        b.Click += (lambda s, e, cb=cb: cb())
+
+    def _on_ok(s, e):
+        out = {}
+        try:
+            for fld in fields:
+                if fld.get(u"kind") != u"header":
+                    out[fld[u"key"]] = get(fld)
+        except ValueError as ex:
+            _SUW.MessageBox.Show(u"%s" % ex, title)
+            return
+        result[u"v"] = out
+        f.Close()
+    b_ok.Click += _on_ok
+    b_ca.Click += (lambda s, e: f.Close())
+    ff_fit(f).ShowDialog()
+    return result[u"v"]
+
 WCFG = wcfg_load()
+DEPTH_SET = os.path.join(OUT_DIR, u'井深统计设置.json')
+DEPTH_DEFAULTS = {
+    u'说明': u'params：井深参数名，按顺序找第一个有值的（第一项没有时先用 偏移−井底标高）；deep_m：深井阈值（米）。',
+    u'params': [u'井内深度', u'井底深度', u'井深', u'总深度', u'主体净深度', u'深度', u'井整体高度', u'井底深'],
+    u'deep_m': 4.0,
+}
+
+
+def _depth_cfg():
+    s = dict(DEPTH_DEFAULTS)
+    try:
+        if os.path.exists(DEPTH_SET):
+            with io.open(DEPTH_SET, 'r', encoding='utf-8-sig') as f:
+                s.update(json.load(f))
+    except Exception:
+        pass
+    return s
+
+
+def _depth_open_settings():
+    cur = _depth_cfg()
+    fields = [
+        {'key': 'params', 'label': u'井深参数名（按顺序找）', 'kind': 'list',
+         'hint': u'逗号分隔。每口井按顺序找第一个有值的参数（实例参数优先，其次类型参数）作为井深。'},
+        {'key': 'deep_m', 'label': u'深井阈值 (m)', 'kind': 'num', 'min': 0, 'max': 100,
+         'hint': u'井深达到这个值的井列进「深井」标签页，可在模型里选中。'},
+    ]
+    res = su_fields_dialog(TITLE + u' · 井深设置', u'改完点保存，重新运行提量后生效。设置文件：' + DEPTH_SET, fields, cur, DEPTH_DEFAULTS,
+                           extra_buttons=[(u'用记事本打开文件', lambda: su_open_file(DEPTH_SET))], width=680, height=380)
+    if res is None:
+        return False
+    out = dict(DEPTH_DEFAULTS)
+    out.update(cur)
+    out.update(res)
+    if not os.path.isdir(OUT_DIR):
+        os.makedirs(OUT_DIR)
+    with io.open(DEPTH_SET, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(out, ensure_ascii=False, indent=2))
+    return True
+DEPTH_CFG = _depth_cfg()
 DEPTH_STEP = 500.0         # 井深度按 500 mm 一档汇总（预制井按档订货）
 _HOLES = re.compile(u'(\\d+)\\s*孔')
 PILE_KEYS = (u'松木桩', u'Φ75')
@@ -771,15 +1062,49 @@ class _QtoFilter(ISelectionFilter):
         return False
 
 
+def _num_mm(p):
+    """参数值换成 mm（长度）或原数；取不到返回 None。"""
+    if p is None or not p.HasValue:
+        return None
+    try:
+        if p.StorageType == DB.StorageType.Double:
+            v = p.AsDouble()
+            try:
+                if p.Definition.GetDataType() == DB.SpecTypeId.Length:
+                    return v * FT_TO_MM
+            except Exception:
+                pass
+            return v
+        if p.StorageType == DB.StorageType.Integer:
+            return float(p.AsInteger())
+    except Exception:
+        return None
+    return None
+
+
 def _depth_mm(e):
-    """井内深度（mm）：优先「井内深度」参数，没有就用 偏移 − 井底标高。"""
-    p = e.LookupParameter(u'井内深度')
-    if p is not None and p.HasValue and p.StorageType == DB.StorageType.Double and p.AsDouble() > 0:
-        return p.AsDouble() * FT_TO_MM
+    """井深（mm）：按设置里的参数名顺序找（实例参数优先，其次类型参数）；第一个名字（默认「井内深度」）没有时，
+    先用 偏移 − 井底标高，再试后面的名字。"""
+    names = [n for n in DEPTH_CFG.get(u'params', []) if n]
+    t = doc.GetElement(e.GetTypeId())
+
+    def _by(n):
+        v = _num_mm(e.LookupParameter(n))
+        if v is None and t is not None:
+            v = _num_mm(t.LookupParameter(n))
+        return v if (v is not None and v > 0) else None
+    if names:
+        v = _by(names[0])
+        if v is not None:
+            return v
     b = e.LookupParameter(u'井底标高')
     o = e.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
     if b is not None and b.HasValue and o is not None and o.HasValue:
         return (o.AsDouble() - b.AsDouble()) * FT_TO_MM
+    for n in names[1:]:
+        v = _by(n)
+        if v is not None:
+            return v
     return None
 
 
@@ -1197,6 +1522,27 @@ def _table_rows(res):
         tables.append((u'井汇总', [u'系列', u'族', u'类型', u'长(mm)', u'宽(mm)', u'深度档(mm)', u'数量', u'最小井深(mm)', u'最大井深(mm)', u'最低井底标高(m)'], wrows,
                        [u'合计', u'', u'', u'', u'', u'', len(res['wells']), u'', u'', u'']))
         tables.append((u'井明细', [u'井号', u'系列', u'族', u'类型', u'长(mm)', u'宽(mm)', u'井内深度(mm)', u'深度档(mm)', u'井底标高(m)', u'井盖面标高(m)', u'构件ID'], detail, None))
+    if by:
+        def _stat(vs):
+            v = [x for x in vs if x]
+            if not v:
+                return [len(vs), 0, u'', u'', u'', 0, len(vs)]
+            return [len(vs), len(v), round(min(v)), round(max(v)), round(sum(v) / len(v)), len(set(round(x) for x in v)), len(vs) - len(v)]
+        sg = {}
+        sord = []
+        for mk, lab, f, t, d, eid, L, W, bot, top in sorted(res['wells'], key=lambda w: wcfg_well_sort_key(w[0], WCFG)):
+            for key in ((lab, u'（该系列全部）', u''), (lab, f, t)):
+                if key not in sg:
+                    sg[key] = []
+                    sord.append(key)
+                sg[key].append(d)
+        srows = [[k[0], k[1], k[2]] + _stat(sg[k]) for k in sorted(sord, key=lambda k: (k[0], k[1] != u'（该系列全部）', k[1], k[2]))]
+        tables.append((u'井深统计', [u'系列', u'族', u'类型', u'口数', u'有深度', u'最小(mm)', u'最大(mm)', u'平均(mm)', u'不同取值数', u'缺深度'], srows, None))
+        deep_mm = float(DEPTH_CFG.get(u'deep_m', 4.0)) * 1000.0
+        drows = [[mk, lab, f, t, round(d), _r(bot), eid] for mk, lab, f, t, d, eid, L, W, bot, top in
+                 sorted(res['wells'], key=lambda w: -(w[4] or 0)) if d and d >= deep_mm - 1e-6]
+        if drows:
+            tables.append((u'深井≥%gm' % (deep_mm / 1000.0), [u'井号', u'系列', u'族', u'类型', u'井深(mm)', u'井底标高(m)', u'构件ID'], drows, None))
     if res['banks']:
         brows, tl, th, tv = [], 0.0, 0.0, 0.0
         for k in sorted(res['banks']):
@@ -1405,9 +1751,33 @@ def _show_window(tables, summary, src_txt, res):
         except Exception as ex:
             forms.alert(u'生成明细表失败，已回滚：\n%s' % ex, title=TITLE)
 
+    def _on_deep(sender, args):
+        try:
+            deep_mm = float(DEPTH_CFG.get(u'deep_m', 4.0)) * 1000.0
+            ids = [w[5] for w in res['wells'] if w[4] and w[4] >= deep_mm - 1e-6]
+            if not ids:
+                forms.alert(u'没有深度 ≥ %g m 的井。' % (deep_mm / 1000.0), title=TITLE)
+                return
+            uidoc.Selection.SetElementIds(List[DB.ElementId]([DB.ElementId(i) for i in ids]))
+            forms.alert(u'已在模型里选中 %d 口深井（≥ %g m）。' % (len(ids), deep_mm / 1000.0), title=TITLE)
+        except Exception as ex:
+            forms.alert(u'选中失败：\n%s' % ex, title=TITLE)
+
+    def _on_set(sender, args):
+        try:
+            if _depth_open_settings():
+                forms.alert(u'井深设置已保存。关闭本窗口后重新运行提量生效。', title=TITLE)
+        except Exception as ex:
+            forms.alert(u'设置失败：\n%s' % ex, title=TITLE)
+
     _button(u'导出 Excel', 12, _on_export)
     _button(u'生成/更新明细表', 172, _on_schedule)
-    _button(u'关闭', 332, lambda s, a: form.Close())
+    if res['wells']:
+        _button(u'选中深井', 332, _on_deep)
+        _button(u'井深设置…', 492, _on_set)
+        _button(u'关闭', 652, lambda s, a: form.Close())
+    else:
+        _button(u'关闭', 332, lambda s, a: form.Close())
 
     form.Controls.Add(tabs)
     form.Controls.Add(bottom)

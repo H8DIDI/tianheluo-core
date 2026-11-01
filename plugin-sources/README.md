@@ -31,7 +31,7 @@
 | [`pile-cleanup`](pile-cleanup/) | 清理重复松木桩垫层 | 0.2.1 | Python | didi | MIT |
 | [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.4.1 | Python | didi | MIT |
 | [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.2.1 | C#（源码在 `plugins/`） | didi | MIT |
-| [`quantity-export`](quantity-export/) | 框选提量导出Excel（结构 + 井排管） | 0.3.1 | Python | didi | MIT |
+| [`quantity-export`](quantity-export/) | 框选提量导出Excel（结构 + 井排管） | 0.4.0 | Python | didi | MIT |
 | [`rebar-3d-view`](rebar-3d-view/) | 一键钢筋三维实体显示 | 0.2.0 | Python | didi | MIT |
 | [`rebar-cage`](rebar-cage/) | 一键单构件快速配筋 | 0.3.0 | Python | didi | MIT |
 | [`rfi-pack`](rfi-pack/) | RFI 取证包 | 0.1.0 | Python | didi | MIT |
@@ -43,14 +43,12 @@
 | [`view-manager`](view-manager/) | 视图管理 | 0.2.1 | Python | lewismconte (Sendit) | MIT |
 | [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.38 | Python | didi | MIT |
 | [`well-audit`](well-audit/) | 井大样体检 | 0.1.0 | Python | didi | MIT |
-| [`well-clear-marks`](well-clear-marks/) | 一键清除井标记 | 0.1.3 | Python | didi | MIT |
 | [`well-config`](well-config/) | 井大样项目配置 | 0.1.1 | Python | didi | MIT |
-| [`well-depth-report`](well-depth-report/) | 井深统计报表 | 0.1.6 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.4 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-family-guard`](well-family-guard/) | 井族体检 | 0.1.2 | Python | didi | MIT |
 | [`well-gap-dim`](well-gap-dim/) | 井间距自动标注 | 0.1.2 | Python | didi | MIT |
 | [`well-list-check`](well-list-check/) | 井表核对 | 0.1.0 | Python | didi | MIT |
-| [`well-number`](well-number/) | 一键编号 | 0.2.1 | Python | didi | MIT |
+| [`well-number`](well-number/) | 一键编号 / 清除标记 | 0.3.0 | Python | didi | MIT |
 | [`well-param-sync`](well-param-sync/) | 井参数同步 | 0.1.2 | Python | didi | MIT |
 | [`well-sheet-fit`](well-sheet-fit/) | 井图比例排版 | 0.1.3 | Python | didi | MIT |
 | [`well-sheet-no`](well-sheet-no/) | 井图号重编 | 0.1.7 | Python | didi | MIT |

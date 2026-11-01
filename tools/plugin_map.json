@@ -137,13 +137,9 @@
       "group": "井大样出图",
       "status": "proven"
     },
-    "well-clear-marks": {
-      "group": "井大样出图",
-      "status": "beta"
-    },
     "well-number": {
       "group": "井与管线",
-      "status": "beta"
+      "status": "tested"
     },
     "well-depth": {
       "group": "井与管线",
@@ -170,10 +166,6 @@
       "status": "proven"
     },
     "elv-merge": {
-      "group": "井与管线",
-      "status": "beta"
-    },
-    "well-depth-report": {
       "group": "井与管线",
       "status": "beta"
     },

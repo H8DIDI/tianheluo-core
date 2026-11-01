@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
-__title__ = '一键编号'
+__title__ = '一键编号\n/清除标记'
 __author__ = 'didi'
 __doc__ = ('给选中的构件（井、桩、设备……任何有「标记」的构件）按位置自动编号：\n'
            '可以按 X/Y 方向排，也可以沿一条模型线/详图线（道路中心线、管线走向）排，或从起点开始就近连成一串。\n'
-           '前缀、起始号、位数、写入哪个参数都能改，先预览再写入，会提醒和模型里其它构件重号。整次可 Ctrl+Z 撤销。')
+           '前缀、起始号、位数、写入哪个参数都能改，先预览再写入，会提醒和模型里其它构件重号。整次可 Ctrl+Z 撤销。\n'
+           '另有「清除选中井的标记」（原「一键清除井标记」已并入）：只清井的【标记】，列出井号确认，已出图的井会提醒。')
 
 import io
 import os
@@ -495,7 +496,7 @@ def order(items, mode):
     return items, ''
 
 
-def main():
+def number_main():
     sel = [doc.GetElement(i) for i in uidoc.Selection.GetElementIds()]
     sel = [e for e in sel if e is not None and e.Category is not None and not isinstance(e, DB.ElementType)]
     s = dialog(load(), len(sel))
@@ -593,6 +594,174 @@ def main():
         forms.alert('写入失败，已撤销：\n' + traceback.format_exc(), title=TITLE)
         return
     forms.alert('已编号 %d 个（%s ~ %s）。' % (n, plan[0][1], plan[-1][1]), title=TITLE)
+
+
+TITLE_CM = '一键清除标记'
+_WELL_CAT = int(DB.BuiltInCategory.OST_GenericModel)   # 井族所在的类别
+
+
+class _CmSuppressWarnings(DB.IFailuresPreprocessor):
+    """静默处理所有警告，消除弹窗阻断"""
+    def PreprocessFailures(self, failuresAccessor):
+        for f in failuresAccessor.GetFailureMessages():
+            if f.GetSeverity() == DB.FailureSeverity.Warning:
+                failuresAccessor.DeleteWarning(f)
+        return DB.FailureProcessingResult.Continue
+
+
+
+
+def _cm_mark_param(elem):
+    p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+    if not p:
+        p = elem.LookupParameter("标记")
+    return p
+
+
+def _cm_is_well(elem):
+    try:
+        return isinstance(elem, DB.FamilyInstance) and elem.Category is not None and elem.Category.Id.Value == _WELL_CAT
+    except Exception:
+        return False
+
+
+def _cm_sheet_names():
+    """全部图纸的「图号 图名」，用来提醒「这口井已经出图」。"""
+    names = []
+    try:
+        for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet):
+            names.append(u"{} {}".format(s.SheetNumber, s.Name))
+    except Exception:
+        pass
+    return names
+
+
+def _cm_sample(marks, n=10):
+    s = u", ".join(marks[:n])
+    if len(marks) > n:
+        s += u" 等共 {} 个".format(len(marks))
+    return s
+
+
+def clear_marks():
+    # 1. 获取预选图元 (先框选再点按钮)
+    selected_ids = list(uidoc.Selection.GetElementIds())
+
+    # 2. 若未预选，进入拉框框选模式 (先点按钮再框选)
+    if not selected_ids:
+        try:
+            picked_elements = uidoc.Selection.PickElementsByRectangle(
+                "请在平面图中拉框框选需要清除【标记】的井："
+            )
+            if picked_elements:
+                selected_ids = [e.Id for e in picked_elements]
+        except Exception:
+            # 用户按 ESC 取消
+            return
+
+    if not selected_ids:
+        return
+
+    # 3. 收集「标记」非空的图元，分成井和其他图元
+    wells = []
+    others = []
+    for eid in selected_ids:
+        elem = doc.GetElement(eid)
+        if not elem:
+            continue
+        p_mark = _cm_mark_param(elem)
+        if p_mark and not p_mark.IsReadOnly:
+            current_val = (p_mark.AsString() or "").strip()
+            if current_val:
+                (wells if _cm_is_well(elem) else others).append((elem, p_mark, current_val))
+
+    if not wells and not others:
+        forms.alert(
+            "选中的图元中没有需要清空的【标记】值（可能标记本就为空，或选中的不是井）。",
+            title=TITLE_CM
+        )
+        return
+
+    # 协同模型：被别人占用的图元清不了，先排除并在确认框里说明（否则整批回滚）
+    _ok, blocked = wg_split(doc, [e for e, _p, _m in wells + others])
+    if blocked:
+        bad = set(e.Id for e, _w in blocked)
+        wells = [w for w in wells if w[0].Id not in bad]
+        others = [o for o in others if o[0].Id not in bad]
+    note = wg_note(blocked, lambda e: (_cm_mark_param(e).AsString() or u'').strip())
+    if not wells and not others:
+        forms.alert(u"选中的图元都改不了。" + note, title=TITLE_CM)
+        return
+
+    # 4. 防呆：先列出要清的内容，确认后才执行
+    names = _cm_sheet_names()
+    on_sheet = [m for _e, _p, m in wells if any(m in nm for nm in names)]
+    msg = u""
+    if wells:
+        msg += u"将清空 {} 口井的【标记】：\n{}\n".format(len(wells), _cm_sample([m for _e, _p, m in wells]))
+    else:
+        msg += u"框选范围里没有井（常规模型）。\n"
+    if on_sheet:
+        msg += u"\n其中 {} 口井已经有图纸（图名里有这个井号）：{}\n清掉后这些图纸会找不到对应的井。\n".format(len(on_sheet), _cm_sample(on_sheet, 6))
+    if others:
+        cats = {}
+        for e, _p, _m in others:
+            nm = e.Category.Name if e.Category is not None else u"其他"
+            cats[nm] = cats.get(nm, 0) + 1
+        msg += u"\n另有 {} 个其他图元也带标记（{}），默认不动。\n".format(
+            len(others), u"、".join(u"{} {} 个".format(k, v) for k, v in sorted(cats.items())))
+        msg += note
+        msg += u"\n\n是：只清井的标记\n否：井和其他图元的标记一起清\n取消：不清"
+        ans = WF.MessageBox.Show(msg, TITLE_CM, WF.MessageBoxButtons.YesNoCancel, WF.MessageBoxIcon.Question)
+        if ans == WF.DialogResult.Cancel:
+            return
+        targets = wells if ans == WF.DialogResult.Yes else wells + others
+    else:
+        msg += note
+        msg += u"\n确定清空吗？（Ctrl+Z 可撤销）"
+        ans = WF.MessageBox.Show(msg, TITLE_CM, WF.MessageBoxButtons.OKCancel, WF.MessageBoxIcon.Question)
+        if ans != WF.DialogResult.OK:
+            return
+        targets = wells
+    if not targets:
+        forms.alert(u"没有需要清空的井标记，未做任何修改。", title=TITLE_CM)
+        return
+
+    # 5. 在安全事务中仅将【标记】字段清空，不修改任何其他参数或图元
+    t = DB.Transaction(doc, TITLE_CM)
+    fho = t.GetFailureHandlingOptions()
+    fho.SetFailuresPreprocessor(_CmSuppressWarnings())
+    fho.SetClearAfterRollback(True)
+    t.SetFailureHandlingOptions(fho)
+
+    cleared_marks = []
+    t.Start()
+    try:
+        for elem, p_mark, old_val in targets:
+            p_mark.Set("")
+            cleared_marks.append(old_val)
+        t.Commit()
+    except Exception as ex:
+        t.RollBack()
+        forms.alert("清空标记字段失败: {}".format(str(ex)), title="错误")
+        return
+
+    # 6. 反馈提示
+    msg = u"【标记清空完成】\n\n"
+    msg += u"• 清空了 {} 个图元的标记：{}\n".format(len(cleared_marks), _cm_sample(cleared_marks))
+    msg += u"• 其他所有参数、尺寸及模型图元均未改动。\n\n"
+    msg += u"(提示: 如需恢复，可在 Revit 中直接按 Ctrl + Z 撤销)"
+    forms.alert(msg, title=TITLE_CM)
+
+
+def main():
+    pick = forms.CommandSwitchWindow.show(['按位置编号', '清除选中井的标记'], message=TITLE)
+    if not pick:
+        return
+    if pick.startswith('清除'):
+        clear_marks()
+    else:
+        number_main()
 
 
 if __name__ == '__main__':

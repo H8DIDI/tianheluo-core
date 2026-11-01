@@ -81,6 +81,19 @@ try:
           u'材质' in hdr[u'混凝土'] and u'表面积(m²)' in hdr[u'混凝土'] and u'最高顶标高(m)' in hdr[u'排管导管'] and u'井底标高(m)' in hdr[u'井明细'])
     gm = [e for e in allel if e.Category.Id.Value == int(DB.BuiltInCategory.OST_GenericModel)]
     check(u'井口数一致', summ['wells'] == len(gm), u'%d vs %d' % (summ['wells'], len(gm)))
+    # 井深统计（原「井深统计报表」并入）
+    stab = [t for t in tables if t[0] == u'井深统计']
+    check(u'有「井深统计」标签页', len(stab) == 1)
+    if stab:
+        tot = [r for r in stab[0][2] if r[1] == u'（该系列全部）']
+        check(u'井深统计：各系列口数之和 = 井口数', sum(r[3] for r in tot) == summ['wells'], u'%d vs %d' % (sum(r[3] for r in tot), summ['wells']))
+        wd = [w[4] for w in res['wells'] if w[4]]
+        check(u'井深统计：最小/最大深度与逐口数据一致', wd and min(r[5] for r in tot if r[5] != u'') == round(min(wd)) and max(r[6] for r in tot if r[6] != u'') == round(max(wd)),
+              u'%s ~ %s mm' % (round(min(wd)) if wd else None, round(max(wd)) if wd else None))
+        LOG.append(u'  缺深度的井 %d 口' % sum(1 for w in res['wells'] if not w[4]))
+    dk = [t for t in tables if t[0].startswith(u'深井')]
+    deep_n = sum(1 for w in res['wells'] if w[4] and w[4] >= n['DEPTH_CFG'].get(u'deep_m', 4.0) * 1000 - 1e-6)
+    check(u'深井清单行数 = 深度≥阈值的井数', (len(dk[0][2]) if dk else 0) == deep_n, u'%d' % deep_n)
     for t in tables:
         LOG.append(u'  [%s] %d 行 合计 %s' % (t[0], len(t[2]), t[3]))
     p = os.path.join(OUT, u'提量.xlsx')

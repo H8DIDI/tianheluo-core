@@ -4,7 +4,7 @@ __title__ = "一键框选\n提量表格"
 __author__ = "KAIFA"
 __doc__ = ("框选（或整个项目、当前视图）里的构件，先在窗口里按标签页给出表格，看完可导出 Excel（xlsx）：\n"
            "结构：混凝土体积（m³）、钢材重量（t，按材料密度算）、钢筋按直径汇总（根数、总长、重量）；\n"
-           "小市政：井按系列、族类型、深度档汇总并附逐口明细，排管和导管按族类型汇总根数、长度、孔数、孔·米，松木桩根数和垫层块数、体积。\n"
+           "小市政：井按系列、族类型、深度档汇总并附逐口明细，另有井深统计（最小/最大/平均、缺深度）和深井清单（阈值可设，可一键在模型里选中），排管和导管按族类型汇总根数、长度、孔数、孔·米，松木桩根数和垫层块数、体积。\n"
            "排管、松木桩、垫层各自单算，不会混进混凝土表。也可以在 Revit 里生成明细表（之后模型改了自动更新）。只读，不改模型（生成明细表除外）。")
 
 import re
@@ -78,7 +78,48 @@ SCHEDULE_SPECS = [
 # @include _shared/form_fit.py
 # @include _shared/well_config.py
 # @include _shared/xlsx_lite.py
+# @include _shared/settings_ui.py
 WCFG = wcfg_load()
+DEPTH_SET = os.path.join(OUT_DIR, u'井深统计设置.json')
+DEPTH_DEFAULTS = {
+    u'说明': u'params：井深参数名，按顺序找第一个有值的（第一项没有时先用 偏移−井底标高）；deep_m：深井阈值（米）。',
+    u'params': [u'井内深度', u'井底深度', u'井深', u'总深度', u'主体净深度', u'深度', u'井整体高度', u'井底深'],
+    u'deep_m': 4.0,
+}
+
+
+def _depth_cfg():
+    s = dict(DEPTH_DEFAULTS)
+    try:
+        if os.path.exists(DEPTH_SET):
+            with io.open(DEPTH_SET, 'r', encoding='utf-8-sig') as f:
+                s.update(json.load(f))
+    except Exception:
+        pass
+    return s
+
+
+def _depth_open_settings():
+    cur = _depth_cfg()
+    fields = [
+        {'key': 'params', 'label': u'井深参数名（按顺序找）', 'kind': 'list',
+         'hint': u'逗号分隔。每口井按顺序找第一个有值的参数（实例参数优先，其次类型参数）作为井深。'},
+        {'key': 'deep_m', 'label': u'深井阈值 (m)', 'kind': 'num', 'min': 0, 'max': 100,
+         'hint': u'井深达到这个值的井列进「深井」标签页，可在模型里选中。'},
+    ]
+    res = su_fields_dialog(TITLE + u' · 井深设置', u'改完点保存，重新运行提量后生效。设置文件：' + DEPTH_SET, fields, cur, DEPTH_DEFAULTS,
+                           extra_buttons=[(u'用记事本打开文件', lambda: su_open_file(DEPTH_SET))], width=680, height=380)
+    if res is None:
+        return False
+    out = dict(DEPTH_DEFAULTS)
+    out.update(cur)
+    out.update(res)
+    if not os.path.isdir(OUT_DIR):
+        os.makedirs(OUT_DIR)
+    with io.open(DEPTH_SET, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(out, ensure_ascii=False, indent=2))
+    return True
+DEPTH_CFG = _depth_cfg()
 DEPTH_STEP = 500.0         # 井深度按 500 mm 一档汇总（预制井按档订货）
 _HOLES = re.compile(u'(\\d+)\\s*孔')
 PILE_KEYS = (u'松木桩', u'Φ75')
@@ -177,15 +218,49 @@ class _QtoFilter(ISelectionFilter):
         return False
 
 
+def _num_mm(p):
+    """参数值换成 mm（长度）或原数；取不到返回 None。"""
+    if p is None or not p.HasValue:
+        return None
+    try:
+        if p.StorageType == DB.StorageType.Double:
+            v = p.AsDouble()
+            try:
+                if p.Definition.GetDataType() == DB.SpecTypeId.Length:
+                    return v * FT_TO_MM
+            except Exception:
+                pass
+            return v
+        if p.StorageType == DB.StorageType.Integer:
+            return float(p.AsInteger())
+    except Exception:
+        return None
+    return None
+
+
 def _depth_mm(e):
-    """井内深度（mm）：优先「井内深度」参数，没有就用 偏移 − 井底标高。"""
-    p = e.LookupParameter(u'井内深度')
-    if p is not None and p.HasValue and p.StorageType == DB.StorageType.Double and p.AsDouble() > 0:
-        return p.AsDouble() * FT_TO_MM
+    """井深（mm）：按设置里的参数名顺序找（实例参数优先，其次类型参数）；第一个名字（默认「井内深度」）没有时，
+    先用 偏移 − 井底标高，再试后面的名字。"""
+    names = [n for n in DEPTH_CFG.get(u'params', []) if n]
+    t = doc.GetElement(e.GetTypeId())
+
+    def _by(n):
+        v = _num_mm(e.LookupParameter(n))
+        if v is None and t is not None:
+            v = _num_mm(t.LookupParameter(n))
+        return v if (v is not None and v > 0) else None
+    if names:
+        v = _by(names[0])
+        if v is not None:
+            return v
     b = e.LookupParameter(u'井底标高')
     o = e.get_Parameter(DB.BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM)
     if b is not None and b.HasValue and o is not None and o.HasValue:
         return (o.AsDouble() - b.AsDouble()) * FT_TO_MM
+    for n in names[1:]:
+        v = _by(n)
+        if v is not None:
+            return v
     return None
 
 
@@ -603,6 +678,27 @@ def _table_rows(res):
         tables.append((u'井汇总', [u'系列', u'族', u'类型', u'长(mm)', u'宽(mm)', u'深度档(mm)', u'数量', u'最小井深(mm)', u'最大井深(mm)', u'最低井底标高(m)'], wrows,
                        [u'合计', u'', u'', u'', u'', u'', len(res['wells']), u'', u'', u'']))
         tables.append((u'井明细', [u'井号', u'系列', u'族', u'类型', u'长(mm)', u'宽(mm)', u'井内深度(mm)', u'深度档(mm)', u'井底标高(m)', u'井盖面标高(m)', u'构件ID'], detail, None))
+    if by:
+        def _stat(vs):
+            v = [x for x in vs if x]
+            if not v:
+                return [len(vs), 0, u'', u'', u'', 0, len(vs)]
+            return [len(vs), len(v), round(min(v)), round(max(v)), round(sum(v) / len(v)), len(set(round(x) for x in v)), len(vs) - len(v)]
+        sg = {}
+        sord = []
+        for mk, lab, f, t, d, eid, L, W, bot, top in sorted(res['wells'], key=lambda w: wcfg_well_sort_key(w[0], WCFG)):
+            for key in ((lab, u'（该系列全部）', u''), (lab, f, t)):
+                if key not in sg:
+                    sg[key] = []
+                    sord.append(key)
+                sg[key].append(d)
+        srows = [[k[0], k[1], k[2]] + _stat(sg[k]) for k in sorted(sord, key=lambda k: (k[0], k[1] != u'（该系列全部）', k[1], k[2]))]
+        tables.append((u'井深统计', [u'系列', u'族', u'类型', u'口数', u'有深度', u'最小(mm)', u'最大(mm)', u'平均(mm)', u'不同取值数', u'缺深度'], srows, None))
+        deep_mm = float(DEPTH_CFG.get(u'deep_m', 4.0)) * 1000.0
+        drows = [[mk, lab, f, t, round(d), _r(bot), eid] for mk, lab, f, t, d, eid, L, W, bot, top in
+                 sorted(res['wells'], key=lambda w: -(w[4] or 0)) if d and d >= deep_mm - 1e-6]
+        if drows:
+            tables.append((u'深井≥%gm' % (deep_mm / 1000.0), [u'井号', u'系列', u'族', u'类型', u'井深(mm)', u'井底标高(m)', u'构件ID'], drows, None))
     if res['banks']:
         brows, tl, th, tv = [], 0.0, 0.0, 0.0
         for k in sorted(res['banks']):
@@ -811,9 +907,33 @@ def _show_window(tables, summary, src_txt, res):
         except Exception as ex:
             forms.alert(u'生成明细表失败，已回滚：\n%s' % ex, title=TITLE)
 
+    def _on_deep(sender, args):
+        try:
+            deep_mm = float(DEPTH_CFG.get(u'deep_m', 4.0)) * 1000.0
+            ids = [w[5] for w in res['wells'] if w[4] and w[4] >= deep_mm - 1e-6]
+            if not ids:
+                forms.alert(u'没有深度 ≥ %g m 的井。' % (deep_mm / 1000.0), title=TITLE)
+                return
+            uidoc.Selection.SetElementIds(List[DB.ElementId]([DB.ElementId(i) for i in ids]))
+            forms.alert(u'已在模型里选中 %d 口深井（≥ %g m）。' % (len(ids), deep_mm / 1000.0), title=TITLE)
+        except Exception as ex:
+            forms.alert(u'选中失败：\n%s' % ex, title=TITLE)
+
+    def _on_set(sender, args):
+        try:
+            if _depth_open_settings():
+                forms.alert(u'井深设置已保存。关闭本窗口后重新运行提量生效。', title=TITLE)
+        except Exception as ex:
+            forms.alert(u'设置失败：\n%s' % ex, title=TITLE)
+
     _button(u'导出 Excel', 12, _on_export)
     _button(u'生成/更新明细表', 172, _on_schedule)
-    _button(u'关闭', 332, lambda s, a: form.Close())
+    if res['wells']:
+        _button(u'选中深井', 332, _on_deep)
+        _button(u'井深设置…', 492, _on_set)
+        _button(u'关闭', 652, lambda s, a: form.Close())
+    else:
+        _button(u'关闭', 332, lambda s, a: form.Close())
 
     form.Controls.Add(tabs)
     form.Controls.Add(bottom)
