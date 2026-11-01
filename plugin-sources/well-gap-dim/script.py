@@ -719,6 +719,19 @@ def edge_axis(wa, wb):
     return None
 
 
+def _normals_parallel(wells, ids, ax):
+    """这几口井在 ax 方向上用的中心参照面，法向是否严格平行（Revit 要求连续标注的参照面平行，差 0.01° 以上就会建失败/被删）。"""
+    ns = []
+    for i in ids:
+        w = wells[i]
+        ns.append(w['hand'] if abs(_dot(w['hand'], ax)) >= ANG_COS else w['face'])
+    n0 = ns[0]
+    for v in ns[1:]:
+        if abs(n0[0] * v[1] - n0[1] * v[0]) > 2e-4:
+            return False
+    return True
+
+
 def _akey(ax):
     return (round(ax[0], 3), round(ax[1], 3))
 
@@ -828,12 +841,19 @@ def make_plan(view, wells, edges, dims, off_ft):
             order = sorted(comp, key=lambda i: _dot(wells[i]['c'], ax))
             chain = all(len(nb[i]) <= 2 for i in comp) and all(_pair(order[i], order[i + 1]) in set(_pair(a, b) for a, b in es) for i in range(len(order) - 1))
             if chain and len(order) >= 2:
-                plan['create'].append({'ax': ax, 'ids': order})
+                items = [{'ax': ax, 'ids': order}]
             else:
+                items = []
                 for a in comp:
                     for b in nb[a]:
                         if a < b:
-                            plan['create'].append({'ax': ax, 'ids': sorted([a, b], key=lambda i: _dot(wells[i]['c'], ax))})
+                            items.append({'ax': ax, 'ids': sorted([a, b], key=lambda i: _dot(wells[i]['c'], ax))})
+            for it in items:
+                if _normals_parallel(wells, it['ids'], ax):
+                    plan['create'].append(it)
+                else:                       # 井有点转角（0.01° 以上），中心面不严格平行：改成沿连线标，每相邻两口井一条
+                    for i in range(len(it['ids']) - 1):
+                        plan['create'].append({'kind': 'oblique', 'ids': [it['ids'][i], it['ids'][i + 1]]})
     return plan
 
 
@@ -951,6 +971,25 @@ def create_dim(view, wells, item, dtype, off_ft):
     return dm, None
 
 
+def _dim_ok(dm, item, wells):
+    """标注是否有效、数值是否等于井中心距（轴向：中心在标注方向上的距离；斜向：连线真实距离）。"""
+    try:
+        if not dm.IsValidObject:
+            return False
+        if item.get('kind') == 'oblique':
+            ca, cb = wells[item['ids'][0]]['c'], wells[item['ids'][1]]['c']
+            return abs(dm.Value - math.hypot(cb[0] - ca[0], cb[1] - ca[1])) <= 0.002
+        s = [_dot(wells[i]['c'], item['ax']) for i in item['ids']]
+        want = sorted(abs(s[i + 1] - s[i]) for i in range(len(s) - 1))
+        if dm.NumberOfSegments and dm.NumberOfSegments > 0:
+            got = sorted(dm.Segments.get_Item(i).Value for i in range(dm.NumberOfSegments))
+        else:
+            got = [dm.Value]
+        return len(got) == len(want) and all(abs(a - b) <= 0.002 for a, b in zip(want, got))
+    except Exception:
+        return False
+
+
 def apply_plan(view, wells, plan, dtype, off_ft, do_delete, do_create):
     """一个事务：先删不对的旧标注，再新建。返回 (删了几个, 新建几条, 失败 [(井号们, 原因)], 数值校验不符数)。"""
     t = DB.Transaction(doc, u'井间距自动标注')
@@ -974,27 +1013,41 @@ def apply_plan(view, wells, plan, dtype, off_ft, do_delete, do_create):
                 if dm is None:
                     fails.append((names, err))
                     continue
-                made += 1
                 made_dims.append((dm, item))
             doc.Regenerate()
+            retry = []
             for dm, item in made_dims:
-                try:      # 数值核对：每段应该等于井中心在标注方向上的距离（斜向：真实中心距）
-                    if item.get('kind') == 'oblique':
-                        ca, cb = wells[item['ids'][0]]['c'], wells[item['ids'][1]]['c']
-                        if abs(dm.Value - math.hypot(cb[0] - ca[0], cb[1] - ca[1])) > 0.002:
-                            badval += 1
-                        continue
-                    s = [_dot(wells[i]['c'], item['ax']) for i in item['ids']]
-                    want = [abs(s[i + 1] - s[i]) for i in range(len(s) - 1)]
-                    if dm.NumberOfSegments and dm.NumberOfSegments > 0:
-                        got = sorted(dm.Segments.get_Item(i).Value for i in range(dm.NumberOfSegments))
-                    else:
-                        got = [dm.Value]
-                    if len(got) != len(want) or any(abs(a - b) > 0.002 for a, b in zip(sorted(want), got)):
-                        badval += 1
+                if _dim_ok(dm, item, wells):
+                    made += 1
+                    continue
+                try:                                   # 建出来的数值不对或已失效：删掉，改成沿连线标
+                    if dm.IsValidObject:
+                        doc.Delete(dm.Id)
                 except Exception:
                     pass
-        t.Commit()
+                if item.get('kind') == 'oblique':
+                    fails.append((u'-'.join(wells[i]['mark'] for i in item['ids']), u'标注数值不对'))
+                else:
+                    for i in range(len(item['ids']) - 1):
+                        retry.append({'kind': 'oblique', 'ids': [item['ids'][i], item['ids'][i + 1]]})
+            retry_dims = []
+            for item in retry:
+                dm, err = create_dim(view, wells, item, dtype, off_ft)
+                if dm is None:
+                    fails.append((u'-'.join(wells[i]['mark'] for i in item['ids']), err))
+                else:
+                    retry_dims.append((dm, item))
+            if retry_dims:
+                doc.Regenerate()
+            for dm, item in retry_dims:
+                if _dim_ok(dm, item, wells):
+                    made += 1
+                else:
+                    badval += 1
+                    fails.append((u'-'.join(wells[i]['mark'] for i in item['ids']), u'标注数值对不上，已保留请检查'))
+        st = t.Commit()
+        if st != DB.TransactionStatus.Committed:
+            raise Exception(u'事务没有提交成功（%s），什么都没改' % st)
         return ndel, made, fails, badval
     except Exception:
         if t.HasStarted() and not t.HasEnded():
