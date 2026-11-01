@@ -214,7 +214,6 @@ CASES = [
     ('well-annotate', u'设置', lambda n: n['open_settings']()),
     ('well-sheet-fit', u'设置', lambda n: n['open_settings']()),
     ('well-spec-table', u'设置', lambda n: n['open_settings']()),
-    ('elv-merge', u'设置', lambda n: n['open_settings']()),
     ('well-family-guard', u'设置', lambda n: n['open_settings']()),
     ('well-param-sync', u'设置', lambda n: n['open_settings']()),
     ('family-param-dim', u'设置', lambda n: n['open_settings']()),

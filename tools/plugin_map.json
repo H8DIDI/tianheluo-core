@@ -165,10 +165,6 @@
       "group": "井与管线",
       "status": "proven"
     },
-    "elv-merge": {
-      "group": "井与管线",
-      "status": "beta"
-    },
     "pile-cushion": {
       "group": "井与管线",
       "status": "proven"
