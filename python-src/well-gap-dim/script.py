@@ -4,7 +4,8 @@ __doc__ = ('在当前平面视图里，自动给「同一条排管路由上相�
            '先按排管的连接关系找出同一条排管上相邻的井（排管是一段一段的，端点相接、走向基本不拐的连成一条，到井为止；拐到别的支线上的井不算），'
            '同一直线上连续的井合并成一条连续标注，参照的是井族自带的「中心（左/右）」「中心（前/后）」参照平面，数值是准的、井挪了会跟着变。\n'
            '视图里已经手工标好且正确的不重复标；标错的（参照的不是井中心、两口井之间没有排管连接、同一口井参了两次、标注文字被手改）可以一并删掉重标。'
-           '先在窗口里列出「要删什么、要新增什么」，确认后一次执行，整次一个事务，Ctrl+Z 可撤销。')
+           '先在窗口里列出「要删什么、要新增什么」，确认后一次执行，整次一个事务，Ctrl+Z 可撤销。\n'
+           '另有「排管横向中心距标注」：相邻、平行并排的排管，在并行段上沿排管自带的中心线连续标出横向中心距（间距上限、并行长度、标注位置可在设置里改）。')
 
 import re
 import math
@@ -14,6 +15,10 @@ from pyrevit import revit, DB, UI, forms
 # @include _shared/form_fit.py
 # @include _shared/ws_guard.py
 # @include _shared/well_config.py
+# @include _shared/settings_ui.py
+import io
+import os
+import json
 import clr
 import System
 clr.AddReference('System.Windows.Forms')
@@ -720,7 +725,256 @@ def show_dialog(view, wells, plan, types, dtype0, edges):
     return res
 
 
+
+# ============================================================
+# 排管横向中心距标注：相邻平行排管的中心线之间，横向间距
+# ============================================================
+BANK_SET = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), u'KaifaTools', u'井间距标注设置.json')
+BANK_DEFAULTS = {
+    u'说明': u'bank_gap_max_m：相邻两排管中心线最大间距（米），更远的不标；bank_overlap_min_m：两排管并行重叠至少多长（米）才标；'
+           u'bank_pos：标注线放在重叠段的哪个位置（0~1，0.5=正中间）；bank_min_gap_mm：中心距小于这个值（几乎重合）不标。',
+    u'bank_gap_max_m': 3.0,
+    u'bank_overlap_min_m': 1.0,
+    u'bank_pos': 0.5,
+    u'bank_min_gap_mm': 50.0,
+}
+
+
+def bank_cfg():
+    s = dict(BANK_DEFAULTS)
+    try:
+        if os.path.exists(BANK_SET):
+            with io.open(BANK_SET, 'r', encoding='utf-8-sig') as f:
+                s.update(json.load(f))
+    except Exception:
+        pass
+    return s
+
+
+def bank_open_settings():
+    cur = bank_cfg()
+    fields = [
+        {'key': 'bank_gap_max_m', 'label': u'相邻排管最大中心距 (m)', 'kind': 'num', 'min': 0.1, 'max': 50,
+         'hint': u'两排管中心线相距超过这个值就不标。'},
+        {'key': 'bank_overlap_min_m', 'label': u'并行重叠至少 (m)', 'kind': 'num', 'min': 0, 'max': 100,
+         'hint': u'两排管并排走的长度不到这个值，不标。'},
+        {'key': 'bank_pos', 'label': u'标注线位置 (0~1)', 'kind': 'num', 'min': 0, 'max': 1,
+         'hint': u'放在并行重叠段的哪个位置：0 起点、0.5 正中、1 终点。'},
+        {'key': 'bank_min_gap_mm', 'label': u'最小中心距 (mm)', 'kind': 'num', 'min': 0, 'max': 1000,
+         'hint': u'中心距小于这个值（几乎重合）的不标。'},
+    ]
+    res = su_fields_dialog(TITLE + u' · 排管横向标注设置', u'改完点保存，下次运行生效。设置文件：' + BANK_SET, fields, cur, BANK_DEFAULTS,
+                           extra_buttons=[(u'用记事本打开文件', lambda: su_open_file(BANK_SET))], width=680, height=420)
+    if res is None:
+        return False
+    out = dict(BANK_DEFAULTS)
+    out.update(cur)
+    out.update(res)
+    dd = os.path.dirname(BANK_SET)
+    if not os.path.isdir(dd):
+        os.makedirs(dd)
+    with io.open(BANK_SET, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(out, ensure_ascii=False, indent=2))
+    return True
+
+
+def view_banks(view):
+    """当前视图里的直排管：[{e, id, a, b, t(单位方向), ref(中心线参照)}]"""
+    out = []
+    col = DB.FilteredElementCollector(doc, view.Id).OfCategory(DB.BuiltInCategory.OST_StructuralFraming).WhereElementIsNotElementType()
+    for e in col:
+        if not _is_bank(e) or not isinstance(e.Location, DB.LocationCurve):
+            continue
+        c = e.Location.Curve
+        if not isinstance(c, DB.Line):
+            continue
+        a, b = c.GetEndPoint(0), c.GetEndPoint(1)
+        dx, dy = b.X - a.X, b.Y - a.Y
+        L_ = math.hypot(dx, dy)
+        if L_ < 1e-6:
+            continue
+        refs = e.GetReferences(RT.CenterFrontBack)
+        if refs is None or refs.Count == 0:
+            continue
+        out.append({'e': e, 'id': _idv(e.Id), 'a': a, 'b': b, 't': (dx / L_, dy / L_), 'ref': refs[0]})
+    return out
+
+
+def bank_plan(view, banks, cfg):
+    """相邻平行排管 → 标注链。每条链：{'banks':[按横向顺序], 'ids', 'gaps'(mm), 'p0', 'p1'}。"""
+    gmax = float(cfg['bank_gap_max_m']) * 1000.0 / 304.8
+    gmin = float(cfg['bank_min_gap_mm']) / 304.8
+    omin = float(cfg['bank_overlap_min_m']) * 1000.0 / 304.8
+    frac = min(1.0, max(0.0, float(cfg['bank_pos'])))
+    groups = []        # 严格平行（叉积 < 2e-4）：Revit 要求连续标注的参照面严格平行
+    for b in banks:
+        for g in groups:
+            r = g[0]
+            if abs(r['t'][0] * b['t'][1] - r['t'][1] * b['t'][0]) <= 2e-4:
+                g.append(b)
+                break
+        else:
+            groups.append([b])
+    chains = []
+    try:
+        z0 = view.GenLevel.ProjectElevation
+    except Exception:
+        z0 = None
+    for g in groups:
+        if len(g) < 2:
+            continue
+        ax = g[0]['t']
+        if ax[0] < -1e-9 or (abs(ax[0]) <= 1e-9 and ax[1] < 0):
+            ax = (-ax[0], -ax[1])
+        nrm = (-ax[1], ax[0])
+        for b in g:
+            sa, sb = _dot((b['a'].X, b['a'].Y), ax), _dot((b['b'].X, b['b'].Y), ax)
+            b['s0'], b['s1'] = min(sa, sb), max(sa, sb)
+            b['off'] = _dot((b['a'].X, b['a'].Y), nrm)
+        g.sort(key=lambda b: (b['off'], b['s0']))
+        used = set()
+        for si in range(len(g)):
+            if si in used:
+                continue
+            chain = [g[si]]
+            lo, hi = g[si]['s0'], g[si]['s1']
+            used.add(si)
+            for k in range(si + 1, len(g)):
+                if k in used:
+                    continue
+                nb = g[k]
+                gap = nb['off'] - chain[-1]['off']
+                if gap > gmax:
+                    break
+                if gap < gmin:
+                    continue
+                nlo, nhi = max(lo, nb['s0']), min(hi, nb['s1'])
+                if nhi - nlo < omin:
+                    continue
+                chain.append(nb)
+                lo, hi = nlo, nhi
+                used.add(k)
+            if len(chain) >= 2:
+                s_at = lo + (hi - lo) * frac
+                z = z0 if z0 is not None else chain[0]['a'].Z
+                p0 = DB.XYZ(ax[0] * s_at + nrm[0] * chain[0]['off'], ax[1] * s_at + nrm[1] * chain[0]['off'], z)
+                p1 = DB.XYZ(ax[0] * s_at + nrm[0] * chain[-1]['off'], ax[1] * s_at + nrm[1] * chain[-1]['off'], z)
+                chains.append({'banks': chain, 'ids': [b['id'] for b in chain],
+                               'gaps': [(chain[j + 1]['off'] - chain[j]['off']) * 304.8 for j in range(len(chain) - 1)], 'p0': p0, 'p1': p1})
+    return chains
+
+
+def bank_existing(view, bank_ids):
+    """视图里已经只参照排管的标注：[set(排管id...)]"""
+    out = []
+    for dm in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension):
+        try:
+            ids = set()
+            ok = True
+            for r in dm.References:
+                eid = _idv(r.ElementId)
+                if eid in bank_ids:
+                    ids.add(eid)
+                else:
+                    ok = False
+                    break
+            if ok and len(ids) >= 2:
+                out.append(ids)
+        except Exception:
+            continue
+    return out
+
+
+def bank_main():
+    view = uidoc.ActiveView
+    if not isinstance(view, DB.ViewPlan):
+        forms.alert(u'请在平面视图里运行（当前是「%s」）。' % view.Name, title=TITLE)
+        return
+    cfg = bank_cfg()
+    banks = view_banks(view)
+    chains = bank_plan(view, banks, cfg)
+    if not chains:
+        forms.alert(u'当前视图里 %d 根直排管，没有找到相邻、严格平行、并行重叠 ≥ %g m、中心距 ≤ %g m 的排管。\n条件可以在「排管横向标注设置…」里改。' % (
+            len(banks), cfg['bank_overlap_min_m'], cfg['bank_gap_max_m']), title=TITLE)
+        return
+    have = bank_existing(view, set(b['id'] for b in banks))
+    todo = []
+    covered = 0
+    for c in chains:
+        pairs = [(c['ids'][j], c['ids'][j + 1]) for j in range(len(c['ids']) - 1)]
+        if all(any(a in h and b in h for h in have) for a, b in pairs):
+            covered += 1
+        else:
+            todo.append(c)
+    if not todo:
+        forms.alert(u'没有要做的：%d 组相邻排管已经都有横向中心距标注了。' % covered, title=TITLE)
+        return
+    lines = [u'  %d 根：%s mm' % (len(c['ids']), u' + '.join(u'%.0f' % abs(g) for g in c['gaps'])) for c in todo[:10]]
+    msg = u'当前视图 %d 根直排管，找到 %d 组相邻平行排管需要标横向中心距（另有 %d 组已标好）：\n%s%s\n\n每组一条连续标注，标注线放在并行段的 %.0f%% 位置，参照排管自带的中心线。整次可 Ctrl+Z 撤销。\n\n现在标注？' % (
+        len(banks), len(todo), covered, u'\n'.join(lines), u'\n  …' if len(todo) > 10 else u'', float(cfg['bank_pos']) * 100)
+    if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
+        return
+    types = _dim_types()
+    dtype = _default_type([], types)
+    t = DB.Transaction(doc, u'天河落 · 排管横向中心距标注')
+    fh = t.GetFailureHandlingOptions()
+    fh.SetFailuresPreprocessor(_Fails())
+    t.SetFailureHandlingOptions(fh)
+    t.Start()
+    made, bad, fails = 0, 0, []
+    try:
+        for c in todo:
+            arr = DB.ReferenceArray()
+            for b in c['banks']:
+                arr.Append(b['ref'])
+            try:
+                ln = DB.Line.CreateBound(c['p0'], c['p1'])
+                dm = doc.Create.NewDimension(view, ln, arr, dtype) if dtype is not None else doc.Create.NewDimension(view, ln, arr)
+            except Exception as ex:
+                fails.append((u'、'.join(str(i) for i in c['ids']), (u'%s' % ex).splitlines()[0][:60]))
+                continue
+            # 核对数值：每段应约等于排管中心线横向间距（位置线和几何中心线可能差十几毫米，容差 60 mm）
+            try:
+                if dm.NumberOfSegments and dm.NumberOfSegments > 0:
+                    got = sorted(abs(dm.Segments.get_Item(i).Value) * 304.8 for i in range(dm.NumberOfSegments))
+                else:
+                    got = [abs(dm.Value) * 304.8]
+                want = sorted(abs(g) for g in c['gaps'])
+                if len(got) != len(want) or any(abs(a - b) > 60 for a, b in zip(got, want)):
+                    bad += 1
+            except Exception:
+                bad += 1
+            made += 1
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+    msg = u'完成：新增 %d 条排管横向中心距标注（Ctrl+Z 可整次撤销）。' % made
+    if bad:
+        msg += u'\n⚠ 有 %d 条的数值和排管中心线间距对不上（差 >60 mm），请抽查。' % bad
+    if fails:
+        msg += u'\n没建成 %d 条：\n' % len(fails) + u'\n'.join(u'  排管 %s：%s' % f for f in fails[:8])
+    forms.alert(msg, title=TITLE)
+
+
 def main():
+    pick = forms.CommandSwitchWindow.show([u'井间距标注（相邻井中心到中心）', u'排管横向中心距标注（相邻排管中心线之间）', u'⚙ 排管横向标注设置…'], message=TITLE)
+    if not pick:
+        return
+    try:
+        if pick.startswith(u'⚙'):
+            if bank_open_settings():
+                forms.alert(u'设置已保存，下次运行排管横向标注时生效。', title=TITLE)
+        elif pick.startswith(u'排管'):
+            bank_main()
+        else:
+            well_main()
+    except Exception:
+        forms.alert(u'出错了（已回滚，模型没被改）：\n' + traceback.format_exc(), title=TITLE)
+
+
+def well_main():
     try:
         view = uidoc.ActiveView
         if not isinstance(view, DB.ViewPlan):

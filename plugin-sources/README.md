@@ -44,7 +44,7 @@
 | [`well-config`](well-config/) | 井大样项目配置 | 0.1.1 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.4 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-family-guard`](well-family-guard/) | 井族体检 | 0.1.2 | Python | didi | MIT |
-| [`well-gap-dim`](well-gap-dim/) | 井间距自动标注 | 0.1.2 | Python | didi | MIT |
+| [`well-gap-dim`](well-gap-dim/) | 井间距自动标注 | 0.2.0 | Python | didi | MIT |
 | [`well-number`](well-number/) | 一键编号 / 清除标记 | 0.3.0 | Python | didi | MIT |
 | [`well-param-sync`](well-param-sync/) | 井参数同步 | 0.1.2 | Python | didi | MIT |
 | [`well-sheet-fit`](well-sheet-fit/) | 井图比例排版 | 0.1.3 | Python | didi | MIT |
