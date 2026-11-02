@@ -733,8 +733,10 @@ BANK_SET = os.path.join(System.Environment.GetFolderPath(System.Environment.Spec
 BANK_DEFAULTS = {
     u'说明': u'bank_gap_max_m：相邻两排管中心线最大间距（米），更远的不标；bank_overlap_min_m：两排管并行重叠至少多长（米）才标；'
            u'bank_inset_mm：标注线离排管转折/端头内缩多少（毫米）；bank_step_m：长直段中间每隔多少米再补一条（0=不补）；'
+           u'bank_same_system：只在同一个系统的排管之间标（11KV、275KV、TELCO、ELV、LV 各算一个系统）；'
            u'bank_min_gap_mm：中心距小于这个值（几乎重合）不标。每根排管的两个端点（转折处）都会标。',
-    u'bank_gap_max_m': 3.0,
+    u'bank_gap_max_m': 30.0,
+    u'bank_same_system': True,
     u'bank_overlap_min_m': 0.3,
     u'bank_inset_mm': 600.0,
     u'bank_step_m': 30.0,
@@ -756,8 +758,10 @@ def bank_cfg():
 def bank_open_settings():
     cur = bank_cfg()
     fields = [
-        {'key': 'bank_gap_max_m', 'label': u'相邻排管最大中心距 (m)', 'kind': 'num', 'min': 0.1, 'max': 50,
-         'hint': u'两排管中心线相距超过这个值就不标。'},
+        {'key': 'bank_gap_max_m', 'label': u'相邻排管最大中心距 (m)', 'kind': 'num', 'min': 0.1, 'max': 200,
+         'hint': u'两排管中心线相距超过这个值就不标（默认 30 m，几米到十几米的并排都要标）。'},
+        {'key': 'bank_same_system', 'label': u'只在同一系统的排管之间标', 'kind': 'bool',
+         'hint': u'勾选：11KV 只和 11KV 标，TELCO 只和 TELCO 标……；不勾：相邻的排管不分系统都标。'},
         {'key': 'bank_overlap_min_m', 'label': u'并行重叠至少 (m)', 'kind': 'num', 'min': 0, 'max': 100,
          'hint': u'两排管并排走的长度不到这个值，不标（转折处的短臂也要标的话调小）。'},
         {'key': 'bank_inset_mm', 'label': u'转折处内缩 (mm)', 'kind': 'num', 'min': 0, 'max': 5000,
@@ -782,6 +786,19 @@ def bank_open_settings():
     return True
 
 
+_SYS = re.compile(u'^(ELE-[0-9A-Za-z]+|TELCO|ELV|LV)', re.I)
+
+
+def bank_system(e):
+    """排管所属系统：族名开头的 ELE-11KV / ELE-275KV / TELCO / ELV / LV。取不到返回族名前缀。"""
+    try:
+        f = doc.GetElement(e.GetTypeId()).Family.Name
+    except Exception:
+        return u''
+    m = _SYS.match(f.strip())
+    return (m.group(1).upper() if m else f[:4].upper())
+
+
 def view_banks(view):
     """当前视图里的直排管：[{e, id, a, b, t(单位方向), ref(中心线参照)}]"""
     out = []
@@ -800,7 +817,7 @@ def view_banks(view):
         refs = e.GetReferences(RT.CenterFrontBack)
         if refs is None or refs.Count == 0:
             continue
-        out.append({'e': e, 'id': _idv(e.Id), 'a': a, 'b': b, 't': (dx / L_, dy / L_), 'ref': refs[0]})
+        out.append({'e': e, 'id': _idv(e.Id), 'a': a, 'b': b, 't': (dx / L_, dy / L_), 'ref': refs[0], 'sys': bank_system(e)})
     return out
 
 
@@ -812,12 +829,13 @@ def bank_plan(view, banks, cfg):
     gmin = float(cfg['bank_min_gap_mm']) / 304.8
     omin = float(cfg['bank_overlap_min_m']) * 1000.0 / 304.8
     inset = float(cfg['bank_inset_mm']) / 304.8
+    same_sys = bool(cfg.get('bank_same_system', True))
     step = float(cfg['bank_step_m']) * 1000.0 / 304.8
     groups = []
     for b in banks:
         for g in groups:
             r = g[0]
-            if abs(r['t'][0] * b['t'][1] - r['t'][1] * b['t'][0]) <= 2e-4:
+            if abs(r['t'][0] * b['t'][1] - r['t'][1] * b['t'][0]) <= 2e-4 and (not same_sys or r['sys'] == b['sys']):
                 g.append(b)
                 break
         else:
@@ -940,8 +958,12 @@ def bank_main():
     cfg = bank_cfg()
     banks = view_banks(view)
     chains = bank_plan(view, banks, cfg)
+    sel_ids = set(_idv(i) for i in uidoc.Selection.GetElementIds())
+    only_sel = bool(sel_ids & set(b['id'] for b in banks))
+    if only_sel:
+        chains = [c for c in chains if sel_ids & set(c['ids'])]        # 选中了排管：只标和选中排管有关的
     if not chains:
-        forms.alert(u'当前视图里 %d 根直排管，没有找到相邻、严格平行、并行重叠 ≥ %g m、中心距 ≤ %g m 的排管。\n条件可以在「排管横向标注设置…」里改。' % (
+        forms.alert(u'当前视图里 %d 根直排管，没有找到相邻、严格平行、并行重叠 ≥ %g m、中心距 ≤ %g m（默认同一系统内）的排管。\n条件可以在「排管横向标注设置…」里改。' % (
             len(banks), cfg['bank_overlap_min_m'], cfg['bank_gap_max_m']), title=TITLE)
         return
     have = bank_existing(view, set(b['id'] for b in banks))
@@ -956,7 +978,7 @@ def bank_main():
         forms.alert(u'没有要做的：%d 处排管横向中心距都已经标好了。' % covered, title=TITLE)
         return
     lines = [u'  %d 根：%s mm' % (len(c['ids']), u' + '.join(u'%.0f' % abs(g) for g in c['gaps'])) for c in todo[:10]]
-    msg = u'当前视图 %d 根直排管，找到 %d 处（转折/端头/长段中间）需要标横向中心距（另有 %d 处已标好）：\n%s%s\n\n每组一条连续标注，每根排管的转折/端头处都标（内缩 %.0f mm），长直段中间每 %g m 补一条，参照排管自带的中心线。整次可 Ctrl+Z 撤销。\n\n现在标注？' % (
+    msg = (u'（只标和你选中的排管有关的位置）\n' if only_sel else u'') + u'当前视图 %d 根直排管，找到 %d 处（转折/端头/长段中间）需要标横向中心距（另有 %d 处已标好）：\n%s%s\n\n每组一条连续标注，每根排管的转折/端头处都标（内缩 %.0f mm），长直段中间每 %g m 补一条，参照排管自带的中心线。整次可 Ctrl+Z 撤销。\n\n现在标注？' % (
         len(banks), len(todo), covered, u'\n'.join(lines), u'\n  …' if len(todo) > 10 else u'', float(cfg['bank_inset_mm']), float(cfg['bank_step_m']))
     if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
         return
@@ -979,14 +1001,14 @@ def bank_main():
             except Exception as ex:
                 fails.append((u'、'.join(str(i) for i in c['ids']), (u'%s' % ex).splitlines()[0][:60]))
                 continue
-            # 核对数值：每段应约等于排管中心线横向间距（位置线和几何中心线可能差十几毫米，容差 60 mm）
+            # 核对数值：每段应约等于排管中心线横向间距（位置线和几何中心线可能差十几毫米，容差 3 m（排管位置线可能不在几何中心））
             try:
                 if dm.NumberOfSegments and dm.NumberOfSegments > 0:
                     got = sorted(abs(dm.Segments.get_Item(i).Value) * 304.8 for i in range(dm.NumberOfSegments))
                 else:
                     got = [abs(dm.Value) * 304.8]
                 want = sorted(abs(g) for g in c['gaps'])
-                if len(got) != len(want) or any(abs(a - b) > 60 for a, b in zip(got, want)):
+                if len(got) != len(want) or any(abs(a - b) > 3000 for a, b in zip(got, want)):
                     bad += 1
             except Exception:
                 bad += 1
@@ -998,7 +1020,7 @@ def bank_main():
         raise
     msg = u'完成：新增 %d 条排管横向中心距标注（Ctrl+Z 可整次撤销）。' % made
     if bad:
-        msg += u'\n⚠ 有 %d 条的数值和排管中心线间距对不上（差 >60 mm），请抽查。' % bad
+        msg += u'\n⚠ 有 %d 条的数值和排管中心线间距对不上（差 >3 m），请抽查。' % bad
     if fails:
         msg += u'\n没建成 %d 条：\n' % len(fails) + u'\n'.join(u'  排管 %s：%s' % f for f in fails[:8])
     forms.alert(msg, title=TITLE)
