@@ -5,7 +5,7 @@ __doc__ = ('在当前平面视图里，自动给「同一条排管路由上相�
            '同一直线上连续的井合并成一条连续标注，参照的是井族自带的「中心（左/右）」「中心（前/后）」参照平面，数值是准的、井挪了会跟着变。\n'
            '视图里已经手工标好且正确的不重复标；标错的（参照的不是井中心、两口井之间没有排管连接、同一口井参了两次、标注文字被手改）可以一并删掉重标。'
            '先在窗口里列出「要删什么、要新增什么」，确认后一次执行，整次一个事务，Ctrl+Z 可撤销。\n'
-           '另有「排管横向中心距标注」：相邻、平行并排的排管，在并行段上沿排管自带的中心线连续标出横向中心距（间距上限、并行长度、标注位置可在设置里改）。')
+           '另有「排管横向中心距标注」：相邻、平行并排的排管，在每根排管的转折、端头处，把并排排管的横向中心距沿排管自带的中心线连续标出（间距上限、并行长度、内缩、长段补标间隔可在设置里改）。')
 
 import re
 import math
@@ -732,10 +732,12 @@ def show_dialog(view, wells, plan, types, dtype0, edges):
 BANK_SET = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), u'KaifaTools', u'井间距标注设置.json')
 BANK_DEFAULTS = {
     u'说明': u'bank_gap_max_m：相邻两排管中心线最大间距（米），更远的不标；bank_overlap_min_m：两排管并行重叠至少多长（米）才标；'
-           u'bank_pos：标注线放在重叠段的哪个位置（0~1，0.5=正中间）；bank_min_gap_mm：中心距小于这个值（几乎重合）不标。',
+           u'bank_inset_mm：标注线离排管转折/端头内缩多少（毫米）；bank_step_m：长直段中间每隔多少米再补一条（0=不补）；'
+           u'bank_min_gap_mm：中心距小于这个值（几乎重合）不标。每根排管的两个端点（转折处）都会标。',
     u'bank_gap_max_m': 3.0,
-    u'bank_overlap_min_m': 1.0,
-    u'bank_pos': 0.5,
+    u'bank_overlap_min_m': 0.3,
+    u'bank_inset_mm': 600.0,
+    u'bank_step_m': 30.0,
     u'bank_min_gap_mm': 50.0,
 }
 
@@ -757,9 +759,11 @@ def bank_open_settings():
         {'key': 'bank_gap_max_m', 'label': u'相邻排管最大中心距 (m)', 'kind': 'num', 'min': 0.1, 'max': 50,
          'hint': u'两排管中心线相距超过这个值就不标。'},
         {'key': 'bank_overlap_min_m', 'label': u'并行重叠至少 (m)', 'kind': 'num', 'min': 0, 'max': 100,
-         'hint': u'两排管并排走的长度不到这个值，不标。'},
-        {'key': 'bank_pos', 'label': u'标注线位置 (0~1)', 'kind': 'num', 'min': 0, 'max': 1,
-         'hint': u'放在并行重叠段的哪个位置：0 起点、0.5 正中、1 终点。'},
+         'hint': u'两排管并排走的长度不到这个值，不标（转折处的短臂也要标的话调小）。'},
+        {'key': 'bank_inset_mm', 'label': u'转折处内缩 (mm)', 'kind': 'num', 'min': 0, 'max': 5000,
+         'hint': u'每根排管的端点（转折处、到井处）都标一条，标注线离端点往里内缩这么多。'},
+        {'key': 'bank_step_m', 'label': u'长段中间补标间隔 (m)', 'kind': 'num', 'min': 0, 'max': 500,
+         'hint': u'两个转折之间超过这个长度，中间每隔这么远再补一条；0 = 只标转折处。'},
         {'key': 'bank_min_gap_mm', 'label': u'最小中心距 (mm)', 'kind': 'num', 'min': 0, 'max': 1000,
          'hint': u'中心距小于这个值（几乎重合）的不标。'},
     ]
@@ -801,12 +805,15 @@ def view_banks(view):
 
 
 def bank_plan(view, banks, cfg):
-    """相邻平行排管 → 标注链。每条链：{'banks':[按横向顺序], 'ids', 'gaps'(mm), 'p0', 'p1'}。"""
+    """排管转折处的横向中心距：每根排管的两个端点（转折/到井）往里内缩一点作为「站点」，该站点上并排的排管（中心距 <= 上限）串成一条连续标注；
+    两个站点相距太远的长直段中间每隔 step 再补一条。严格平行（叉积 < 2e-4）的才放同一组。
+    返回链：{'banks', 'ids', 'gaps'(mm), 'p0', 'p1', 'mid'(x,y)}。"""
     gmax = float(cfg['bank_gap_max_m']) * 1000.0 / 304.8
     gmin = float(cfg['bank_min_gap_mm']) / 304.8
     omin = float(cfg['bank_overlap_min_m']) * 1000.0 / 304.8
-    frac = min(1.0, max(0.0, float(cfg['bank_pos'])))
-    groups = []        # 严格平行（叉积 < 2e-4）：Revit 要求连续标注的参照面严格平行
+    inset = float(cfg['bank_inset_mm']) / 304.8
+    step = float(cfg['bank_step_m']) * 1000.0 / 304.8
+    groups = []
     for b in banks:
         for g in groups:
             r = g[0]
@@ -831,41 +838,62 @@ def bank_plan(view, banks, cfg):
             sa, sb = _dot((b['a'].X, b['a'].Y), ax), _dot((b['b'].X, b['b'].Y), ax)
             b['s0'], b['s1'] = min(sa, sb), max(sa, sb)
             b['off'] = _dot((b['a'].X, b['a'].Y), nrm)
-        g.sort(key=lambda b: (b['off'], b['s0']))
-        used = set()
-        for si in range(len(g)):
-            if si in used:
-                continue
-            chain = [g[si]]
-            lo, hi = g[si]['s0'], g[si]['s1']
-            used.add(si)
-            for k in range(si + 1, len(g)):
-                if k in used:
+        # 站点：每根排管两端内缩 inset（短于 2*inset 的取中点）
+        st = []
+        for b in g:
+            L_ = b['s1'] - b['s0']
+            if L_ <= 2 * inset:
+                st.append((b['s0'] + b['s1']) / 2.0)
+            else:
+                st.append(b['s0'] + inset)
+                st.append(b['s1'] - inset)
+        st.sort()
+        # 站点去重（0.25 m 内算同一个）
+        ded = []
+        for x in st:
+            if not ded or x - ded[-1] > 0.25 / 0.3048:
+                ded.append(x)
+        # 长段补点
+        full = list(ded)
+        if step > 0:
+            for k in range(len(ded) - 1):
+                gap = ded[k + 1] - ded[k]
+                if gap > step * 1.3:
+                    n_ = int(gap // step)
+                    for q in range(1, n_ + 1):
+                        full.append(ded[k] + gap * q / float(n_ + 1))
+            full.sort()
+        seen = set()
+        for sx in full:
+            act = [b for b in g if b['s0'] - 1e-6 <= sx <= b['s1'] + 1e-6]
+            act.sort(key=lambda b: b['off'])
+            cur = []
+            for b in act + [None]:
+                if b is not None and cur and gmin <= b['off'] - cur[-1]['off'] <= gmax:
+                    cur.append(b)
                     continue
-                nb = g[k]
-                gap = nb['off'] - chain[-1]['off']
-                if gap > gmax:
-                    break
-                if gap < gmin:
-                    continue
-                nlo, nhi = max(lo, nb['s0']), min(hi, nb['s1'])
-                if nhi - nlo < omin:
-                    continue
-                chain.append(nb)
-                lo, hi = nlo, nhi
-                used.add(k)
-            if len(chain) >= 2:
-                s_at = lo + (hi - lo) * frac
-                z = z0 if z0 is not None else chain[0]['a'].Z
-                p0 = DB.XYZ(ax[0] * s_at + nrm[0] * chain[0]['off'], ax[1] * s_at + nrm[1] * chain[0]['off'], z)
-                p1 = DB.XYZ(ax[0] * s_at + nrm[0] * chain[-1]['off'], ax[1] * s_at + nrm[1] * chain[-1]['off'], z)
-                chains.append({'banks': chain, 'ids': [b['id'] for b in chain],
-                               'gaps': [(chain[j + 1]['off'] - chain[j]['off']) * 304.8 for j in range(len(chain) - 1)], 'p0': p0, 'p1': p1})
+                if b is not None and cur and b['off'] - cur[-1]['off'] < gmin:
+                    continue            # 几乎重合的第二根，跳过
+                if len(cur) >= 2:
+                    # 链里每相邻两根并行重叠要够长
+                    ok = all(min(cur[j]['s1'], cur[j + 1]['s1']) - max(cur[j]['s0'], cur[j + 1]['s0']) >= omin for j in range(len(cur) - 1))
+                    key = tuple(x['id'] for x in cur)
+                    if ok:
+                        # 同一组排管在 1.5 m 内重复的站点只留一个
+                        dup = [c for c in chains if c['key'] == key and abs(c['s'] - sx) < 1.5 / 0.3048]
+                        if not dup:
+                            z = z0 if z0 is not None else cur[0]['a'].Z
+                            p0 = DB.XYZ(ax[0] * sx + nrm[0] * cur[0]['off'], ax[1] * sx + nrm[1] * cur[0]['off'], z)
+                            p1 = DB.XYZ(ax[0] * sx + nrm[0] * cur[-1]['off'], ax[1] * sx + nrm[1] * cur[-1]['off'], z)
+                            chains.append({'banks': list(cur), 'ids': list(key), 'key': key, 's': sx,
+                                           'gaps': [(cur[j + 1]['off'] - cur[j]['off']) * 304.8 for j in range(len(cur) - 1)],
+                                           'p0': p0, 'p1': p1, 'mid': ((p0.X + p1.X) / 2.0, (p0.Y + p1.Y) / 2.0)})
+                cur = [b] if b is not None else []
     return chains
 
 
 def bank_existing(view, bank_ids):
-    """视图里已经只参照排管的标注：[set(排管id...)]"""
+    """视图里已经只参照排管的标注：[(set(排管id...), 标注线)]"""
     out = []
     for dm in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension):
         try:
@@ -879,10 +907,29 @@ def bank_existing(view, bank_ids):
                     ok = False
                     break
             if ok and len(ids) >= 2:
-                out.append(ids)
+                out.append((ids, dm.Curve))
         except Exception:
             continue
     return out
+
+
+def _line_dist(ln, xy):
+    """标注线（无限长直线）到点 xy 的平面距离。"""
+    try:
+        o, t = ln.Origin, ln.Direction
+        vx, vy = xy[0] - o.X, xy[1] - o.Y
+        return abs(vx * t.Y - vy * t.X) / max(math.hypot(t.X, t.Y), 1e-9)
+    except Exception:
+        return 1e9
+
+
+def bank_chain_covered(c, have):
+    """这条链的每相邻两根排管，在站点附近（1 m 内）都已有一条标注参照了它们。"""
+    for j in range(len(c['ids']) - 1):
+        a, b = c['ids'][j], c['ids'][j + 1]
+        if not any(a in h and b in h and _line_dist(ln, c['mid']) < 1.0 / 0.3048 for h, ln in have):
+            return False
+    return True
 
 
 def bank_main():
@@ -901,17 +948,16 @@ def bank_main():
     todo = []
     covered = 0
     for c in chains:
-        pairs = [(c['ids'][j], c['ids'][j + 1]) for j in range(len(c['ids']) - 1)]
-        if all(any(a in h and b in h for h in have) for a, b in pairs):
+        if bank_chain_covered(c, have):
             covered += 1
         else:
             todo.append(c)
     if not todo:
-        forms.alert(u'没有要做的：%d 组相邻排管已经都有横向中心距标注了。' % covered, title=TITLE)
+        forms.alert(u'没有要做的：%d 处排管横向中心距都已经标好了。' % covered, title=TITLE)
         return
     lines = [u'  %d 根：%s mm' % (len(c['ids']), u' + '.join(u'%.0f' % abs(g) for g in c['gaps'])) for c in todo[:10]]
-    msg = u'当前视图 %d 根直排管，找到 %d 组相邻平行排管需要标横向中心距（另有 %d 组已标好）：\n%s%s\n\n每组一条连续标注，标注线放在并行段的 %.0f%% 位置，参照排管自带的中心线。整次可 Ctrl+Z 撤销。\n\n现在标注？' % (
-        len(banks), len(todo), covered, u'\n'.join(lines), u'\n  …' if len(todo) > 10 else u'', float(cfg['bank_pos']) * 100)
+    msg = u'当前视图 %d 根直排管，找到 %d 处（转折/端头/长段中间）需要标横向中心距（另有 %d 处已标好）：\n%s%s\n\n每组一条连续标注，每根排管的转折/端头处都标（内缩 %.0f mm），长直段中间每 %g m 补一条，参照排管自带的中心线。整次可 Ctrl+Z 撤销。\n\n现在标注？' % (
+        len(banks), len(todo), covered, u'\n'.join(lines), u'\n  …' if len(todo) > 10 else u'', float(cfg['bank_inset_mm']), float(cfg['bank_step_m']))
     if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
         return
     types = _dim_types()

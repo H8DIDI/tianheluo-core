@@ -102,11 +102,7 @@ try:
     check(u'建标注：数值都等于排管中心线横向间距（≤60 mm）', bad == 0 and ok > 0, u'对 %d，不对 %d' % (ok, bad))
     d.Regenerate()
     have = n['bank_existing'](view, set(b['id'] for b in banks))
-    cov = 0
-    for c in chains:
-        pairs = [(c['ids'][j], c['ids'][j + 1]) for j in range(len(c['ids']) - 1)]
-        if all(any(a in h and b in h for h in have) for a, b in pairs):
-            cov += 1
+    cov = sum(1 for c in chains if n['bank_chain_covered'](c, have))
     check(u'重复运行：刚建出的标注被识别为已覆盖', cov == len(made), u'%d / %d' % (cov, len(made)))
     t.RollBack()
 except Exception:
