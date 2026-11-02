@@ -540,7 +540,16 @@ def plan(view, cfg):
     m = lambda mm: mm * scale / FT
     p_mm = lambda ft: ft * FT / scale
     gap, step, max_len, tol = m(cfg['gap_mm']), m(cfg['step_mm']), m(cfg['max_leader_mm']), m(cfg['align_mm'])
-    tags = view_tags(view)
+    all_tags = view_tags(view)
+    tags, in_group = [], []
+    for t in all_tags:
+        try:
+            if t.GroupId != DB.ElementId.InvalidElementId:
+                in_group.append(t)
+                continue
+        except Exception:
+            pass
+        tags.append(t)
     orphans, items, multi = [], [], []
     for t in tags:
         try:
@@ -595,7 +604,11 @@ def plan(view, cfg):
     ob, n_ob = build_obstacles(view, tagged_cats)
     # 多构件标记不动，当作固定障碍
     fixed = []
-    for t in multi:
+    locked_tagged = set()
+    for t in in_group:
+        for i in t.GetTaggedLocalElementIds():
+            locked_tagged.add(i.Value)
+    for t in list(multi) + list(in_group):
         try:
             bb = t.get_BoundingBox(view)
             if bb is not None:
@@ -741,7 +754,7 @@ def plan(view, cfg):
         w, h, ox, oy = x['size']
         x['new'] = (x['c'][0] - ox, x['c'][1] - oy)
     stat = measure_result(items, ob, placed, gap, p_mm, cfg)
-    stat.update({'lead_fixed': n_lead_fixed, 'lead_left': n_lead_left, 'slid': n_slid, 'stacked': n_stacked, 'routes': routes, 'items': items, 'dups': dups, 'orphans': orphans, 'multi': len(multi), 'scale': scale, 'ob': n_ob, 'snapped': n_snapped, 'sizes': n_sizes})
+    stat.update({'in_group': len(in_group), 'locked_tagged': locked_tagged, 'lead_fixed': n_lead_fixed, 'lead_left': n_lead_left, 'slid': n_slid, 'stacked': n_stacked, 'routes': routes, 'items': items, 'dups': dups, 'orphans': orphans, 'multi': len(multi), 'scale': scale, 'ob': n_ob, 'snapped': n_snapped, 'sizes': n_sizes})
     return stat
 
 
@@ -821,6 +834,40 @@ def create_missing(view, add_list):
     return n, fails
 
 
+def untagged_report(view, cfg, pl):
+    """视图里没有标记的构件（排除中心线、相机、线、标识、楼板等非标注对象），按（类别, 族）统计，
+    并说明会不会补：该族视图里已有标记的补；一个标记都没有的族不补（口径：只补同族已有标记的）。返回 [(类别, 族, 个数, '补'/'不补')]。"""
+    tagged = set(x['own'] for x in pl['items']) | set(pl.get('locked_tagged', set()))
+    for t in view_tags(view):
+        for i in t.GetTaggedLocalElementIds():
+            tagged.add(i.Value)
+    fam_has = set()
+    for x in pl['items']:
+        k = _fam_key(x['el'])
+        if k is not None:
+            fam_has.add(k)
+    skip = ('中心线', '相机', '线', '楼板', '楼板洞口剪切', '标识', '参照平面', '详图项目')
+    cnt = {}
+    for e in DB.FilteredElementCollector(doc, view.Id).WhereElementIsNotElementType():
+        try:
+            c = e.Category
+            if c is None or c.CategoryType != DB.CategoryType.Model or c.Name in skip:
+                continue
+            if e.Id.Value in tagged:
+                continue
+            k = _fam_key(e)
+            if k is None:
+                continue
+            will = k in fam_has
+            if will and isinstance(e.Location, DB.LocationCurve) and e.Location.Curve.Length < cfg['min_pipe_mm'] / FT:
+                will = False
+            key = (c.Name, k[1][:30] if k[1] else '（无族名）', '补' if will else '不补')
+            cnt[key] = cnt.get(key, 0) + 1
+        except Exception:
+            continue
+    return sorted([(k[0], k[1], v, k[2]) for k, v in cnt.items()], key=lambda r: (-(r[3] == '补'), -r[2]))
+
+
 def verify(items, tol_ft=1.0 / FT):
     """回读：引线末端必须在自己构件的中心（偏差 ≤ 1 mm）。返回不合格的标记 id。"""
     bad = []
@@ -888,7 +935,7 @@ def run_all(view, cfg):
         n_add = 0
         fail_total = []
         if cfg['add_missing']:
-            add_list = missing_elements(view, cfg, pl['items'])
+            add_list = [a for a in missing_elements(view, cfg, pl['items']) if a[0].Id.Value not in pl['locked_tagged']]
             if add_list:
                 t = DB.Transaction(doc, '补标缺标构件')
                 fh = t.GetFailureHandlingOptions()
@@ -911,6 +958,18 @@ def run_all(view, cfg):
         except Exception:
             pass
         raise
+
+
+def untagged_text(view, cfg, pl):
+    rows = untagged_report(view, cfg, pl)
+    if not rows:
+        return '  没标记的构件：无'
+    lines = ['  视图里没标记的构件：']
+    for cat, fam, n, act in rows[:6]:
+        lines.append('    %s / %s：%d 个（%s）' % (cat, fam, n, '会补' if act == '补' else '不补：该族视图里没有任何标记或太短'))
+    if len(rows) > 6:
+        lines.append('    …另有 %d 类' % (len(rows) - 6))
+    return '\n'.join(lines)
 
 
 def main():
@@ -938,16 +997,16 @@ def main():
                 ids_ = list(t_.GetTaggedLocalElementIds())
                 if len(ids_) > 1:
                     multi_ids.update(i.Value for i in ids_)
-            add_list = [a for a in add_list if a[0].Id.Value not in multi_ids]
+            add_list = [a for a in add_list if a[0].Id.Value not in multi_ids and a[0].Id.Value not in pl['locked_tagged']]
         msg = ('当前视图（比例 1:%d）：\n'
                '  单构件标记 %d 个：引线末端设到构件中心，标记头选空的一侧、不压任何构件、同侧平齐（已吸附 %d 个）\n'
                '  悬空标记 %d 个、同一构件上的重复标记 %d 个%s\n'
                '  缺标构件 %d 个%s（同族已有标记的才补，补完一起重新排布）\n'
-               '  多构件标记 %d 个（不动，当作障碍）\n\n'
+               '  多构件标记 %d 个、组内标记 %d 个（不动，当作障碍）\n%s\n'
                '整理后预计：压到构件的标记 %d 个；标记互相重叠 %d 对；引线超过上限 %d 个。\n'
                '整次一个事务，写入后回读核对，Ctrl+Z 可撤销。执行？') % (
             pl['scale'], len(pl['items']), pl['snapped'], len(pl['orphans']), len(pl['dups']), '（将删除）' if cfg['delete_orphans'] else '（不删）',
-            len(add_list), '（将补标）' if cfg['add_missing'] else '（设置里勾选才补标）', pl['multi'],
+            len(add_list), '（将补标）' if cfg['add_missing'] else '（设置里勾选才补标）', pl['multi'], pl['in_group'], untagged_text(view, cfg, pl),
             pl['over_el'], pl['over_tag'], pl['far'])
         if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
             return

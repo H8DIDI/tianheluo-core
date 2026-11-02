@@ -47,7 +47,9 @@ try:
     cfg = dict(n['load']())
     LOG.append(u'视图 %s，文档 %s' % (view.Name, d.Title))
     pl = n['plan'](view, cfg)
-    add = n['missing_elements'](view, cfg, pl['items'])
+    add = [a_ for a_ in n['missing_elements'](view, cfg, pl['items']) if a_[0].Id.Value not in pl['locked_tagged']]
+    LOG.append(u'漏标核对（插件确认框里会显示的内容）：' + n['untagged_text'](view, cfg, pl).replace(u'\n', u' | '))
+    LOG.append(u'组内标记 %d 个（不动，所标构件算已标）' % pl['in_group'])
     c = Counter()
     for e, tt in add:
         k = n['_fam_key'](e)
