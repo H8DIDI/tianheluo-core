@@ -300,6 +300,10 @@
     "bank-clash": {
       "group": "井与管线",
       "status": "beta"
+    },
+    "tag-tidy": {
+      "group": "图纸视图",
+      "status": "beta"
     }
   }
 }
