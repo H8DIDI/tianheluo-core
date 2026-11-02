@@ -14,6 +14,7 @@ import io
 import os
 import json
 import math
+import time
 import traceback
 import clr
 import System
@@ -535,6 +536,121 @@ def stack_dense(items, ob, fixed, gap, step, max_len, m):
     return n_done
 
 
+def relax(items, ob, fixed, gap, step, max_len, rounds=5, budget_s=12.0):
+    """全局冲突消解（最小冲突局部搜索）：前面各步是逐个贪心放置，密的地方会堆叠、引线乱叉。
+    这里统一打分，让「有冲突」的标记换到总代价最低的候选位置：
+      标记框互相重叠 / 压构件 / 压固定标记 ≫ 引线穿别的标记框、引线互相交叉 ≫ 引线超上限 > 斜引线 > 引线长。
+    候选 = 以构件中心为圆心、16 个方向 × 十来圈由近到远的半径（先在 1.3 倍引线上限内找，还冲突的再放宽到 2.6 倍）。
+    只处理有冲突的标记，邻居只看附近的，总耗时有上限（budget_s 秒，到点就停，不会卡住 Revit）。返回仍有冲突的标记个数。"""
+    n = len(items)
+    if n < 2:
+        return 0
+    t_end = time.time() + budget_s
+    far_lim = max_len * 2.6
+    reach = far_lim + max(max(x['size'][0], x['size'][1]) for x in items) * 1.5
+    # 邻居：网格索引，只看锚点相距 reach 以内的
+    cell = max(reach, 1.0)
+    grid = {}
+    for i, x in enumerate(items):
+        grid.setdefault((int(math.floor(x['a'].X / cell)), int(math.floor(x['a'].Y / cell))), []).append(i)
+    nb = []
+    for i, x in enumerate(items):
+        gx, gy = int(math.floor(x['a'].X / cell)), int(math.floor(x['a'].Y / cell))
+        lst = []
+        for ddx in (-1, 0, 1):
+            for ddy in (-1, 0, 1):
+                for j in grid.get((gx + ddx, gy + ddy), ()):
+                    if j != i and abs(items[j]['a'].X - x['a'].X) <= reach and abs(items[j]['a'].Y - x['a'].Y) <= reach:
+                        lst.append(j)
+        nb.append(lst)
+
+    def cost(i, cx, cy, cap=1e18, hard_only=False):
+        """cap：已知的更优代价，累计超过就提前返回（省掉最贵的构件碰撞检查）。"""
+        x = items[i]
+        w, h = x['size'][0], x['size'][1]
+        ax_, ay_ = x['a'].X, x['a'].Y
+        rc = rect(cx, cy, w, h)
+        grc = grow(rc, gap)
+        c = 0.0
+        d = math.hypot(cx - ax_, cy - ay_)
+        if d > max_len:
+            c += 60.0 * (d - max_len) / max_len
+        c += 8.0 * d / max_len
+        dx, dy = cx - ax_, cy - ay_
+        if d > 1e-9:
+            c += 6.0 * min(abs(dx), abs(dy)) / d      # 0 = 正横/正竖，0.7 = 45°
+            axis = x.get('axis')
+            if (axis == 'h' and abs(dy) < abs(dx)) or (axis == 'v' and abs(dx) < abs(dy)):
+                c += 3.0
+        for fx in fixed:
+            if rect_overlap(grc, fx):
+                c += 1000.0
+        if c >= cap:
+            return c
+        for j in nb[i]:
+            y = items[j]
+            yr = rect(y['c'][0], y['c'][1], y['size'][0], y['size'][1])
+            if rect_overlap(grc, yr):
+                c += 1000.0
+            ly = (y['c'][0], y['c'][1], y['a'].X, y['a'].Y)
+            if seg_hits_rect((cx, cy, ax_, ay_), yr):
+                c += 300.0
+            if seg_hits_rect(ly, rc):
+                c += 300.0
+            if _seg_cross(cx, cy, ax_, ay_, ly[0], ly[1], ly[2], ly[3]):
+                c += 300.0
+            if c >= cap:
+                return c
+        if hard_only:
+            return c
+        # 压到别的构件：软约束（密集的管线区很难完全避开），自己的构件不算
+        c += 40.0 * ob.hits(rc, gap, x.get('own'))
+        return c
+
+    def now(i, hard_only=False):
+        return cost(i, items[i]['c'][0], items[i]['c'][1], 1e18, hard_only)
+
+    for _r in range(rounds * 2):
+        tier = _r >= rounds
+        scored = [(now(i), i) for i in range(n) if now(i, True) >= 300.0]
+        bad = scored
+        if not bad or time.time() > t_end:
+            break
+        bad.sort(reverse=True)
+        moved = 0
+        for cur, i in bad:
+            if time.time() > t_end:
+                break
+            x = items[i]
+            a = x['a']
+            w, h = x['size'][0], x['size'][1]
+            cur = now(i)
+            if now(i, True) < 300.0:
+                continue
+            best = (cur, x['c'][0], x['c'][1], x.get('dir'))
+            r0 = max(w, h) / 2.0 + gap
+            reach_i = far_lim if tier else max_len * 1.3
+            n_r = 12
+            radii = [r0 + (reach_i - r0) * k / (n_r - 1.0) for k in range(n_r)] if reach_i > r0 else [r0]
+            for r in radii:
+                for dx, dy in DIRS:
+                    nn = math.hypot(dx, dy)
+                    cx, cy = a.X + dx / nn * r, a.Y + dy / nn * r
+                    cs = cost(i, cx, cy, best[0])
+                    if cs < best[0] - 1e-6:
+                        best = (cs, cx, cy, (dx, dy))
+                if best[0] < 40.0:
+                    break
+            if best[1] != x['c'][0] or best[2] != x['c'][1]:
+                x['c'] = (best[1], best[2])
+                if best[3] is not None:
+                    x['dir'] = best[3]
+                moved += 1
+        if not moved and tier:
+            break
+    return sum(1 for i in range(n) if now(i, True) >= 300.0)
+
+
 def plan(view, cfg):
     scale = max(int(view.Scale), 1)
     m = lambda mm: mm * scale / FT
@@ -749,6 +865,8 @@ def plan(view, cfg):
         do_align()
         f2, n_lead_left = fix_leaders(items, ob, fixed, gap, step, max_len)
         n_lead_fixed += f2
+    n_relax_left = relax(items, ob, fixed, gap, step, max_len)
+    n_lead_left = n_relax_left
     # 头位置 = 包围框中心 − 偏移
     for x in items:
         w, h, ox, oy = x['size']
@@ -762,7 +880,7 @@ def measure_result(items, ob, placed, gap, p_mm, cfg):
     over_el = 0
     for x in items:
         w, h = x['size'][0], x['size'][1]
-        if ob.hits(rect(x['c'][0], x['c'][1], w, h), 0.0, None) > 0:
+        if ob.hits(rect(x['c'][0], x['c'][1], w, h), 0.0, x.get('own')) > 0:
             over_el += 1
     rects = [rect(x['c'][0], x['c'][1], x['size'][0], x['size'][1]) for x in items]
     over_tag = sum(1 for i in range(len(rects)) for j in range(i + 1, len(rects)) if rect_overlap(rects[i], rects[j]))
