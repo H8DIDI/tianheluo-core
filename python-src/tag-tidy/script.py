@@ -32,11 +32,13 @@ FT = 304.8
 DOC_DIR = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments), 'KaifaTools')
 SETTINGS = os.path.join(DOC_DIR, '构件标记整理设置.json')
 DEFAULTS = {
-    '说明': ('gap_mm：标记离任何构件的最小距离（图纸 mm）；max_leader_mm：引线最长（图纸 mm）；step_mm：往外试探一步；'
+    '说明': ('side_offset_mm：标记头离管边缘再往外留多少（图纸 mm）；bundle_gap_m：并行路由之间多远以内算一组（米），组内最左的标左边、最右的标右边；gap_mm：标记离任何构件的最小距离（图纸 mm）；max_leader_mm：引线最长（图纸 mm）；step_mm：往外试探一步；'
            'align_mm：同侧标记吸附到同一行/列的容差；text_w_mm / text_h_mm：读不到标记头实际大小时的估计值；'
            'add_missing：是否补标缺标构件；delete_orphans：是否删除悬空标记；min_pipe_mm：线性构件短于这个长度（模型 mm）不补标。'),
     'gap_mm': 2.0,
     'max_leader_mm': 150.0,
+    'side_offset_mm': 5.0,
+    'bundle_gap_m': 20.0,
     'step_mm': 3.0,
     'align_mm': 4.0,
     'text_w_mm': 60.0,
@@ -68,6 +70,8 @@ def open_settings():
     fields = [
         {'key': 'gap_mm', 'label': '标记离构件最小距离 (图纸 mm)', 'kind': 'num', 'min': 0, 'max': 30, 'hint': '标记头离构件的最小距离。'},
         {'key': 'max_leader_mm', 'label': '引线最长 (图纸 mm)', 'kind': 'num', 'min': 5, 'max': 300, 'hint': '放不下时沿引线引出去，最远到这里。'},
+        {'key': 'side_offset_mm', 'label': '标记离管边缘 (图纸 mm)', 'kind': 'num', 'min': 0, 'max': 100, 'hint': '标记头离管边缘再往外留多少。'},
+        {'key': 'bundle_gap_m', 'label': '并行路由成组距离 (米)', 'kind': 'num', 'min': 1, 'max': 500, 'hint': '并行、相邻的路由相距在这个范围内算一组：最左的标左边、最右的标右边，中间留空。'},
         {'key': 'step_mm', 'label': '往外试探步长 (图纸 mm)', 'kind': 'num', 'min': 0.5, 'max': 30, 'hint': '找空位时每次往外走多远。'},
         {'key': 'align_mm', 'label': '对齐容差 (图纸 mm)', 'kind': 'num', 'min': 0, 'max': 30, 'hint': '同一侧的标记，位置差在这个范围内就对齐到同一行/列。'},
         {'key': 'text_w_mm', 'label': '标记头宽度估计 (图纸 mm)', 'kind': 'num', 'min': 3, 'max': 100, 'hint': '读不到标记头大小时用这个值。'},
@@ -272,6 +276,99 @@ def measure_tag_heads(view, items, est_w, est_h):
     return len(cache)
 
 
+def build_routes(ob):
+    """线式构件按首尾相接（端点 0.3 m 内）连成路由。返回 (eid→路由号, 路由信息列表)。"""
+    segs = [(g, eid) for kind, g, half, eid in ob.items if kind == 's']
+    tol = 0.3 / 0.3048
+    parent = {}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+    for g, eid in segs:
+        parent.setdefault(eid, eid)
+    grid = {}
+    for g, eid in segs:
+        for (x, y) in ((g[0], g[1]), (g[2], g[3])):
+            k = (int(math.floor(x / 2.0)), int(math.floor(y / 2.0)))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for (x2, y2, e2) in grid.get((k[0] + dx, k[1] + dy), ()):
+                        if e2 != eid and math.hypot(x - x2, y - y2) <= tol:
+                            union(eid, e2)
+            grid.setdefault(k, []).append((x, y, eid))
+    routes = {}
+    for g, eid in segs:
+        r = find(eid)
+        info = routes.setdefault(r, {'len_x': 0.0, 'len_y': 0.0, 'xs': [], 'ys': [], 'eids': set()})
+        info['len_x'] += abs(g[2] - g[0])
+        info['len_y'] += abs(g[3] - g[1])
+        info['xs'].extend((g[0], g[2]))
+        info['ys'].extend((g[1], g[3]))
+        info['eids'].add(eid)
+    eid2route = {}
+    out = []
+    for r, info in routes.items():
+        info['axis'] = 'v' if info['len_y'] >= info['len_x'] else 'h'
+        info['xm'] = sum(info['xs']) / len(info['xs'])
+        info['ym'] = sum(info['ys']) / len(info['ys'])
+        info['x0'], info['x1'] = min(info['xs']), max(info['xs'])
+        info['y0'], info['y1'] = min(info['ys']), max(info['ys'])
+        info['side'] = None
+        info['id'] = len(out)
+        for eid in info['eids']:
+            eid2route[eid] = info['id']
+        out.append(info)
+    return eid2route, out
+
+
+def assign_sides(routes, bundle_ft):
+    """并行相邻的路由成组：竖向路由按 x 排，最左标左边、最右标右边、中间的按靠哪边；横向路由按 y 排，最下标下边、最上标上边。"""
+    for axis in ('v', 'h'):
+        rs = [r for r in routes if r['axis'] == axis]
+        n = len(rs)
+        parent = list(range(n))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        for i in range(n):
+            for j in range(i + 1, n):
+                a, b = rs[i], rs[j]
+                if axis == 'v':
+                    ov = min(a['y1'], b['y1']) - max(a['y0'], b['y0'])
+                    gap = abs(a['xm'] - b['xm'])
+                else:
+                    ov = min(a['x1'], b['x1']) - max(a['x0'], b['x0'])
+                    gap = abs(a['ym'] - b['ym'])
+                if ov > 0 and gap <= bundle_ft:
+                    parent[find(i)] = find(j)
+        groups = {}
+        for i in range(n):
+            groups.setdefault(find(i), []).append(rs[i])
+        for g in groups.values():
+            if len(g) < 2:
+                continue
+            key = (lambda r: r['xm']) if axis == 'v' else (lambda r: r['ym'])
+            g.sort(key=key)
+            mid = (key(g[0]) + key(g[-1])) / 2.0
+            for k, r in enumerate(g):
+                low = (k == 0) or (k < len(g) - 1 and key(r) < mid)
+                if axis == 'v':
+                    r['side'] = (-1, 0) if low else (1, 0)
+                else:
+                    r['side'] = (0, -1) if low else (0, 1)
+
+
 def plan(view, cfg):
     scale = max(int(view.Scale), 1)
     m = lambda mm: mm * scale / FT
@@ -333,6 +430,17 @@ def plan(view, cfg):
                 fixed.append((bb.Min.X, bb.Min.Y, bb.Max.X, bb.Max.Y))
         except Exception:
             pass
+    eid2route, routes = build_routes(ob)
+    assign_sides(routes, cfg['bundle_gap_m'] * 1000.0 / FT)
+    for x in items:
+        ri = eid2route.get(x['own'])
+        x['side'] = None
+        if ri is not None:
+            r = routes[ri]
+            sd = r['side']
+            # 只有标记所在管段的方向和路由方向一致，才按路由的侧
+            if sd is not None and x.get('axis') == r['axis']:
+                x['side'] = sd
     n_sizes = measure_tag_heads(view, items, m(cfg['text_w_mm']), m(cfg['text_h_mm']))
     items.sort(key=lambda x: (round(x['a'].Y, 1), round(x['a'].X, 1)))
     placed = list(fixed)
@@ -350,7 +458,11 @@ def plan(view, cfg):
         a = x['a']
         base = max(w, h) / 2.0 + gap
         # 优先垂直于管道的两个方向（横管放上下、竖管放左右），其次斜向
-        pref = (0, 1, 0, -1) if x.get('axis') == 'h' else ((1, 0, -1, 0) if x.get('axis') == 'v' else ())
+        side = x.get('side')
+        if side is not None:
+            hw = _half_width(x['el'])
+            ext = (w / 2.0) if side[0] != 0 else (h / 2.0)
+            base = hw + ext + gap + m(cfg['side_offset_mm'])
         best = None
         k = 0
         r = base
@@ -366,7 +478,10 @@ def plan(view, cfg):
                 c_tag = sum(1 for p in placed if rect_overlap(grow(rc, gap), p))
                 conf = c_obs + c_tag
                 perp_ok = x.get('axis') is None or (x['axis'] == 'h' and abs(dx) < 0.3) or (x['axis'] == 'v' and abs(dy) < 0.3)
-                score = conf * 1000 + k + (0.5 if (dx and dy) else 0.0) + (0.0 if perp_ok else 3.0)
+                side_pen = 0.0
+                if side is not None:
+                    side_pen = 0.0 if (abs(dx - side[0]) < 0.05 and abs(dy - side[1]) < 0.05) else 6.0
+                score = conf * 1000 + k + (0.5 if (dx and dy) else 0.0) + (0.0 if perp_ok else 3.0) + side_pen
                 if best is None or score < best[0]:
                     best = (score, cx, cy, conf, dx, dy)
             if best is not None and best[3] == 0:
@@ -401,14 +516,17 @@ def plan(view, cfg):
         for cl in clusters:
             if len(cl) < 2:
                 continue
-            vals = sorted(key(y) for y in cl)
-            target = vals[len(vals) // 2]
+            # 基准：组里离自己构件最近的那个标记所在的行/列；其它标记往它靠，只允许靠近构件或持平，不允许被推得更远
+            ref_y = min(cl, key=lambda q: math.hypot(q['c'][0] - q['a'].X, q['c'][1] - q['a'].Y))
+            target = key(ref_y)
             for y in cl:
                 cx, cy = y['c']
                 ncx, ncy = (target, cy) if axis == 'x' else (cx, target)
                 if abs(ncx - cx) + abs(ncy - cy) < 1e-9 or abs(ncx - cx) + abs(ncy - cy) > shift_max:
                     continue
                 if math.hypot(ncx - y['a'].X, ncy - y['a'].Y) > max_len:
+                    continue
+                if math.hypot(ncx - y['a'].X, ncy - y['a'].Y) > math.hypot(cx - y['a'].X, cy - y['a'].Y) + m(3.0):
                     continue
                 w, h = y['size'][0], y['size'][1]
                 rc = rect(ncx, ncy, w, h)
@@ -428,7 +546,7 @@ def plan(view, cfg):
         w, h, ox, oy = x['size']
         x['new'] = (x['c'][0] - ox, x['c'][1] - oy)
     stat = measure_result(items, ob, placed, gap, p_mm, cfg)
-    stat.update({'items': items, 'dups': dups, 'orphans': orphans, 'multi': len(multi), 'scale': scale, 'ob': n_ob, 'snapped': n_snapped, 'sizes': n_sizes})
+    stat.update({'routes': routes, 'items': items, 'dups': dups, 'orphans': orphans, 'multi': len(multi), 'scale': scale, 'ob': n_ob, 'snapped': n_snapped, 'sizes': n_sizes})
     return stat
 
 
