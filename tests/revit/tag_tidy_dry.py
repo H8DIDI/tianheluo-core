@@ -47,8 +47,14 @@ try:
     cfg['add_missing'] = bool(globals().get('ADD_MISSING', False))
     LOG.append(u'视图 %s，文档 %s' % (view.Name, d.Title))
     pl = n['plan'](view, cfg)
-    LOG.append(u'单构件标记 %d，悬空 %d，多构件 %d；预计重叠 %d 对，压构件 %d 个，引线超限 %d 个'
-               % (len(pl['items']), len(pl['orphans']), pl['skipped'], pl['overlap'], pl['hit'], pl['far']))
+    import math as _m
+    sc = pl['scale']
+    lens = sorted(_m.hypot(x['c'][0] - x['a'].X, x['c'][1] - x['a'].Y) * 304.8 / sc for x in pl['items'])
+    LOG.append(u'单构件标记 %d，重复标记 %d，悬空 %d，多构件 %d，障碍 %d，实测头种类 %d，吸附 %d；预计压构件 %d，标记重叠 %d，引线超限 %d；引线中位 %.0f 最大 %.0f mm'
+               % (len(pl['items']), len(pl['dups']), len(pl['orphans']), pl['multi'], pl['ob'], pl['sizes'], pl['snapped'], pl['over_el'], pl['over_tag'], pl['far'],
+                  lens[len(lens) // 2] if lens else 0, lens[-1] if lens else 0))
+    vert = sum(1 for x in pl['items'] if x.get('axis') == 'v')
+    LOG.append(u'竖向管 %d 个（标记竖排），横向管 %d 个' % (vert, sum(1 for x in pl['items'] if x.get('axis') == 'h')))
     add = n['missing_elements'](view, cfg, pl['items']) if cfg['add_missing'] else []
     LOG.append(u'缺标构件 %d 个（%s）' % (len(add), u'将补标' if cfg['add_missing'] else u'未开启补标'))
     if MODE == 'apply':
