@@ -1566,6 +1566,65 @@ def bank_system(e):
     return (m.group(1).upper() if m else f[:4].upper())
 
 
+PAIR_IDX = re.compile(u':(\\d+):SURFACE$')
+
+
+def bank_family(e):
+    try:
+        return doc.GetElement(e.GetTypeId()).Family.Name
+    except Exception:
+        return u''
+
+
+def learned_index(view):
+    """从视图里已有的「只参照排管」标注学：每个排管族平时用哪个表面参照编号（出现最多的那个）。返回 {族名: 编号}。"""
+    ids = set()
+    for e in DB.FilteredElementCollector(doc, view.Id).OfCategory(DB.BuiltInCategory.OST_StructuralFraming).WhereElementIsNotElementType():
+        if _is_bank(e):
+            ids.add(_idv(e.Id))
+    cnt = {}
+    for dm in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension):
+        try:
+            refs = list(dm.References)
+        except Exception:
+            continue
+        if not refs or not all(_idv(r.ElementId) in ids for r in refs):
+            continue
+        for r in refs:
+            m = PAIR_IDX.search(r.ConvertToStableRepresentation(doc) or u'')
+            if m:
+                k = bank_family(doc.GetElement(r.ElementId))
+                cnt.setdefault(k, {})
+                cnt[k][m.group(1)] = cnt[k].get(m.group(1), 0) + 1
+    return dict((k, max(v.items(), key=lambda kv: kv[1])[0]) for k, v in cnt.items())
+
+
+def pick_ref(b, idx_map):
+    """这根排管按学到的编号取表面参照；没有学到或取不到返回 None。"""
+    want = idx_map.get(b['fam'])
+    if want is None:
+        return None
+    try:
+        for x in b['e'].GetReferences(RT.WeakReference):
+            m = PAIR_IDX.search(x.ConvertToStableRepresentation(doc) or u'')
+            if m and m.group(1) == want:
+                return x
+    except Exception:
+        return None
+    return None
+
+
+def lateral_pairs(ids, by_id):
+    """一组排管按横向排好后，相邻两根组成的对（frozenset）。"""
+    bs = [by_id[i] for i in ids if i in by_id]
+    if len(bs) < 2:
+        return []
+    ax = bs[0]['t']
+    nrm = (-ax[1], ax[0])
+    bs.sort(key=lambda b: ((b['a'].X + b['b'].X) / 2.0) * nrm[0] + ((b['a'].Y + b['b'].Y) / 2.0) * nrm[1])
+    return [frozenset((bs[k]['id'], bs[k + 1]['id'])) for k in range(len(bs) - 1)]
+
+
 def view_banks(view):
     """当前视图里的直排管：[{e, id, a, b, t(单位方向), ref(中心线参照)}]"""
     out = []
@@ -1581,10 +1640,7 @@ def view_banks(view):
         L_ = math.hypot(dx, dy)
         if L_ < 1e-6:
             continue
-        refs = e.GetReferences(RT.CenterFrontBack)
-        if refs is None or refs.Count == 0:
-            continue
-        out.append({'e': e, 'id': _idv(e.Id), 'a': a, 'b': b, 't': (dx / L_, dy / L_), 'ref': refs[0], 'sys': bank_system(e)})
+        out.append({'e': e, 'id': _idv(e.Id), 'a': a, 'b': b, 't': (dx / L_, dy / L_), 'fam': bank_family(e), 'sys': bank_system(e)})
     return out
 
 
@@ -1723,71 +1779,75 @@ def bank_main():
         forms.alert(u'请在平面视图里运行（当前是「%s」）。' % view.Name, title=TITLE)
         return
     cfg = bank_cfg()
+    cfg['bank_step_m'] = 0.0
     banks = view_banks(view)
+    by_id = dict((b['id'], b) for b in banks)
     chains = bank_plan(view, banks, cfg)
     sel_ids = set(_idv(i) for i in uidoc.Selection.GetElementIds())
-    only_sel = bool(sel_ids & set(b['id'] for b in banks))
-    if only_sel:
-        chains = [c for c in chains if sel_ids & set(c['ids'])]        # 选中了排管：只标和选中排管有关的
-    if not chains:
-        forms.alert(u'当前视图里 %d 根直排管，没有找到相邻、严格平行、并行重叠 ≥ %g m、中心距 ≤ %g m（默认同一系统内）的排管。\n条件可以在「排管横向标注设置…」里改。' % (
-            len(banks), cfg['bank_overlap_min_m'], cfg['bank_gap_max_m']), title=TITLE)
-        return
-    have = bank_existing(view, set(b['id'] for b in banks))
-    todo = []
-    covered = 0
+    if sel_ids & set(b['id'] for b in banks):
+        chains = [c for c in chains if sel_ids & set(c['ids'])]
+    idx_map = learned_index(view)
+    # 视图里已标过的相邻对、已标过的间距组合
+    covered = set()
+    for dm in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension):
+        try:
+            refs = list(dm.References)
+        except Exception:
+            continue
+        ids = [_idv(r.ElementId) for r in refs]
+        if not ids or not all(i in by_id for i in ids):
+            continue
+        covered.update(lateral_pairs(ids, by_id))
+    todo, seen, n_cov, n_ref, n_sig = [], set(), 0, 0, 0
     for c in chains:
-        if bank_chain_covered(c, have):
-            covered += 1
-        else:
-            todo.append(c)
+        pairs = lateral_pairs(c['ids'], by_id)
+        if any(p in covered for p in pairs):
+            n_cov += 1
+            continue
+        refs = [pick_ref(b, idx_map) for b in c['banks']]
+        if any(r is None for r in refs):
+            n_ref += 1
+            continue
+        sg = tuple(sorted(int(round(abs(g) / 100.0)) for g in c['gaps']))
+        if sg in seen:
+            n_sig += 1
+            continue
+        seen.add(sg)
+        c['refs'] = refs
+        todo.append(c)
     if not todo:
-        forms.alert(u'没有要做的：%d 处排管横向中心距都已经标好了。' % covered, title=TITLE)
+        forms.alert(u'没有要补的：已标过 %d 处；没有学到参照的 %d 处；间距组合重复 %d 处。' % (n_cov, n_ref, n_sig), title=TITLE)
         return
     lines = [u'  %d 根：%s mm' % (len(c['ids']), u' + '.join(u'%.0f' % abs(g) for g in c['gaps'])) for c in todo[:10]]
-    msg = (u'（只标和你选中的排管有关的位置）\n' if only_sel else u'') + u'当前视图 %d 根直排管，找到 %d 处（转折/端头/长段中间）需要标横向中心距（另有 %d 处已标好）：\n%s%s\n\n每组一条连续标注，每根排管的转折/端头处都标（内缩 %.0f mm），长直段中间每 %g m 补一条，参照排管自带的中心线。整次可 Ctrl+Z 撤销。\n\n现在标注？' % (
-        len(banks), len(todo), covered, u'\n'.join(lines), u'\n  …' if len(todo) > 10 else u'', float(cfg['bank_inset_mm']), float(cfg['bank_step_m']))
+    msg = u'要补 %d 处转折标注（样式和参照都按你已标的学）：\n%s%s\n\n已标过 %d 处跳过；没学到参照 %d 处；间距组合重复 %d 处。\n\n现在标注？' % (
+        len(todo), u'\n'.join(lines), u'\n  …' if len(todo) > 10 else u'', n_cov, n_ref, n_sig)
     if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
         return
     types = _dim_types()
     dtype = _default_type([], types)
-    t = DB.Transaction(doc, u'天河落 · 排管横向中心距标注')
+    t = DB.Transaction(doc, u'天河落 · 排管转折处横向标注')
     fh = t.GetFailureHandlingOptions()
     fh.SetFailuresPreprocessor(_Fails())
     t.SetFailureHandlingOptions(fh)
     t.Start()
-    made, bad, fails = 0, 0, []
+    made, fails = 0, []
     try:
         for c in todo:
             arr = DB.ReferenceArray()
-            for b in c['banks']:
-                arr.Append(b['ref'])
+            for r in c['refs']:
+                arr.Append(r)
             try:
                 ln = DB.Line.CreateBound(c['p0'], c['p1'])
                 dm = doc.Create.NewDimension(view, ln, arr, dtype) if dtype is not None else doc.Create.NewDimension(view, ln, arr)
+                made += 1
             except Exception as ex:
                 fails.append((u'、'.join(str(i) for i in c['ids']), (u'%s' % ex).splitlines()[0][:60]))
-                continue
-            # 核对数值：每段应约等于排管中心线横向间距（位置线和几何中心线可能差十几毫米，容差 3 m（排管位置线可能不在几何中心））
-            try:
-                if dm.NumberOfSegments and dm.NumberOfSegments > 0:
-                    got = sorted(abs(dm.Segments.get_Item(i).Value) * 304.8 for i in range(dm.NumberOfSegments))
-                else:
-                    got = [abs(dm.Value) * 304.8]
-                want = sorted(abs(g) for g in c['gaps'])
-                if len(got) != len(want) or any(abs(a - b) > 3000 for a, b in zip(got, want)):
-                    bad += 1
-            except Exception:
-                bad += 1
-            made += 1
         t.Commit()
     except Exception:
         if t.HasStarted() and not t.HasEnded():
             t.RollBack()
         raise
-    msg = u'完成：新增 %d 条排管横向中心距标注（Ctrl+Z 可整次撤销）。' % made
-    if bad:
-        msg += u'\n⚠ 有 %d 条的数值和排管中心线间距对不上（差 >3 m），请抽查。' % bad
+    msg = u'完成：新增 %d 条排管横向标注（Ctrl+Z 可整次撤销）。' % made
     if fails:
         msg += u'\n没建成 %d 条：\n' % len(fails) + u'\n'.join(u'  排管 %s：%s' % f for f in fails[:8])
     forms.alert(msg, title=TITLE)
