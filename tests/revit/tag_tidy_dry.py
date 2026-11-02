@@ -53,6 +53,7 @@ try:
     LOG.append(u'单构件标记 %d，重复标记 %d，悬空 %d，多构件 %d，障碍 %d，实测头种类 %d，吸附 %d；预计压构件 %d，标记重叠 %d，引线超限 %d；引线中位 %.0f 最大 %.0f mm'
                % (len(pl['items']), len(pl['dups']), len(pl['orphans']), pl['multi'], pl['ob'], pl['sizes'], pl['snapped'], pl['over_el'], pl['over_tag'], pl['far'],
                   lens[len(lens) // 2] if lens else 0, lens[-1] if lens else 0))
+    LOG.append(u'密集区整队的标记 %d 个' % pl.get('stacked', 0))
     sides = {}
     for x in pl['items']:
         sides[str(x.get('side'))] = sides.get(str(x.get('side')), 0) + 1

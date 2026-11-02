@@ -40,10 +40,10 @@ DEFAULTS = {
     'side_offset_mm': 5.0,
     'bundle_gap_m': 20.0,
     'step_mm': 3.0,
-    'align_mm': 4.0,
+    'align_mm': 10.0,
     'text_w_mm': 60.0,
     'text_h_mm': 8.0,
-    'add_missing': False,
+    'add_missing': True,
     'delete_orphans': True,
     'min_pipe_mm': 1500.0,
 }
@@ -76,7 +76,7 @@ def open_settings():
         {'key': 'align_mm', 'label': '对齐容差 (图纸 mm)', 'kind': 'num', 'min': 0, 'max': 30, 'hint': '同一侧的标记，位置差在这个范围内就对齐到同一行/列。'},
         {'key': 'text_w_mm', 'label': '标记头宽度估计 (图纸 mm)', 'kind': 'num', 'min': 3, 'max': 100, 'hint': '读不到标记头大小时用这个值。'},
         {'key': 'text_h_mm', 'label': '标记头高度估计 (图纸 mm)', 'kind': 'num', 'min': 2, 'max': 50, 'hint': '同上。'},
-        {'key': 'add_missing', 'label': '补标缺标的构件', 'kind': 'bool', 'hint': '视图里同类别、同族已有标记，但某些构件没标的，用同样的标记类型补上。'},
+        {'key': 'add_missing', 'label': '补标缺标的构件', 'kind': 'bool', 'hint': '视图里某个族已经有标记，但同族的另一些构件没标，就用同样的标记类型补上，补完一起重新排布。'},
         {'key': 'delete_orphans', 'label': '删除悬空标记', 'kind': 'bool', 'hint': '标记的构件已经不存在（显示问号）的，删掉。'},
         {'key': 'min_pipe_mm', 'label': '线性构件补标最短长度 (模型 mm)', 'kind': 'num', 'min': 0, 'max': 100000, 'hint': '太短的管不补标。'},
     ]
@@ -195,7 +195,7 @@ def _half_width(el):
     return 0.1 / 0.3048
 
 
-def build_obstacles(view):
+def build_obstacles(view, extra_cats=()):
     ob = Obstacles()
     skip_cats = set()
     n = 0
@@ -204,7 +204,7 @@ def build_obstacles(view):
             c = e.Category
             if c is None or c.CategoryType != DB.CategoryType.Model:
                 continue
-            if c.Name not in OBSTACLE_CATS:
+            if c.Name not in OBSTACLE_CATS and c.Id.Value not in extra_cats:
                 continue
             if isinstance(e, (DB.IndependentTag,)):
                 continue
@@ -223,6 +223,18 @@ def build_obstacles(view):
         except Exception:
             continue
     return ob, n
+
+
+def view_tags(view):
+    """属于这个视图的全部标记（文档级收集 + OwnerViewId）。视图级收集器会漏掉构件中点在裁剪框外、被视图过滤的标记。"""
+    out = []
+    for t in DB.FilteredElementCollector(doc).OfClass(DB.IndependentTag):
+        try:
+            if t.OwnerViewId == view.Id:
+                out.append(t)
+        except Exception:
+            continue
+    return out
 
 
 def center_of(el):
@@ -369,12 +381,166 @@ def assign_sides(routes, bundle_ft):
                     r['side'] = (0, -1) if low else (0, 1)
 
 
+def fix_leaders(items, ob, fixed, gap, step, max_len):
+    """引线冲突修复：引线（头中心→构件中心）穿过别的标记文字框、或和别的引线交叉的标记，换到不冲突的位置。返回 (修好个数, 仍冲突个数)。"""
+    def rc_of(x):
+        return rect(x['c'][0], x['c'][1], x['size'][0], x['size'][1])
+
+    def leader(x):
+        return (x['c'][0], x['c'][1], x['a'].X, x['a'].Y)
+
+    def conflicts_of(i, cand_c=None):
+        x = items[i]
+        cx, cy = cand_c if cand_c is not None else x['c']
+        w, h = x['size'][0], x['size'][1]
+        mine = (cx, cy, x['a'].X, x['a'].Y)
+        mr = rect(cx, cy, w, h)
+        n = 0
+        for j, y in enumerate(items):
+            if j == i:
+                continue
+            if seg_hits_rect(mine, rc_of(y)):
+                n += 1
+            ly = leader(y)
+            if _seg_cross(mine[0], mine[1], mine[2], mine[3], ly[0], ly[1], ly[2], ly[3]):
+                n += 1
+            if seg_hits_rect(ly, mr):
+                n += 1
+        return n
+
+    bad = [i for i in range(len(items)) if conflicts_of(i) > 0]
+    fixed_n = 0
+    for i in bad:
+        if conflicts_of(i) == 0:
+            continue
+        x = items[i]
+        a = x['a']
+        w, h = x['size'][0], x['size'][1]
+        base = math.hypot(x['c'][0] - a.X, x['c'][1] - a.Y)
+        best = None
+        for k in range(0, 24):
+            r = max(base * 0.6, max(w, h) / 2.0 + gap) + k * step
+            if r > max_len * 1.5:
+                break
+            for dx, dy in DIRS:
+                nn = math.hypot(dx, dy)
+                cx, cy = a.X + dx / nn * r, a.Y + dy / nn * r
+                rc = rect(cx, cy, w, h)
+                if ob.hits(rc, gap, None) > 0:
+                    continue
+                if any(rect_overlap(grow(rc, gap), rc_of(y)) for j, y in enumerate(items) if j != i):
+                    continue
+                if any(rect_overlap(grow(rc, gap), fx) for fx in fixed):
+                    continue
+                c = conflicts_of(i, (cx, cy))
+                if c == 0:
+                    score = k + (0.4 if (dx and dy) else 0.0)
+                    if best is None or score < best[0]:
+                        best = (score, cx, cy, dx, dy)
+            if best is not None:
+                break
+        if best is not None:
+            _, cx, cy, dx, dy = best
+            x['c'] = (cx, cy)
+            x['dir'] = (dx, dy)
+            fixed_n += 1
+    left = sum(1 for i in range(len(items)) if conflicts_of(i) > 0)
+    return fixed_n, left
+
+
+def stack_dense(items, ob, fixed, gap, step, max_len, m):
+    """密集区整队：挤在一起的一团标记（压构件、互相压、或被推得很远的），整队成一列（左/右）或一行（上/下），
+    间距相等、对齐、按位置排序（引线不交叉）；四个侧各试一遍，挑不压任何东西且引线最短的。返回整队的标记数。"""
+    def cur_rect(x):
+        return rect(x['c'][0], x['c'][1], x['size'][0], x['size'][1])
+
+    crowded = []
+    for x in items:
+        rc = cur_rect(x)
+        far = math.hypot(x['c'][0] - x['a'].X, x['c'][1] - x['a'].Y) > max(x['size'][0], x['size'][1]) * 0.9 + gap
+        over_tag = any(y is not x and rect_overlap(grow(rc, gap), cur_rect(y)) for y in items)
+        if x.get('conf', 0) > 0 or over_tag or far:
+            crowded.append(x)
+    if len(crowded) < 3:
+        return 0
+    # 按锚点距离聚类
+    link = max(max(x['size'][0], x['size'][1]) for x in crowded) * 1.2
+    parent = list(range(len(crowded)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i in range(len(crowded)):
+        for j in range(i + 1, len(crowded)):
+            if math.hypot(crowded[i]['a'].X - crowded[j]['a'].X, crowded[i]['a'].Y - crowded[j]['a'].Y) <= link:
+                parent[find(i)] = find(j)
+    groups = {}
+    for i, x in enumerate(crowded):
+        groups.setdefault(find(i), []).append(x)
+    n_done = 0
+    for g in groups.values():
+        if len(g) < 3:
+            continue
+        in_g = set(id(x) for x in g)
+        w = max(x['size'][0] for x in g)
+        h = max(x['size'][1] for x in g)
+        horiz = w >= h            # 宽标记：左右排成一列；窄（竖排）标记：上下排成一行
+        xs = [x['a'].X for x in g]
+        ys = [x['a'].Y for x in g]
+        cx, cy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+        others = list(fixed) + [cur_rect(y) for y in items if id(y) not in in_g]
+        sides = ((1, 0), (-1, 0), (0, 1), (0, -1)) if horiz else ((0, 1), (0, -1), (1, 0), (-1, 0))
+        best = None
+        for sd in sides:
+            for k in range(0, 14):
+                off = m(5.0) + k * step
+                slots = []
+                n = len(g)
+                if sd[0] != 0:
+                    pitch = h + gap
+                    gx = (max(xs) + off + w / 2.0) if sd[0] > 0 else (min(xs) - off - w / 2.0)
+                    gs = sorted(g, key=lambda x: x['a'].Y)
+                    for i in range(n):
+                        slots.append((gx, cy + (i - (n - 1) / 2.0) * pitch))
+                else:
+                    pitch = w + gap
+                    gy = (max(ys) + off + h / 2.0) if sd[1] > 0 else (min(ys) - off - h / 2.0)
+                    gs = sorted(g, key=lambda x: x['a'].X)
+                    for i in range(n):
+                        slots.append((cx + (i - (n - 1) / 2.0) * pitch, gy))
+                conf = 0
+                longest = 0.0
+                for (sx, sy), x in zip(slots, gs):
+                    rc = rect(sx, sy, x['size'][0], x['size'][1])
+                    if ob.hits(rc, gap, None) > 0:
+                        conf += 1
+                    if any(rect_overlap(grow(rc, gap), o) for o in others):
+                        conf += 1
+                    longest = max(longest, math.hypot(sx - x['a'].X, sy - x['a'].Y))
+                if conf == 0 and longest <= max_len * 2.0:
+                    cand = (longest + k, slots, gs, sd)
+                    if best is None or cand[0] < best[0]:
+                        best = cand
+                    break
+        if best is None:
+            continue
+        _, slots, gs, sd = best
+        for (sx, sy), x in zip(slots, gs):
+            x['c'] = (sx, sy)
+            x['dir'] = sd
+            x['conf'] = 0
+        n_done += len(g)
+    return n_done
+
+
 def plan(view, cfg):
     scale = max(int(view.Scale), 1)
     m = lambda mm: mm * scale / FT
     p_mm = lambda ft: ft * FT / scale
     gap, step, max_len, tol = m(cfg['gap_mm']), m(cfg['step_mm']), m(cfg['max_leader_mm']), m(cfg['align_mm'])
-    tags = list(DB.FilteredElementCollector(doc, view.Id).OfClass(DB.IndependentTag))
+    tags = view_tags(view)
     orphans, items, multi = [], [], []
     for t in tags:
         try:
@@ -420,7 +586,13 @@ def plan(view, cfg):
             x['axis'] = 'v' if abs(dd.Y) > abs(dd.X) else 'h'
         else:
             x['axis'] = None
-    ob, n_ob = build_obstacles(view)
+    tagged_cats = set()
+    for x in items:
+        try:
+            tagged_cats.add(x['el'].Category.Id.Value)
+        except Exception:
+            pass
+    ob, n_ob = build_obstacles(view, tagged_cats)
     # 多构件标记不动，当作固定障碍
     fixed = []
     for t in multi:
@@ -494,59 +666,82 @@ def plan(view, cfg):
         x['conf'] = conf
         placed.append(rect(cx, cy, w, h))
         x['rect_idx'] = len(placed) - 1
-    # 平齐：上下方向的对齐同一列（x），左右方向的对齐同一行（y）；吸附后重新检查，压到东西就不吸附
-    shift_max = m(15.0)
     n_snapped = 0
-    for axis in ('x', 'y'):
-        if axis == 'x':
-            grp = [x for x in items if x.get('axis') == 'v' or (x.get('axis') is None and abs(x['dir'][0]) < 0.3)]
-            key = lambda x: x['c'][0]
-        else:
-            grp = [x for x in items if x.get('axis') == 'h' or (x.get('axis') is None and abs(x['dir'][1]) < 0.3)]
-            key = lambda x: x['c'][1]
-        grp.sort(key=key)
-        clusters, cur = [], []
-        for x in grp:
-            if cur and abs(key(x) - key(cur[-1])) > tol:
+    n_slid = 0
+
+    def do_align():
+        nonlocal n_snapped, n_slid
+        # 严格平齐（按坐标做）：横向标记按 y 聚成「行线」，竖向标记按 x 聚成「列线」，行线/列线取簇内中位数；
+        # 成员的这一个坐标改成完全相同；压到构件或别的标记时，沿行线/列线滑动找空位（不放弃对齐）。
+        for axis in ('x', 'y'):
+            if axis == 'x':
+                grp = [x for x in items if x.get('axis') == 'v']
+                key = lambda x: x['c'][0]
+                other = lambda x: x['c'][1]
+            else:
+                # 横排的头（管线横标记 + 没有方向的点式构件，如井）一律按行线（y）对齐
+                grp = [x for x in items if x.get('axis') in ('h', None)]
+                key = lambda x: x['c'][1]
+                other = lambda x: x['c'][0]
+            grp.sort(key=key)
+            clusters, cur = [], []
+            for x in grp:
+                if cur and key(x) - key(cur[-1]) > tol:
+                    clusters.append(cur)
+                    cur = []
+                cur.append(x)
+            if cur:
                 clusters.append(cur)
-                cur = []
-            cur.append(x)
-        if cur:
-            clusters.append(cur)
-        for cl in clusters:
-            if len(cl) < 2:
-                continue
-            # 基准：组里离自己构件最近的那个标记所在的行/列；其它标记往它靠，只允许靠近构件或持平，不允许被推得更远
-            ref_y = min(cl, key=lambda q: math.hypot(q['c'][0] - q['a'].X, q['c'][1] - q['a'].Y))
-            target = key(ref_y)
-            for y in cl:
-                cx, cy = y['c']
-                ncx, ncy = (target, cy) if axis == 'x' else (cx, target)
-                if abs(ncx - cx) + abs(ncy - cy) < 1e-9 or abs(ncx - cx) + abs(ncy - cy) > shift_max:
+            for cl in clusters:
+                if len(cl) < 2:
                     continue
-                if math.hypot(ncx - y['a'].X, ncy - y['a'].Y) > max_len:
-                    continue
-                if math.hypot(ncx - y['a'].X, ncy - y['a'].Y) > math.hypot(cx - y['a'].X, cy - y['a'].Y) + m(3.0):
-                    continue
-                w, h = y['size'][0], y['size'][1]
-                rc = rect(ncx, ncy, w, h)
-                if ob.hits(rc, gap, None) > 0:
-                    continue
-                old = placed[y['rect_idx']]
-                placed[y['rect_idx']] = (0, 0, 0, 0)
-                ok = all(not rect_overlap(grow(rc, gap), p) for p in placed if p != (0, 0, 0, 0))
-                if ok:
-                    placed[y['rect_idx']] = rc
-                    y['c'] = (ncx, ncy)
-                    n_snapped += 1
-                else:
-                    placed[y['rect_idx']] = old
+                vals = sorted(key(y) for y in cl)
+                target = vals[len(vals) // 2]
+                for y in sorted(cl, key=lambda q: abs(key(q) - target)):
+                    cx, cy = y['c']
+                    w, h = y['size'][0], y['size'][1]
+                    if abs(key(y) - target) < 1e-9:
+                        continue
+                    chosen = None
+                    for k in range(0, 40):
+                        for sgn in ((0,) if k == 0 else (1, -1)):
+                            o = other(y) + sgn * k * step
+                            ncx, ncy = (target, o) if axis == 'x' else (o, target)
+                            if math.hypot(ncx - y['a'].X, ncy - y['a'].Y) > max_len * 1.5:
+                                continue
+                            rc = rect(ncx, ncy, w, h)
+                            if ob.hits(rc, gap, None) > 0:
+                                continue
+                            old = placed[y['rect_idx']]
+                            placed[y['rect_idx']] = (0, 0, 0, 0)
+                            ok = all(not rect_overlap(grow(rc, gap), pp) for pp in placed if pp != (0, 0, 0, 0))
+                            placed[y['rect_idx']] = old
+                            if ok:
+                                chosen = (ncx, ncy, rc, k)
+                                break
+                        if chosen is not None:
+                            break
+                    if chosen is not None:
+                        placed[y['rect_idx']] = chosen[2]
+                        y['c'] = (chosen[0], chosen[1])
+                        n_snapped += 1
+                        if chosen[3] > 0:
+                            n_slid += 1
+
+    do_align()
+    n_stacked = stack_dense(items, ob, fixed, gap, step, max_len, m)
+    n_lead_fixed, n_lead_left = fix_leaders(items, ob, fixed, gap, step, max_len)
+    # 引线修复挪动了一些标记：再对齐一次，再修复一次（两个目标互相迁就）
+    for _round in range(2):
+        do_align()
+        f2, n_lead_left = fix_leaders(items, ob, fixed, gap, step, max_len)
+        n_lead_fixed += f2
     # 头位置 = 包围框中心 − 偏移
     for x in items:
         w, h, ox, oy = x['size']
         x['new'] = (x['c'][0] - ox, x['c'][1] - oy)
     stat = measure_result(items, ob, placed, gap, p_mm, cfg)
-    stat.update({'routes': routes, 'items': items, 'dups': dups, 'orphans': orphans, 'multi': len(multi), 'scale': scale, 'ob': n_ob, 'snapped': n_snapped, 'sizes': n_sizes})
+    stat.update({'lead_fixed': n_lead_fixed, 'lead_left': n_lead_left, 'slid': n_slid, 'stacked': n_stacked, 'routes': routes, 'items': items, 'dups': dups, 'orphans': orphans, 'multi': len(multi), 'scale': scale, 'ob': n_ob, 'snapped': n_snapped, 'sizes': n_sizes})
     return stat
 
 
@@ -562,33 +757,68 @@ def measure_result(items, ob, placed, gap, p_mm, cfg):
     return {'over_el': over_el, 'over_tag': over_tag, 'far': far}
 
 
-def missing_elements(view, cfg, items):
-    """视图里同类别已经有标记、但自己没标的构件：[(el, 标记类型Id)]。"""
-    tagged = set(x['own'] for x in items)
-    cat_type = {}
-    for x in items:
-        e = x['el']
+def _fam_key(e):
+    """（类别, 族名）：补标只补「视图里这个族已经有标记」的同族构件。"""
+    try:
+        cat = e.Category.Id.Value
+    except Exception:
+        return None
+    try:
+        fam = e.Symbol.FamilyName
+    except Exception:
         try:
-            cid = e.Category.Id.Value
+            fam = doc.GetElement(e.GetTypeId()).FamilyName
         except Exception:
+            fam = ''
+    return (cat, fam)
+
+
+def missing_elements(view, cfg, items, multi_tagged_ids=()):
+    """视图里同类别同族已经有标记、但自己没标的构件：[(el, 标记类型Id)]。标记类型取该族现有标记里用得最多的。"""
+    tagged = set(x['own'] for x in items)
+    tagged.update(multi_tagged_ids)
+    fam_type = {}
+    for x in items:
+        k = _fam_key(x['el'])
+        if k is None:
             continue
-        cat_type.setdefault(cid, {}).setdefault(x['t'].GetTypeId().Value, 0)
-        cat_type[cid][x['t'].GetTypeId().Value] += 1
+        fam_type.setdefault(k, {}).setdefault(x['t'].GetTypeId().Value, 0)
+        fam_type[k][x['t'].GetTypeId().Value] += 1
     out = []
     min_len = cfg['min_pipe_mm'] / FT
-    for cid, tmap in cat_type.items():
-        tt = max(tmap.items(), key=lambda kv: kv[1])[0]
+    for cid in set(k[0] for k in fam_type):
         col = DB.FilteredElementCollector(doc, view.Id).OfCategoryId(DB.ElementId(cid)).WhereElementIsNotElementType()
         for e in col:
             if e.Id.Value in tagged:
+                continue
+            k = _fam_key(e)
+            if k not in fam_type:
                 continue
             loc = e.Location
             if loc is None:
                 continue
             if isinstance(loc, DB.LocationCurve) and loc.Curve.Length < min_len:
                 continue
-            out.append((e, DB.ElementId(tt)))
+            tmap = fam_type[k]
+            out.append((e, DB.ElementId(max(tmap.items(), key=lambda kv: kv[1])[0])))
     return out
+
+
+def create_missing(view, add_list):
+    """建缺失的标记（先放在构件中心，随后由排布挪到空位）。返回 (成功个数, 失败列表[(构件id, 原因)])。要在事务里调用。"""
+    n = 0
+    fails = []
+    for e, ttid in add_list:
+        try:
+            pt = center_of(e)
+            if pt is None:
+                fails.append((e.Id.Value, '取不到构件中心'))
+                continue
+            DB.IndependentTag.Create(doc, ttid, view.Id, DB.Reference(e), True, DB.TagOrientation.Horizontal, DB.XYZ(pt.X, pt.Y, pt.Z))
+            n += 1
+        except Exception as ex:
+            fails.append((e.Id.Value, ('%s' % ex).splitlines()[0][:60]))
+    return n, fails
 
 
 def verify(items, tol_ft=1.0 / FT):
@@ -636,16 +866,6 @@ def apply(view, pl, cfg, add_list):
             tg.SetLeaderEnd(x['ref'], DB.XYZ(x['a'].X, x['a'].Y, x['head'].Z))
         doc.Regenerate()
         n_add = 0
-        if cfg['add_missing'] and add_list:
-            for e, ttid in add_list:
-                try:
-                    p = center_of(e)
-                    if p is None:
-                        continue
-                    DB.IndependentTag.Create(doc, ttid, view.Id, DB.Reference(e), True, DB.TagOrientation.Horizontal, DB.XYZ(p.X, p.Y, p.Z))
-                    n_add += 1
-                except Exception:
-                    continue
         bad = verify(pl['items'])
         if bad:
             raise Exception('回读核对失败：%d 个标记的引线末端没落在自己构件的中心（如 %s），整次回滚，模型未改。' % (len(bad), bad[:3]))
@@ -656,6 +876,40 @@ def apply(view, pl, cfg, add_list):
     except Exception:
         if t.HasStarted() and not t.HasEnded():
             t.RollBack()
+        raise
+
+
+def run_all(view, cfg):
+    """整次操作：补标缺标构件 → 重新规划 → 排布并写入。事务组包起来，Ctrl+Z 一次撤销。返回 (整理数, 删重复/悬空数, 补标数, 规划结果)。"""
+    tg = DB.TransactionGroup(doc, '天河落 · 构件标记一键整理')
+    tg.Start()
+    try:
+        pl = plan(view, cfg)
+        n_add = 0
+        fail_total = []
+        if cfg['add_missing']:
+            add_list = missing_elements(view, cfg, pl['items'])
+            if add_list:
+                t = DB.Transaction(doc, '补标缺标构件')
+                fh = t.GetFailureHandlingOptions()
+                fh.SetFailuresPreprocessor(_Fails())
+                t.SetFailureHandlingOptions(fh)
+                t.Start()
+                n_add, add_fails = create_missing(view, add_list)
+                fail_total.extend(add_fails)
+                st = t.Commit()
+                if st != DB.TransactionStatus.Committed:
+                    raise Exception('补标事务没有提交（%s），已回滚。' % st)
+                pl = plan(view, cfg)          # 重新规划：新标记也一起排布
+        n_del, _ = apply(view, pl, cfg, [])
+        tg.Assimilate()
+        pl['add_fails'] = fail_total
+        return len(pl['items']), n_del, n_add, pl
+    except Exception:
+        try:
+            tg.RollBack()
+        except Exception:
+            pass
         raise
 
 
@@ -678,10 +932,17 @@ def main():
             forms.alert('当前视图里没有单构件标记可整理。', title=TITLE)
             return
         add_list = missing_elements(view, cfg, pl['items']) if cfg['add_missing'] else []
+        if cfg['add_missing']:
+            multi_ids = set()
+            for t_ in view_tags(view):
+                ids_ = list(t_.GetTaggedLocalElementIds())
+                if len(ids_) > 1:
+                    multi_ids.update(i.Value for i in ids_)
+            add_list = [a for a in add_list if a[0].Id.Value not in multi_ids]
         msg = ('当前视图（比例 1:%d）：\n'
                '  单构件标记 %d 个：引线末端设到构件中心，标记头选空的一侧、不压任何构件、同侧平齐（已吸附 %d 个）\n'
                '  悬空标记 %d 个、同一构件上的重复标记 %d 个%s\n'
-               '  缺标构件 %d 个%s\n'
+               '  缺标构件 %d 个%s（同族已有标记的才补，补完一起重新排布）\n'
                '  多构件标记 %d 个（不动，当作障碍）\n\n'
                '整理后预计：压到构件的标记 %d 个；标记互相重叠 %d 对；引线超过上限 %d 个。\n'
                '整次一个事务，写入后回读核对，Ctrl+Z 可撤销。执行？') % (
@@ -690,8 +951,12 @@ def main():
             pl['over_el'], pl['over_tag'], pl['far'])
         if not forms.alert(msg, title=TITLE, ok=False, yes=True, no=True):
             return
-        n_del, n_add = apply(view, pl, cfg, add_list)
-        forms.alert('完成：整理 %d 个标记，删除悬空 %d 个，补标 %d 个。Ctrl+Z 可整次撤销。' % (len(pl['items']), n_del, n_add), title=TITLE)
+        n_items, n_del, n_add, pl2 = run_all(view, cfg)
+        msg2 = '完成：整理 %d 个标记，删除悬空/重复 %d 个，补标成功 %d 个（补标后已一起重新排布）。\n整理后：压到构件 %d 个、标记重叠 %d 对、引线超限 %d 个。Ctrl+Z 可整次撤销。' % (
+            n_items, n_del, n_add, pl2['over_el'], pl2['over_tag'], pl2['far'])
+        if pl2.get('add_fails'):
+            msg2 += '\n\n有 %d 个构件补标失败：\n' % len(pl2['add_fails']) + '\n'.join('  %d：%s' % f for f in pl2['add_fails'][:8])
+        forms.alert(msg2, title=TITLE)
     except Exception:
         forms.alert('出错了（已回滚，模型没被改）：\n' + traceback.format_exc(), title=TITLE)
 
