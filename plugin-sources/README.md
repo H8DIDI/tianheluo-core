@@ -38,7 +38,7 @@
 | [`sheet-organize`](sheet-organize/) | 一键图纸归类与图框编号 | 0.6.6 | Python | didi | MIT |
 | [`sheet-preview`](sheet-preview/) | 图纸快速预览 | 0.1.1 | Python | didi | MIT |
 | [`tag-check`](tag-check/) | 标注检查 | 0.2.1 | C#（源码在 `plugins/`） | didi | MIT |
-| [`tag-tidy`](tag-tidy/) | 构件标记一键整理 | 0.1.4 | Python | didi | MIT |
+| [`tag-tidy`](tag-tidy/) | 构件标记一键整理 | 0.1.5 | Python | didi | MIT |
 | [`view-manager`](view-manager/) | 视图管理 | 0.2.1 | Python | lewismconte (Sendit) | MIT |
 | [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.38 | Python | didi | MIT |
 | [`well-audit`](well-audit/) | 井大样体检 | 0.2.0 | Python | didi | MIT |

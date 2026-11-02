@@ -931,6 +931,14 @@ def run_all(view, cfg):
     tg = DB.TransactionGroup(doc, '天河落 · 构件标记一键整理')
     tg.Start()
     try:
+        # 被「在视图中隐藏」的标记等于没标：先取消隐藏，再一起整理
+        hidden = [t.Id for t in view_tags(view) if t.IsHidden(view) and t.GroupId == DB.ElementId.InvalidElementId]
+        if hidden:
+            th = DB.Transaction(doc, '取消隐藏的标记')
+            th.Start()
+            view.UnhideElements(System.Collections.Generic.List[DB.ElementId](hidden))
+            if th.Commit() != DB.TransactionStatus.Committed:
+                raise Exception('取消隐藏标记的事务没有提交，已回滚。')
         pl = plan(view, cfg)
         n_add = 0
         fail_total = []
