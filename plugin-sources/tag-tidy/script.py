@@ -760,8 +760,13 @@ def center_of(el):
     return None
 
 
+MEASURE_ERRORS = []
+
+
 def measure_tag_heads(view, items, est_w, est_h):
-    """实测每种（标记类型 + 文字）的标记头大小和「包围框中心 − 标记头位置」偏移：临时去掉引线、重新生成、读包围框，回滚。"""
+    """实测每种（标记类型 + 文字）的标记头大小和「包围框中心 − 标记头位置」偏移：临时去掉引线、重新生成、读包围框，回滚。
+    个别标记量出来会把引线也算进包围框（宽高被放大几倍），所以同类型、同朝向、同字数的标记取「成功量到的各次里最小的宽、最小的高」当真值；
+    量失败的不参与（以前失败时的估计值很小，会被误当成最小值）。"""
     cache = {}
     t = DB.Transaction(doc, '测量标记头')
     t.Start()
@@ -773,9 +778,10 @@ def measure_tag_heads(view, items, est_w, est_h):
             except Exception:
                 key = (tg.GetTypeId().Value, '', x.get('orient'))
             if key in cache:
-                x['size'] = cache[key]
+                x['size'], x['size_ok'] = cache[key]
                 continue
             res = (est_w, est_h, 0.0, 0.0)
+            ok = False
             try:
                 had = tg.HasLeader
                 tg.HasLeader = False
@@ -788,28 +794,39 @@ def measure_tag_heads(view, items, est_w, est_h):
                     w, hh = bb.Max.X - bb.Min.X, bb.Max.Y - bb.Min.Y
                     if w > 0 and hh > 0:
                         res = (w, hh, (bb.Min.X + bb.Max.X) / 2.0 - h.X, (bb.Min.Y + bb.Max.Y) / 2.0 - h.Y)
+                        ok = True
                 tg.HasLeader = had
-            except Exception:
-                pass
-            cache[key] = res
-            x['size'] = res
+            except Exception as ex:
+                if len(MEASURE_ERRORS) < 5:
+                    MEASURE_ERRORS.append(('%s' % ex).splitlines()[0][:80])
+            cache[key] = (res, ok)
+            x['size'], x['size_ok'] = res, ok
     finally:
         t.RollBack()
-    # 个别标记量出来会把引线也算进包围框（宽高被放大几倍，排布就全挤了）。
-    # 同类型、同朝向、同字数的标记文字框其实一样大，取这一组里面积最小的那次测量当真值。
-    best = {}
+    groups = {}
     for x in items:
         try:
             gk = (x['t'].GetTypeId().Value, x.get('orient'), len(x['t'].TagText or ''))
         except Exception:
-            continue
+            gk = None
         x['_gk'] = gk
-        sz = x['size']
-        if gk not in best or sz[0] * sz[1] < best[gk][0] * best[gk][1]:
-            best[gk] = sz
+        if gk is not None and x.get('size_ok'):
+            w_, h_ = x['size'][0], x['size'][1]
+            # 朝向一致：竖排的文字框必然高大于宽，横排的宽大于高（改朝向后包围框没刷新的样本量出来是反的，丢掉）
+            if x.get('orient') == DB.TagOrientation.Vertical and h_ <= w_:
+                continue
+            if x.get('orient') == DB.TagOrientation.Horizontal and w_ <= h_:
+                continue
+            groups.setdefault(gk, []).append(x['size'])
+    truth = {}
+    for gk, szs in groups.items():
+        smin = min(szs, key=lambda q: q[0] * q[1])
+        truth[gk] = (min(q[0] for q in szs), min(q[1] for q in szs), smin[2], smin[3])
     for x in items:
-        if x.get('_gk') in best:
-            x['size'] = best[x['_gk']]
+        if x.get('_gk') in truth:
+            x['size'] = truth[x['_gk']]
+        elif x.get('orient') == DB.TagOrientation.Vertical and x['size'][0] > x['size'][1]:
+            x['size'] = (x['size'][1], x['size'][0], x['size'][3], x['size'][2])
     return len(cache)
 
 
@@ -1064,7 +1081,7 @@ def relax(items, ob, fixed, gap, step, max_len, rounds=5, budget_s=12.0):
     """全局冲突消解（最小冲突局部搜索）：前面各步是逐个贪心放置，密的地方会堆叠、引线乱叉。
     这里统一打分，让「有冲突」的标记换到总代价最低的候选位置：
       标记框互相重叠 / 压构件 / 压固定标记 ≫ 引线穿别的标记框、引线互相交叉 ≫ 引线超上限 > 斜引线 > 引线长。
-    候选 = 以构件中心为圆心、16 个方向 × 十来圈由近到远的半径（先在引线上限内找，还冲突的再放宽到 1.5 倍；最后把十字交叉/汇合处挤在一起的一团整队成整齐的一列或一行）。
+    候选 = 以构件中心为圆心、16 个方向 × 十来圈由近到远的半径（先在引线上限内找，还冲突的再放宽到 1.5 倍；最后把邻近标记吸附对齐：横排标记的行线和左右边线、竖排标记的列线和上下边线）。
     只处理有冲突的标记，邻居只看附近的，总耗时有上限（budget_s 秒，到点就停，不会卡住 Revit）。返回仍有冲突的标记个数。"""
     n = len(items)
     if n < 2:
@@ -1176,80 +1193,52 @@ def relax(items, ob, fixed, gap, step, max_len, rounds=5, budget_s=12.0):
 
 
 
-    def cluster_cost(g):
-        return sum(cost(i, items[i]['c'][0], items[i]['c'][1]) for i in g)
-
-    def tidy_clusters():
-        """十字交叉/管线汇合处整队：锚点挨得近的一团标记（≥3 个）如果有冲突或引线超限，试着排成一列（左/右）或一行（上/下），
-        按位置排序（引线不交叉）、一边对齐、间距相等；四个侧都试，只有总代价比现在低才采用。"""
-        link = max_len * 0.9
-        par = list(range(n))
-
-        def find(k):
-            while par[k] != k:
-                par[k] = par[par[k]]
-                k = par[k]
-            return k
-        for i in range(n):
-            for j in nb[i]:
-                if j > i and math.hypot(items[i]['a'].X - items[j]['a'].X, items[i]['a'].Y - items[j]['a'].Y) <= link:
-                    par[find(i)] = find(j)
-        groups = {}
-        for i in range(n):
-            groups.setdefault(find(i), []).append(i)
-        done = 0
-        for g in groups.values():
-            if len(g) < 3 or time.time() > t_end:
-                continue
-            old_cost = cluster_cost(g)
-            messy = any(now(i, True) >= 300.0 for i in g) or any(
-                math.hypot(items[i]['c'][0] - items[i]['a'].X, items[i]['c'][1] - items[i]['a'].Y) > max_len for i in g)
-            if not messy:
-                continue
-            xs = [items[i]['a'].X for i in g]
-            ys = [items[i]['a'].Y for i in g]
-            cx0, cy0 = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
-            saved = dict((i, items[i]['c']) for i in g)
-            best = None
-            for sd in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                for off_f in (0.15, 0.35, 0.6):
-                    off = max_len * off_f
-                    if sd[0] != 0:
-                        order = sorted(g, key=lambda k: -items[k]['a'].Y)
-                        tot = sum(items[k]['size'][1] + gap for k in order)
-                        y = cy0 + tot / 2.0
-                        for k in order:
-                            w, h = items[k]['size'][0], items[k]['size'][1]
-                            y -= h / 2.0
-                            gx = (max(xs) + off + w / 2.0) if sd[0] > 0 else (min(xs) - off - w / 2.0)
-                            items[k]['c'] = (gx, y)
-                            y -= h / 2.0 + gap
+    def snap_align():
+        """对齐：附近同朝向的标记，行线（横排标记的中线 y）/ 列线（竖排标记的中线 x）吸附到同一条；
+        再把左右边线（横排）/ 上下边线（竖排）也吸附到邻居的边线上。每次吸附都要求不新增冲突、引线不超过 1.5 倍上限，否则不动。"""
+        moved_n = 0
+        for _pass in range(3):
+            for i in sorted(range(n), key=lambda q: (items[q].get('axis') or '', items[q]['c'][1], items[q]['c'][0])):
+                x = items[i]
+                axis = x.get('axis')
+                if axis not in ('h', 'v') or time.time() > t_end:
+                    continue
+                w, h = x['size'][0], x['size'][1]
+                hz = (axis == 'h')
+                line_k = 1 if hz else 0                  # 行线：横排对齐 y，竖排对齐 x
+                thick = h if hz else w                   # 垂直于文字方向的厚度
+                along = w if hz else h                   # 沿文字方向的长度
+                near = [items[j] for j in nb[i] if items[j].get('axis') == axis
+                        and math.hypot(items[j]['c'][0] - x['c'][0], items[j]['c'][1] - x['c'][1]) <= far_lim * 1.5]
+                moves = []
+                for y in near:
+                    d_line = y['c'][line_k] - x['c'][line_k]
+                    if 1e-9 < abs(d_line) <= thick * 1.6 + gap * 2.0:
+                        moves.append((abs(d_line), 'line', y['c'][line_k]))
+                    e_k = 0 if hz else 1                 # 边线：横排对齐 x 方向的左/右边，竖排对齐 y 方向的下/上边
+                    wy = y['size'][0] if hz else y['size'][1]
+                    for sgn in (-1, 1):
+                        target = y['c'][e_k] + sgn * wy / 2.0 - sgn * along / 2.0
+                        d_e = target - x['c'][e_k]
+                        if 1e-9 < abs(d_e) <= along * 0.35:
+                            moves.append((abs(d_e) * 0.5, 'edge', target))
+                moves.sort()
+                for _d, kind, val in moves:
+                    c0 = x['c']
+                    k_ = line_k if kind == 'line' else (0 if hz else 1)
+                    if abs(c0[k_] - val) < 1e-9:
+                        continue
+                    h0 = now(i, True)
+                    x['c'] = (c0[0], val) if k_ == 1 else (val, c0[1])
+                    too_far = math.hypot(x['c'][0] - x['a'].X, x['c'][1] - x['a'].Y) > far_lim
+                    if too_far or now(i, True) > h0 + 1e-6:
+                        x['c'] = c0
                     else:
-                        order = sorted(g, key=lambda k: items[k]['a'].X)
-                        tot = sum(items[k]['size'][0] + gap for k in order)
-                        xx = cx0 - tot / 2.0
-                        for k in order:
-                            w, h = items[k]['size'][0], items[k]['size'][1]
-                            xx += w / 2.0
-                            gy = (max(ys) + off + h / 2.0) if sd[1] > 0 else (min(ys) - off - h / 2.0)
-                            items[k]['c'] = (xx, gy)
-                            xx += w / 2.0 + gap
-                    cs = cluster_cost(g)
-                    if best is None or cs < best[0]:
-                        best = (cs, dict((k, items[k]['c']) for k in g), sd)
-            if best is not None and best[0] < old_cost - 1e-6:
-                for k in g:
-                    items[k]['c'] = best[1][k]
-                    items[k]['dir'] = best[2]
-                done += 1
-            else:
-                for k in g:
-                    items[k]['c'] = saved[k]
-        return done
+                        moved_n += 1
+        return moved_n
 
     run_rounds()
-    tidy_clusters()
-    run_rounds()
+    snap_align()
     return sum(1 for i in range(n) if now(i, True) >= 300.0)
 
 

@@ -13,7 +13,7 @@ VERSION_OVERRIDE = {"control-points": "0.1.1", "export-dwg": "0.5.0", "export-nw
                     "sheet-organize": "0.6.6", "sheet-preview": "0.1.1", "well-annotate": "0.3.38", "well-audit": "0.2.0",
                     "well-config": "0.1.1", "well-family-guard": "0.1.2", "well-number": "0.3.0",
                     "well-param-sync": "0.1.2", "well-sheet-fit": "0.1.3", "well-sheet-no": "0.1.7", "well-sheets": "0.5.12",
-                    "well-spec-table": "0.1.5", "well-zone": "0.1.5", "duct-elev": "0.2.2", "well-gap-dim": "0.2.3", "tag-tidy": "0.1.7"}
+                    "well-spec-table": "0.1.5", "well-zone": "0.1.5", "duct-elev": "0.2.2", "well-gap-dim": "0.2.3", "tag-tidy": "0.1.8"}
 # 商店里显示的名字改过的插件（文件夹名不变，图标照旧从原文件夹取）
 NAME_OVERRIDE = {"quantity-export": "框选提量导出Excel", "well-number": "一键编号 / 清除标记", "export-dwg": "一键导出图纸DWG/PDF", "tag-tidy": "构件标记一键整理"}
 OUT.mkdir(exist_ok=True)
