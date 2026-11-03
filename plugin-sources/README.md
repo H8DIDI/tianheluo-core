@@ -50,7 +50,7 @@
 | [`well-param-sync`](well-param-sync/) | 井参数同步 | 0.1.2 | Python | didi | MIT |
 | [`well-sheet-fit`](well-sheet-fit/) | 井图比例排版 | 0.1.3 | Python | didi | MIT |
 | [`well-sheet-no`](well-sheet-no/) | 井图号重编 | 0.1.7 | Python | didi | MIT |
-| [`well-sheets`](well-sheets/) | 一键井展开图 | 0.5.12 | Python | didi | MIT |
+| [`well-sheets`](well-sheets/) | 一键井展开图 | 0.5.13 | Python | didi | MIT |
 | [`well-spec-table`](well-spec-table/) | 井规格表 | 0.1.5 | Python | didi | MIT |
 | [`well-sync`](well-sync/) | 井大样变动同步 | 0.1.0 | Python | didi | MIT |
 | [`well-zone`](well-zone/) | 井分区标记 | 0.1.5 | Python | didi | MIT |

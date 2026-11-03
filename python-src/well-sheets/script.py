@@ -42,6 +42,7 @@ FT_MM = 304.8
 # @include _shared/settings_ui.py
 # @include _shared/well_config_ui.py
 # @include _shared/sheet_blocks.py
+# @include _shared/well_view_fix.py
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]      # 默认「井大样_」
 WS_NUMPRE = WCFG[u"sheet_number_prefix"]    # 默认「AG-」
@@ -919,6 +920,81 @@ def _renumber_pairs(doc, pairs):
             t2.RollBack()
 
 
+class _RepairRow(object):
+    def __init__(self, sheet, well, probs):
+        self.sheet = sheet
+        self.well = well
+        self.label = u"{}  {}  — {}".format(sheet.SheetNumber, sheet.Name, u"；".join(probs))
+
+
+class _RepairOption(forms.TemplateListItem):
+    @property
+    def name(self):
+        return self.item.label
+
+
+def _pick_incomplete(doc, wells, built_map):
+    """检查已出的井大样图纸：按图纸上视图名里的井号找井，缺视图、或井在视图里没显示全（裁剪框/剖切位置偏了、井被隐藏）的
+    图纸列出来让用户勾选。返回要删掉重新生成的井（图号沿用旧图）。同一井号对应多口井、模型里没有这口井的，只列在报告里。"""
+    by_mark = {}
+    for w in wells:
+        by_mark.setdefault(_mark_of(w), []).append(w)
+    rows, skipped, seen = [], [], set()
+    for mk in sorted(built_map.keys(), key=_well_sort_key):
+        ws = by_mark.get(mk) or (by_mark.get(mk[:-2]) if mk.endswith(u"-1") else None)
+        for sid, _kids in built_map[mk]:
+            if sid.Value in seen:
+                continue
+            seen.add(sid.Value)
+            sh = doc.GetElement(sid)
+            if sh is None:
+                continue
+            if not ws:
+                skipped.append(u"{} {}：模型里没有井 {}".format(sh.SheetNumber, sh.Name, mk))
+                continue
+            if len(ws) > 1:
+                skipped.append(u"{} {}：井号 {} 有 {} 口井，不知道对哪口".format(sh.SheetNumber, sh.Name, mk, len(ws)))
+                continue
+            w = ws[0]
+            g = wvf_geom(w)
+            probs, dirs = [], set()
+            for vid in _kids:
+                v = doc.GetElement(vid)
+                d = wvf_view_dir(v) if v is not None else None
+                if d is None:
+                    continue
+                dirs.add(d)
+                p = wvf_audit_view(doc, v, w, g)
+                if p:
+                    probs.append(d + u":" + u",".join(p))
+            lack = [d for d in _WVF_DIRS if d not in dirs]
+            if lack:
+                probs.insert(0, u"缺" + u"、".join(lack))
+            if probs:
+                rows.append(_RepairRow(sh, w, probs))
+    if not rows:
+        forms.alert(u"已检查 {} 张井大样图，视图都齐、井都显示全了，没有要重做的。{}".format(
+            len(seen), (u"\n\n未检查：\n" + u"\n".join(skipped[:30])) if skipped else u""), title=u"检查不完整的图纸")
+        return []
+    picked = forms.SelectFromList.show(
+        [_RepairOption(r) for r in rows],
+        title=u"有 {} 张图纸不完整（缺视图或井没显示全，clip 括号里是横/纵向能看到的比例）：勾选的删掉重新生成，图号不变".format(len(rows)),
+        button_name=u"删掉并重新生成所选", multiselect=True)
+    if not picked:
+        return []
+    if not isinstance(picked, (list, tuple)):
+        picked = [picked]
+    if skipped:
+        forms.alert(u"另有 {} 张没法自动判断，不会处理：\n".format(len(skipped)) + u"\n".join(skipped[:20]), title=u"检查不完整的图纸")
+    out, ids = [], set()
+    for r in picked:
+        r = getattr(r, "item", r)
+        if r.well.Id.Value not in ids:
+            ids.add(r.well.Id.Value)
+            out.append(r.well)
+    return out
+
+
 def main():
     if not wcfg_first_run(u'一键井展开图'):   # 这台电脑第一次用井大样插件：先确认项目配置
         return
@@ -962,6 +1038,7 @@ def main():
             menu_opts, _clean_tag = _build_range_menu(wells_with_mark)
             menu_opts = [_status_label(o, wells_with_mark, built_map) for o in menu_opts]
             menu_opts.insert(0, '【0】出图进度：看哪些井已出图、哪些没有（勾选未出的井直接生成）')
+            menu_opts.insert(1, '【修】检查已出的图纸：缺视图或井没显示全的，删掉重新生成（图号不变）')
             choice = forms.SelectFromList.show(
                 menu_opts,
                 title='一键井展开图 - 批量出图向导',
@@ -970,7 +1047,12 @@ def main():
                 return
 
             _tag = choice.split('】')[0] + '】'
-            if _tag == _clean_tag:
+            if _tag == '【修】':
+                valid_elems = _pick_incomplete(doc, wells_with_mark, built_map)
+                if not valid_elems:
+                    return
+                picked_from_status = True     # 已经确认要重做，不再问「跳过已出图的」
+            elif _tag == _clean_tag:
                 # 独立清理：不动井，只把模型中所有「井大样_」图纸连同其平面/剖面视图删掉。
                 # 专门用来清掉那批"对应井已不存在（Mark 改过或井已删）"的老图纸，
                 # 这类图纸在生成流程里不会被逐井替换命中。
@@ -1060,7 +1142,9 @@ def main():
                                 title='清理结果')
                 return
 
-            if _tag == '【0】':
+            if _tag == '【修】':
+                pass
+            elif _tag == '【0】':
                 picked_from_status = True
                 valid_elems = _pick_well_status(wells_with_mark, built_map)
                 if not valid_elems:
@@ -1865,6 +1949,12 @@ def main():
                 pass
 
         if success_count > 0:
+            # 选中本次生成的图纸：接着点「一键井大样标注」时，第一项就是「项目浏览器里选中的 N 张图纸」
+            try:
+                _alive = [i for i in generated_sheet_ids if doc.GetElement(i) is not None]
+                uidoc.Selection.SetElementIds(System.Collections.Generic.List[DB.ElementId](_alive))
+            except:
+                pass
             # 导出只包含本次生成的图纸；视图中已隐藏的元素本身不会出现在图纸输出中。
             export_choice = forms.alert(
                 '是否立即导出本次生成的图纸为 PDF？\n已隐藏的构件不会导出。',
@@ -1900,7 +1990,8 @@ def main():
             forms.alert(
                 '批量生成大样图完毕！\n共成功生成 {} 张图纸，替换（删除重建）旧图 {} 张，删除这些井以前出的旧视图 {} 个。\n'
                 '视图样板：{}\n'
-                '提示：套了样板的视图，其"视图范围/显示样式"由样板决定，脚本不再覆盖。{}{}'.format(
+                '提示：套了样板的视图，其"视图范围/显示样式"由样板决定，脚本不再覆盖。{}{}\n\n'
+                '下一步：新图纸已选中，先点「一键井大样标注」（选第一项「选中的图纸」），再点「井规格表」（已有规格表的图纸会自动跳过）。'.format(
                     success_count, replaced_count, old_removed, _tpl_msg, export_result,
                     ('\n图号提示：' + '；'.join(_num_warn)) if _num_warn else ''),
                 title='成功')
