@@ -1174,9 +1174,27 @@ def wvf_view_dir(view):
     return None
 
 
+_WVF_FACE_OUT = 100 / 304.8
+
+
+def wvf_cut_offset(view, g, face_out=_WVF_FACE_OUT):
+    """立面视图剖切面沿视线方向的偏差（英尺）：正数 = 剖切面比应在的位置更靠井内（落进墙里），负数 = 离井太远。
+    取不到（轴向异常）返回 None。"""
+    T = view.CropBox.Transform
+    bx, by, bz = T.BasisX, T.BasisY, T.BasisZ
+    if abs(by.Z - 1.0) > 1e-6:
+        return None
+    hx = abs(bx.X) * g['dx'] + abs(bx.Y) * g['dy']
+    hz = abs(bz.X) * g['dx'] + abs(bz.Y) * g['dy']
+    ox = g['cx'] + bz.X * (hz + face_out) - bx.X * (hx + face_out)
+    oy = g['cy'] + bz.Y * (hz + face_out) - bx.Y * (hx + face_out)
+    return (ox - T.Origin.X) * bz.X + (oy - T.Origin.Y) * bz.Y
+
+
 def wvf_audit_view(doc, view, elem, g):
     """查一个视图有没有把井显示全。返回问题代码列表：
-    裁剪框问题 'clip(横向可见比例,纵向可见比例)'、'depth'（剖切深度没碰到井）、'hidden'（井被隐藏）、'cropoff'、'range'（平面视图范围没盖住井）。"""
+    裁剪框问题 'clip(横向可见比例,纵向可见比例)'、'depth'（剖切深度没碰到井）、'hidden'（井被隐藏）、'cropoff'、'range'（平面视图范围没盖住井）、
+    'cutin'（立面剖切面落进井墙里，整面墙被填成实心）、'cutfar'（剖切面离井太远）。"""
     miss = []
     bb = elem.get_BoundingBox(None)
     cb = view.CropBox
@@ -1200,6 +1218,15 @@ def wvf_audit_view(doc, view, elem, g):
             miss.append('hidden')
     except:
         pass
+    if wvf_view_dir(view) != u"平面":
+        # 剖切面位置：应在井外墙外 face_out 处。剖切面落进墙厚里，整面墙会被当成剖切面填成实心（什么细节都看不到）；
+        # 离墙太远则剖面深度吃不到井。
+        d = wvf_cut_offset(view, g)
+        if d is not None:
+            if d > _WVF_FACE_OUT * 0.9:
+                miss.append('cutin(%dmm)' % round(d * 304.8))
+            elif d < -1.0:
+                miss.append('cutfar(%dmm)' % round(-d * 304.8))
     if wvf_view_dir(view) == u"平面":
         try:
             vr = view.GetViewRange()
