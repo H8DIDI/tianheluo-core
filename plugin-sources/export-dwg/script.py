@@ -1176,6 +1176,11 @@ def _scope_items(sheets_all, well_sheets, mk_of):
         items.append((u'当前视图「%s」（没有图框）' % av.Name, [av]))
     elif isinstance(av, DB.ViewSheet) and not picked:
         items.append((u'当前图纸「%s %s」' % (av.SheetNumber, av.Name), [av]))
+    # 按范围框分区的项放在最前面（下拉框默认只显示几行，放后面要滚很久才看得到）
+    try:
+        items.extend(_zone_scope_items(sheets_all, well_sheets))
+    except Exception as _ex:
+        items.append((u'（按范围框分区的项生成失败：%s）' % _ex, []))
     if well_sheets:
         items.append((u'先行测试：前 5 张井大样图纸', list(well_sheets)[:5]))
         _ind = WCFG[u"indoor_prefix"]
@@ -1189,7 +1194,6 @@ def _scope_items(sheets_all, well_sheets, mk_of):
         if _indoor:
             items.append((u'井大样 室内井（%d 张）' % len(_indoor), _indoor))
         items.append((u'全部井大样图纸（%d 张）' % len(well_sheets), list(well_sheets)))
-    items.extend(_zone_scope_items(sheets_all, well_sheets))
     # 按 Revit 图集（图纸集合）分组：每个图集一项，图集里的图纸按图号排好
     _cols = {}
     _order = []
@@ -1239,6 +1243,8 @@ def _dialog(s, items):
 
     def combo(vals, idx):
         c = WF.ComboBox(); c.DropDownStyle = WF.ComboBoxStyle.DropDownList
+        c.MaxDropDownItems = 30      # 默认只显示 8 行，范围多了要滚动才看得到
+        c.DropDownHeight = 460
         for v in vals:
             c.Items.Add(v)
         c.SelectedIndex = max(0, min(idx, len(vals) - 1))
