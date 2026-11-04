@@ -1140,11 +1140,17 @@ def _zone_scope_items(sheets_all, well_sheets):
         return []
     centers = [(s, _sheet_plan_center(s)) for s in cand]
     out = []
+    in_any = set()
     for nm, bb in sorted(boxes, key=lambda t: wcfg_natural_key(t[0])):
         inside = [s for s, c in centers if c is not None and bb.Min.X <= c[0] <= bb.Max.X and bb.Min.Y <= c[1] <= bb.Max.Y]
-        if inside:
-            inside.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
-            out.append((u'分区「%s」的井大样（%d 张）' % (nm, len(inside)), inside))
+        inside.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
+        in_any.update(x.Id.Value for x in inside)
+        # 所有范围框都列出来（0 张的也列，选了会提示没有图纸），免得看不到某个分区
+        out.append((u'分区「%s」的井大样（%d 张）' % (nm, len(inside)), inside))
+    rest = [s for s, c in centers if s.Id.Value not in in_any]
+    if rest:
+        rest.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
+        out.append((u'不在任何范围框内的井大样（%d 张，含没有平面视图的）' % len(rest), rest))
     return out
 
 
