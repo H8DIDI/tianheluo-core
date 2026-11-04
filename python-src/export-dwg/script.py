@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 __title__ = '一键导出图纸DWG/PDF'
-__doc__ = ('批量导出图纸为 DWG / PDF：井大样按系列一键选，也能导项目浏览器里选中的图纸、全部图纸或手动勾选。\n'
+__doc__ = ('批量导出图纸为 DWG / PDF：井大样按系列一键选，也能按范围框分区选（如「A栋北侧」），或导项目浏览器里选中的图纸、全部图纸、手动勾选。\n'
            'DWG 每 20 张一批导出（比逐张快），导出前检查没有图框的图纸，文件名按图号去重不再互相覆盖，可只补导缺的；\n'
            '可选 AutoCAD 后台补 logo、瘦身（PurgeAll）；PDF 可合并成一个或每张一个。每次在文件夹里留一份导出清单。\n'
            '坐标：导出图纸时 DWG 按图纸尺寸摆放（没有测量坐标，Revit 本身如此）；导出视图按所选坐标（默认共享坐标）。'
@@ -645,6 +645,48 @@ def _file_stems(sheets, mode):
     return out
 
 
+def _sheet_plan_center(sheet):
+    """图纸上第一个平面视图裁剪框中心的 (x, y)（英尺，项目坐标）；没有平面视图返回 None。"""
+    try:
+        for vid in sheet.GetAllViewports():
+            v = doc.GetElement(doc.GetElement(vid).ViewId)
+            if v.ViewType not in (DB.ViewType.FloorPlan, DB.ViewType.EngineeringPlan, DB.ViewType.CeilingPlan):
+                continue
+            c = v.CropBox
+            p = c.Transform.OfPoint(DB.XYZ((c.Min.X + c.Max.X) / 2.0, (c.Min.Y + c.Max.Y) / 2.0, 0))
+            return (p.X, p.Y)
+    except Exception:
+        pass
+    return None
+
+
+def _zone_scope_items(sheets_all, well_sheets):
+    """按范围框分区：每个范围框一项，里面是「平面视图裁剪框中心落在这个范围框里」的井大样图纸。
+    范围框用它的外包盒判断（斜放的范围框边缘可能多选，导出前请看一眼清单）。"""
+    cand = list(well_sheets)
+    seen = set(x.Id.Value for x in cand)
+    for x in sheets_all:      # 改过名的井大样（Manhole Details / 井大样）也算
+        if x.Id.Value not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
+            cand.append(x)
+    if not cand:
+        return []
+    boxes = []
+    for b in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_VolumeOfInterest).ToElements():
+        bb = b.get_BoundingBox(None)
+        if bb is not None and b.Name:
+            boxes.append((b.Name, bb))
+    if not boxes:
+        return []
+    centers = [(s, _sheet_plan_center(s)) for s in cand]
+    out = []
+    for nm, bb in sorted(boxes, key=lambda t: wcfg_natural_key(t[0])):
+        inside = [s for s, c in centers if c is not None and bb.Min.X <= c[0] <= bb.Max.X and bb.Min.Y <= c[1] <= bb.Max.Y]
+        if inside:
+            inside.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
+            out.append((u'分区「%s」的井大样（%d 张）' % (nm, len(inside)), inside))
+    return out
+
+
 def _scope_items(sheets_all, well_sheets, mk_of):
     """范围下拉框：(显示文字, 图纸列表)。"""
     items = []
@@ -680,6 +722,7 @@ def _scope_items(sheets_all, well_sheets, mk_of):
         if _indoor:
             items.append((u'井大样 室内井（%d 张）' % len(_indoor), _indoor))
         items.append((u'全部井大样图纸（%d 张）' % len(well_sheets), list(well_sheets)))
+    items.extend(_zone_scope_items(sheets_all, well_sheets))
     # 按 Revit 图集（图纸集合）分组：每个图集一项，图集里的图纸按图号排好
     _cols = {}
     _order = []

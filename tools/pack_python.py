@@ -8,7 +8,7 @@ SRC = pathlib.Path(r"C:\Users\PCB\Documents\revit_chajian\Antigravity.extension\
 OUT = pathlib.Path(__file__).resolve().parent.parent / "dist"
 VERSION = "0.1.0"
 # 单独升级过的插件（其余仍用上面的 VERSION）
-VERSION_OVERRIDE = {"control-points": "0.1.1", "export-dwg": "0.5.0", "export-nwc": "0.3.0", "family-param-dim": "0.1.2",
+VERSION_OVERRIDE = {"control-points": "0.1.1", "export-dwg": "0.5.1", "export-nwc": "0.3.0", "family-param-dim": "0.1.2",
                     "pile-cushion": "0.5.0", "quantity-export": "0.4.1", "rebar-3d-view": "0.2.0", "rebar-cage": "0.3.0",
                     "sheet-organize": "0.6.6", "sheet-preview": "0.1.1", "well-annotate": "0.3.38", "well-audit": "0.2.0",
                     "well-config": "0.1.1", "well-family-guard": "0.1.2", "well-number": "0.3.0",
