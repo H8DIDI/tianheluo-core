@@ -14,7 +14,7 @@
 | [`duct-elev`](duct-elev/) | 排管标高批量调整 | 0.2.2 | Python | didi | MIT |
 | [`duct-route`](duct-route/) | 排管竖向避让优化 | 0.1.6 | C#（源码在 `plugins/`） | didi | MIT |
 | [`duct-snap`](duct-snap/) | 排管贴井内壁 | 0.1.9 | C#（源码在 `plugins/`） | didi | MIT |
-| [`export-dwg`](export-dwg/) | 一键导出图纸DWG/PDF | 0.5.3 | Python | didi | MIT |
+| [`export-dwg`](export-dwg/) | 一键导出图纸DWG/PDF | 0.6.0 | Python | didi | MIT |
 | [`export-nwc`](export-nwc/) | 一键导出NWC | 0.3.0 | Python | didi | MIT |
 | [`family-param-dim`](family-param-dim/) | 族尺寸参数化 | 0.1.2 | Python | didi | MIT |
 | [`issue-manager`](issue-manager/) | 图纸签发管理 | 0.2.1 | Python | lewismconte (Sendit) | MIT |

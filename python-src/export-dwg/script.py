@@ -660,6 +660,75 @@ def _sheet_plan_center(sheet):
     return None
 
 
+def _well_zone_param_name():
+    """井分区标记插件写分区用的参数名（文档\\KaifaTools\\井分区配置.json 的 param），没有就用「分区」。"""
+    try:
+        import json
+        p = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
+                         u'KaifaTools', u'井分区配置.json')
+        with io.open(p, encoding='utf-8-sig') as fh:
+            return json.load(fh).get(u'param') or u'分区'
+    except Exception:
+        return u'分区'
+
+
+def _well_zone_items(sheets_all, well_sheets):
+    """按井的「分区」参数分组（井分区标记插件写的，如 A栋南侧、B栋北侧）：
+    每个分区一项，里面是这个分区的井对应的井大样图纸。图纸对应哪口井：
+    取图纸上第一个平面视图裁剪框中心最近的那口井（相距 10 米内才算）。"""
+    cand = list(well_sheets)
+    seen = set(x.Id.Value for x in cand)
+    for x in sheets_all:
+        if x.Id.Value not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
+            cand.append(x)
+    if not cand:
+        return []
+    pname = _well_zone_param_name()
+    wells = []
+    for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().ToElements():
+        try:
+            mk = e.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
+            if mk is None or not (mk.AsString() or u'').strip():
+                continue
+            loc = e.Location
+            if not isinstance(loc, DB.LocationPoint):
+                continue
+            zp = e.LookupParameter(pname)
+            z = (zp.AsString() or u'').strip() if (zp is not None and zp.StorageType == DB.StorageType.String) else u''
+            wells.append((loc.Point.X, loc.Point.Y, z))
+        except Exception:
+            continue
+    if not wells:
+        return []
+    maxd2 = (10000.0 / 304.8) ** 2
+    groups = {}
+    nomatch = []
+    for s in cand:
+        c = _sheet_plan_center(s)
+        best, bd = None, None
+        if c is not None:
+            for (x, y, z) in wells:
+                d2 = (x - c[0]) ** 2 + (y - c[1]) ** 2
+                if bd is None or d2 < bd:
+                    bd, best = d2, z
+        if best is None or bd > maxd2:
+            nomatch.append(s)
+        else:
+            groups.setdefault(best, []).append(s)
+    out = []
+    # 井上出现过的所有分区都列出来（没有井大样图的显示 0 张），免得找不到某个分区
+    all_zones = set(z for (_x, _y, z) in wells if z) | set(k for k in groups if k)
+    for z in sorted(all_zones, key=lambda t: wcfg_natural_key(t)):
+        ss = sorted(groups.get(z, []), key=lambda x: wcfg_natural_key(x.SheetNumber))
+        out.append((u'井分区「%s」的井大样（%d 张）' % (z, len(ss)), ss))
+    if groups.get(u''):
+        ss = sorted(groups[u''], key=lambda x: wcfg_natural_key(x.SheetNumber))
+        out.append((u'井分区：未分区的井大样（%d 张）' % len(ss), ss))
+    if nomatch:
+        out.append((u'井分区：找不到对应井的井大样（%d 张）' % len(nomatch), nomatch))
+    return out
+
+
 def _zone_scope_items(sheets_all, well_sheets):
     """按范围框分区：每个范围框一项，里面是「平面视图裁剪框中心落在这个范围框里」的井大样图纸。
     范围框用它的外包盒判断（斜放的范围框边缘可能多选，导出前请看一眼清单）。"""
@@ -685,7 +754,7 @@ def _zone_scope_items(sheets_all, well_sheets):
         inside.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
         in_any.update(x.Id.Value for x in inside)
         # 所有范围框都列出来（0 张的也列，选了会提示没有图纸），免得看不到某个分区
-        out.append((u'分区「%s」的井大样（%d 张）' % (nm, len(inside)), inside))
+        out.append((u'范围框「%s」的井大样（%d 张）' % (nm, len(inside)), inside))
     rest = [s for s, c in centers if s.Id.Value not in in_any]
     if rest:
         rest.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
@@ -716,6 +785,10 @@ def _scope_items(sheets_all, well_sheets, mk_of):
     elif isinstance(av, DB.ViewSheet) and not picked:
         items.append((u'当前图纸「%s %s」' % (av.SheetNumber, av.Name), [av]))
     # 按范围框分区的项放在最前面（下拉框默认只显示几行，放后面要滚很久才看得到）
+    try:
+        items.extend(_well_zone_items(sheets_all, well_sheets))
+    except Exception as _ex:
+        items.append((u'（按井分区的项生成失败：%s）' % _ex, []))
     try:
         items.extend(_zone_scope_items(sheets_all, well_sheets))
     except Exception as _ex:
