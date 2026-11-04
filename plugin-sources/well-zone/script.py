@@ -3,8 +3,8 @@ from __future__ import unicode_literals
 __title__ = '井分区\n标记'
 __author__ = 'didi'
 __doc__ = ('给井分区：在视图里框选一批井，写入「分区」参数（可新建参数，如 分区、施工批次），整次可 Ctrl+Z 撤销。\n'
-           '窗口里列出所有已写入的分区和井数，每个分区一个勾：去掉勾，这个分区的井在当前视图里就不显示；每个分区有自己的颜色，'
-           '点「当前视图配色」就在当前视图里按分区着色（用视图过滤器，只作用当前视图，不改井本身，删掉过滤器即可还原）。\n'
+           '窗口里列出所有已写入的分区和井数，每个分区一个勾：去掉勾，这个分区的井在当前视图里就不显示；每个分区有自己的颜色。'
+           '勾选只是记下，点「应用到当前视图」才一次性生效（按分区着色并显隐；用视图过滤器，只作用当前视图，不改井本身，删掉过滤器即可还原）。\n'
            '写入前先预览（共几口井、其中几口已有分区会被覆盖）。「生成明细表」按分区分组排序，每个分区带井数小计。\n'
            '井按「常规模型 + 有标记」识别。')
 
@@ -761,10 +761,16 @@ def list_params():
     return sorted(set(out))
 
 
+_PID_CACHE = {}
+
+
 def param_id(name):
+    if name in _PID_CACHE:
+        return _PID_CACHE[name]
     for p in DB.FilteredElementCollector(doc).OfClass(DB.ParameterElement).ToElements():
         try:
             if p.GetDefinition().Name == name:
+                _PID_CACHE[name] = p.Id
                 return p.Id
         except Exception:
             continue
@@ -922,15 +928,23 @@ def ensure_filter(pname, value, flts):
     return f
 
 
+_SOLID_CACHE = []
+
+
 def _solid_fill_id():
+    if _SOLID_CACHE:
+        return _SOLID_CACHE[0]
+    found = DB.ElementId.InvalidElementId
     for fp in DB.FilteredElementCollector(doc).OfClass(DB.FillPatternElement).ToElements():
         try:
             pat = fp.GetFillPattern()
             if pat.IsSolidFill and pat.Target == DB.FillPatternTarget.Drafting:
-                return fp.Id
+                found = fp.Id
+                break
         except Exception:
             continue
-    return DB.ElementId.InvalidElementId
+    _SOLID_CACHE.append(found)
+    return found
 
 
 def view_ok(v):
@@ -945,8 +959,12 @@ def view_ok(v):
     return True, ''
 
 
+_APPLIED = {}    # (视图Id, 参数名, 分区值) -> (是否显示, 颜色)：上次已设成这样的就不再重设，少触发一次视图重算
+
+
 def apply_view(pname, zones, cfg, only=None):
-    """zones: {分区值: 是否显示}。只作用当前视图：加过滤器、设颜色、设可见性。only 指定时只处理这一个分区。"""
+    """zones: {分区值: 是否显示}。只作用当前视图：加过滤器、设颜色、设可见性。only 指定时只处理这一个分区。
+    只改有变化的分区，整批一个事务、最后只刷新一次。"""
     v = uidoc.ActiveView
     ok, why = view_ok(v)
     if not ok:
@@ -962,10 +980,15 @@ def apply_view(pname, zones, cfg, only=None):
                 continue
             f = ensure_filter(pname, val, flts)
             fid = _idv(f.Id)
+            r, g, b = color_of(cfg, pname, val) if val else (150, 150, 150)
+            state = (bool(show), (r, g, b))
+            ckey = (_idv(v.Id), pname, val)
+            if fid in have and _APPLIED.get(ckey) == state:
+                continue
             if fid not in have:
                 v.AddFilter(f.Id)
                 have.add(fid)
-            r, g, b = color_of(cfg, pname, val) if val else (150, 150, 150)
+            _APPLIED[ckey] = state
             col = DB.Color(r, g, b)
             og = DB.OverrideGraphicSettings()
             og.SetProjectionLineColor(col)
@@ -981,6 +1004,7 @@ def apply_view(pname, zones, cfg, only=None):
     except Exception as ex:
         if t.HasStarted() and not t.HasEnded():
             t.RollBack()
+        _APPLIED.clear()
         return '当前视图设置失败：{}'.format(ex)
     try:
         uidoc.RefreshActiveView()
@@ -1140,7 +1164,7 @@ def main_dialog(st):
     info.ForeColor = SD.Color.FromArgb(90, 90, 90)
 
     b_color = WF.Button(); b_color.Text = '改所选分区颜色'; b_color.Location = SD.Point(16, 500); b_color.Size = SD.Size(110, 30)
-    b_apply = WF.Button(); b_apply.Text = '当前视图配色'; b_apply.Location = SD.Point(134, 500); b_apply.Size = SD.Size(110, 30)
+    b_apply = WF.Button(); b_apply.Text = '应用到当前视图'; b_apply.Location = SD.Point(134, 500); b_apply.Size = SD.Size(110, 30)
     b_sch = WF.Button(); b_sch.Text = '生成明细表'; b_sch.Location = SD.Point(252, 500); b_sch.Size = SD.Size(110, 30)
     b_close = WF.Button(); b_close.Text = '关闭'; b_close.Location = SD.Point(394, 500); b_close.Size = SD.Size(110, 30)
     for b in (b_color, b_apply, b_sch, b_close):
@@ -1229,16 +1253,10 @@ def main_dialog(st):
     def on_check(s, e):
         if busy[0] or not ready[0] or not lv.Focused:    # 只响应用户在列表里的点击
             return
-        k = e.Item.Tag
-        st['show'][k] = bool(e.Item.Checked)
-        msg = apply_view(st['param'], {k: bool(e.Item.Checked)}, cfg, only=k)
-        save_cfg(cfg)
-        if msg:
-            busy[0] = True
-            e.Item.Checked = not e.Item.Checked
-            st['show'][k] = bool(e.Item.Checked)
-            busy[0] = False
-            info.Text = msg
+        # 只记状态，不在这里改视图：每改一次视图 Revit 都要把整个视图重新过一遍过滤器，勾几个就排几轮。
+        # 勾完点「应用到当前视图」，一次性处理。
+        st['show'][e.Item.Tag] = bool(e.Item.Checked)
+        info.Text = '勾选已记下，还没改视图。勾完点「应用到当前视图」一次生效。'
 
     def on_color(s, e):
         if lv.SelectedItems.Count == 0 or not lv.SelectedItems[0].Tag:
@@ -1258,9 +1276,17 @@ def main_dialog(st):
         zones = {}
         for it in lv.Items:
             zones[it.Tag] = bool(it.Checked)
-        msg = apply_view(st['param'], zones, cfg)
+        info.Text = '正在应用到当前视图，视图大的话要等一会儿，请不要重复点击…'
+        info.Refresh()
+        b_apply.Enabled = False
+        f.Cursor = WF.Cursors.WaitCursor
+        try:
+            msg = apply_view(st['param'], zones, cfg)
+        finally:
+            f.Cursor = WF.Cursors.Default
+            b_apply.Enabled = True
         save_cfg(cfg)
-        info.Text = msg or '已在当前视图按分区着色（视图过滤器，名称以「' + FILTER_PREFIX + '」开头；删掉这些过滤器即可还原）。'
+        info.Text = msg or '已应用到当前视图：按分区着色并按勾选显隐（视图过滤器，名称以「' + FILTER_PREFIX + '」开头；删掉这些过滤器即可还原）。'
 
     def on_sch(s, e):
         if not st['param']:

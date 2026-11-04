@@ -53,4 +53,4 @@
 | [`well-sheets`](well-sheets/) | 一键井展开图 | 0.5.14 | Python | didi | MIT |
 | [`well-spec-table`](well-spec-table/) | 井规格表 | 0.1.5 | Python | didi | MIT |
 | [`well-sync`](well-sync/) | 井大样变动同步 | 0.1.0 | Python | didi | MIT |
-| [`well-zone`](well-zone/) | 井分区标记 | 0.1.5 | Python | didi | MIT |
+| [`well-zone`](well-zone/) | 井分区标记 | 0.1.6 | Python | didi | MIT |
