@@ -29,7 +29,7 @@
 | [`mep-restore`](mep-restore/) | 管线还原 | 0.1.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`pile-cushion`](pile-cushion/) | 一键布置松木桩垫层 | 0.5.0 | Python | didi | MIT |
 | [`plan-batch`](plan-batch/) | 批量生成平面图 | 0.2.1 | C#（源码在 `plugins/`） | didi | MIT |
-| [`quantity-export`](quantity-export/) | 框选提量导出Excel | 0.4.1 | Python | didi | MIT |
+| [`quantity-export`](quantity-export/) | 框选提量导出Excel | 0.4.2 | Python | didi | MIT |
 | [`rebar-3d-view`](rebar-3d-view/) | 一键钢筋三维实体显示 | 0.2.0 | Python | didi | MIT |
 | [`rebar-cage`](rebar-cage/) | 一键单构件快速配筋 | 0.3.0 | Python | didi | MIT |
 | [`rfi-pack`](rfi-pack/) | RFI 取证包 | 0.1.0 | Python | didi | MIT |

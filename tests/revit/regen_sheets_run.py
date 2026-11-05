@@ -55,6 +55,8 @@ class _MB(object):
     @staticmethod
     def Show(*a):
         btn = a[2] if len(a) > 2 else None
+        if btn == WF.MessageBoxButtons.YesNoCancel and REQ.get('yesnocancel') == 'No':
+            return WF.DialogResult.No          # 一键井大样标注：「否」= 已有尺寸的视图也补标（同位置不重复）
         return WF.DialogResult.Yes if btn in (WF.MessageBoxButtons.YesNo, WF.MessageBoxButtons.YesNoCancel) else WF.DialogResult.OK
 
 

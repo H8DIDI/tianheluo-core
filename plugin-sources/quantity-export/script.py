@@ -999,13 +999,40 @@ def _mark(e):
         return u''
 
 
-def _is_well(e):
-    """井：常规模型族实例，标记（井号）属于配置里的某个井系列。"""
+def _rain_label():
+    """雨水井统一归到配置里的 Y 系列名（默认「Y- 雨水井」），没有 Y 系列就叫「雨水井」。"""
+    for s in WCFG.get(u'series') or []:
+        if s.get(u'prefix') == u'Y':
+            return s.get(u'label') or u'雨水井'
+    return u'雨水井'
+
+
+def _well_label(e):
+    """井的系列名；不是井返回 None。
+    先看族名：族名含「雨水」的一律算雨水井（雨水井的编号五花八门：A1、BB24、QBJ-2、59、CF1-BB74，
+    不能靠井号认，否则 A1/BB24 这类会被丢掉）；再看井号是否属于某个井系列（A-01、T-068…）；
+    都不是但族名含「井」的（排水井、阀门井…）按族名归类，井号空的也算。"""
     try:
-        return (isinstance(e, DB.FamilyInstance) and _eid(e.Category.Id) == int(DB.BuiltInCategory.OST_GenericModel)
-                and wcfg_series_of(_mark(e), WCFG, True) is not None)
+        if not isinstance(e, DB.FamilyInstance) or _eid(e.Category.Id) != int(DB.BuiltInCategory.OST_GenericModel):
+            return None
+        f = _ftname(e)[0]
+        if u'雨水' in f:
+            return _rain_label()
+        sr = wcfg_series_of(_mark(e), WCFG, True)
+        if sr is not None:
+            return sr[u'label']
+        if u'井' in f and u'图框' not in f:
+            for k in (u'排水', u'阀门', u'检查', u'污水', u'化粪', u'消防', u'给水'):
+                if k in f:
+                    return k + u'井'
+            return f
     except Exception:
-        return False
+        pass
+    return None
+
+
+def _is_well(e):
+    return _well_label(e) is not None
 
 
 def _ftname(e):
@@ -1202,10 +1229,15 @@ def _material_name(e):
     return u''
 
 
+_DROPPED = [0]      # 选中了但不在提量范围里的构件数（窗口标题里写出来，不悄悄丢）
+
+
 def _pick_elements(sel_ids):
     """要统计的构件：有选中就用选中的；没有就问：现在框选 / 整个项目 / 当前视图。取消返回 (None, None)。"""
     if sel_ids:
-        elems = [e for e in (doc.GetElement(i) for i in sel_ids) if _is_qto(e)]
+        got = [doc.GetElement(i) for i in sel_ids]
+        elems = [e for e in got if _is_qto(e)]
+        _DROPPED[0] = len(got) - len(elems)
         return elems, u'框选的构件'
     options = [u'现在框选', u'整个项目', u'当前视图']
     pick = forms.CommandSwitchWindow.show(options, message=u'没有选中构件，统计哪个范围？')
@@ -1216,7 +1248,9 @@ def _pick_elements(sel_ids):
             got = list(uidoc.Selection.PickElementsByRectangle(_QtoFilter(), u'框选要统计的构件（梁柱墙板基础、钢筋、井、排管、导管、松木桩、垫层），框完点 Finish'))
         except Exception:
             return None, None
-        return [e for e in got if _is_qto(e)], u'框选的构件'
+        elems = [e for e in got if _is_qto(e)]
+        _DROPPED[0] = len(got) - len(elems)
+        return elems, u'框选的构件'
     if pick == u'当前视图':
         col = DB.FilteredElementCollector(doc, uidoc.ActiveView.Id)
         src = u'当前视图'
@@ -1323,6 +1357,7 @@ def _merge_z(row, i, lo, hi):
 
 
 _WELL_LW = re.compile(u'(\\d+)\\s*\\(L\\)\\s*x\\s*(\\d+)\\s*\\(W\\)')
+_WELL_LW2 = re.compile(u'(\\d{3,5})\\s*[xX×]\\s*(\\d{3,5})')      # 类型名「2300x2300」「2300x2300-4500」
 _THICK = re.compile(u'(\\d+)\\s*mm\\s*厚')
 
 
@@ -1384,11 +1419,10 @@ def _add_one(e, res):
     c = _eid(e.Category.Id)
     if c == int(DB.BuiltInCategory.OST_GenericModel):          # 井
         mk = _mark(e)
-        sr = wcfg_series_of(mk, WCFG, True)
         f, t = _ftname(e)
-        m = _WELL_LW.search(t) or _WELL_LW.search(f)
+        m = _WELL_LW.search(t) or _WELL_LW.search(f) or _WELL_LW2.search(t)
         bot, top = _well_elev_m(e)
-        res['wells'].append((mk, sr[u'label'] if sr else u'其他', f, t, _depth_mm(e), e.Id.Value,
+        res['wells'].append((mk, _well_label(e) or u'其他', f, t, _depth_mm(e), e.Id.Value,
                              int(m.group(1)) if m else None, int(m.group(2)) if m else None, bot, top))
         return
     if c == int(DB.BuiltInCategory.OST_Conduit) or (c == int(DB.BuiltInCategory.OST_StructuralFraming) and _is_bank(e)):
@@ -1799,7 +1833,14 @@ def main():
         tables, summary = _table_rows(res)
         if res['skipped']:
             forms.alert(u'有 %d 个构件读取失败，已跳过。' % res['skipped'], title=TITLE)
-        _show_window(tables, summary, u'%s（%d 个构件%s）' % (src_txt, len(elems), (u'，已排除场地楼板 %d 块' % summary['excluded']) if summary['excluded'] else u''), res)
+        extra = u''
+        if summary['wells']:
+            extra += u'，其中井 %d 口' % summary['wells']
+        if summary['excluded']:
+            extra += u'，已排除场地楼板 %d 块' % summary['excluded']
+        if _DROPPED[0]:
+            extra += u'，另有 %d 个选中的不在提量范围（未统计）' % _DROPPED[0]
+        _show_window(tables, summary, u'%s（%d 个构件%s）' % (src_txt, len(elems), extra), res)
     except Exception as e:
         forms.alert(u'提量过程发生异常：\n%s\n\n%s' % (e, traceback.format_exc()), title=TITLE)
 
