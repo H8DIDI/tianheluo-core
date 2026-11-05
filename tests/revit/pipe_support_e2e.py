@@ -107,6 +107,7 @@ try:
     dss = [e for e in DB.FilteredElementCollector(d).OfClass(DB.DirectShape) if e.ApplicationId == 'PipeSupportPlugin']
     piers = [e for e in dss if _comment(e).startswith(u'管道支墩')]
     pads = [e for e in dss if not _comment(e).startswith(u'管道支墩')]
+    check(u'备注里没有「宿主」（不被松木桩隐藏过滤器藏掉）', not any(u'宿主' in _comment(e) for e in dss))
     check(u'模型里墩与垫层数量对', len(piers) == stats['piers'] and len(pads) == stats['pads'], u'%d/%d' % (len(piers), len(pads)))
 
     # 几何：墩底 = 最低管底 - 300，墩顶 = 最低管中心，挖了管座（体积 < 方墩）

@@ -36,6 +36,7 @@ RULES_DIR = os.path.join(System.Environment.GetFolderPath(System.Environment.Spe
 RULES_PATH = os.path.join(RULES_DIR, u"管道支墩规则.json")
 LOG_PATH = os.path.join(RULES_DIR, u"管道支墩日志.txt")
 PIPE_CAT = int(DB.BuiltInCategory.OST_PipeCurves)
+# 备注里不能出现「宿主」：松木桩插件的隐藏过滤器按「宿主」隐藏结构基础，会把支墩一起藏掉
 PIER_TAG = u"管道支墩"
 PAD_TAG = u"支墩垫层"
 
@@ -688,12 +689,12 @@ def create_pier(st, r, mat_id):
     made = 0
     if pier is not None and pier.Volume > 1e-6:
         _ds(pier, u"%s %s" % (PIER_TAG, tag),
-            u"%s %s (%s) | 宿主: 管道 (Id:%s)" % (PIER_TAG, tag, _desc(st), hosts),
+            u"%s %s (%s) | 所属管道 (Id:%s)" % (PIER_TAG, tag, _desc(st), hosts),
             u"Pier_Host_%s_%s" % (hosts.replace(u",", u"_"), System.Guid.NewGuid()))
         made += 1
     if pad is not None and pad.Volume > 1e-6:
         _ds(pad, u"%s (%dmm厚, 外挑%dmm)" % (PAD_TAG, round(r["pad_thick_mm"]), round(r["pad_overhang_mm"])),
-            u"%s %d厚 | 宿主: 管道 (Id:%s)" % (PAD_TAG, round(r["pad_thick_mm"]), hosts),
+            u"%s %d厚 | 所属管道 (Id:%s)" % (PAD_TAG, round(r["pad_thick_mm"]), hosts),
             u"Pad_Host_%s_%s" % (hosts.replace(u",", u"_"), System.Guid.NewGuid()))
         made += 1
     return made, saddle, dims
