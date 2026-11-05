@@ -6,7 +6,7 @@ __doc__ = ("一键布置明装管道（HDPE / MSCL）的混凝土支墩与垫层
            "先框选要布置的明装管道再点插件（没选就先框选一次）。并排同走向的管自动合成一组，共用一个统一墩。\n"
            "间距按规则表：单根 HDPE、单根 MSCL 各一张表，MSCL + HDPE 混合组按 HDPE 管径查统一墩表；超出表格的管径先跳过并列出。\n"
            "支墩：沿管长 200，管外两侧各外延 100，管底以下 300，向上做到管中心，管座按管外径挖弧槽；"
-           "垫层：支墩四周各外延 100，厚 100。\n"
+           "地面（地形实体）更低的，墩加高落到地面。垫层：支墩四周各外延 100，厚 100。\n"
            "重新布置时先删这些管上旧的支墩和垫层；另有「删除选中管道的支墩」。规则运行前可改并保存。")
 
 import math
@@ -615,6 +615,8 @@ DEFAULT_RULES = {
     "group_gap_mm": 200.0,       # 两根管外壁净距不超过这个才算并排同组
     "group_dz_mm": 150.0,        # 同组管底高差上限
     "min_pier_gap_mm": 600.0,    # 两个墩中心距小于这个只留一个
+    "to_ground": True,           # 地面（地形实体顶面）比「管底 - 300」低时，墩底做到地面
+    "ground_max_mm": 3000.0,     # 最多加高这么多；地面更低的不加高，列入提示
     "hdpe_keys": [u"HDPE", u"PE"],
     "mscl_keys": [u"MSCL"],
     "mix_cap_by_hdpe": True,     # 混合组间距不超过组里最小 HDPE 的单管间距
@@ -712,7 +714,7 @@ FIELDS = [
     {"kind": "header", "label": u"支墩与垫层尺寸（mm）"},
     {"key": "pier_len_mm", "label": u"支墩沿管长", "kind": "num", "min": 50, "max": 2000},
     {"key": "pier_side_mm", "label": u"管外两侧外延", "kind": "num", "min": 0, "max": 1000},
-    {"key": "pier_below_mm", "label": u"管底以下厚度", "kind": "num", "min": 50, "max": 3000},
+    {"key": "pier_below_mm", "label": u"管底以下厚度（最少）", "kind": "num", "min": 50, "max": 3000},
     {"key": "gasket_mm", "label": u"橡胶垫厚度", "kind": "num", "min": 0, "max": 50,
      "hint": u"管座弧槽半径 = 管外径/2 + 垫厚；填 0 就是混凝土直接贴管。"},
     {"key": "pad_overhang_mm", "label": u"垫层四周外延", "kind": "num", "min": 0, "max": 1000},
@@ -725,6 +727,11 @@ FIELDS = [
     {"key": "group_dz_mm", "label": u"同组管底最大高差", "kind": "num", "min": 0, "max": 1000},
     {"key": "min_pier_gap_mm", "label": u"两墩最小中心距", "kind": "num", "min": 100, "max": 5000,
      "hint": u"比这个近的两个墩只留一个（保留覆盖管子多的那个）。"},
+    {"key": "to_ground", "label": u"墩底做到地面", "kind": "bool",
+     "bool_text": u"地形实体顶面比「管底 − 管底以下厚度」低时，墩加高落到地面",
+     "hint": u"按墩四角和中心下面的地形实体取最低点；墩下没有地形实体的不加高。"},
+    {"key": "ground_max_mm", "label": u"最多加高", "kind": "num", "min": 0, "max": 20000,
+     "hint": u"地面比这还低的墩不加高（照常管底以下 300），完成后列出数量。"},
     {"kind": "header", "label": u"管材识别（类型名 / 管段名里包含，逗号分隔，不分大小写）"},
     {"key": "hdpe_keys", "label": u"算作 HDPE", "kind": "list"},
     {"key": "mscl_keys", "label": u"算作 MSCL", "kind": "list"},
@@ -1068,7 +1075,101 @@ def pier_dims(st, r):
     vmax = max(b for a, b in vs) + side
     zb = min(zbs) - r["pier_below_mm"] * MM
     zt = min(zcs)
+    g = st.get('ground')
+    if r.get("to_ground", True) and g is not None and g < zb and (zb - g) <= r.get("ground_max_mm", 3000.0) * MM:
+        zb = g
     return (vmin + vmax) / 2.0, vmax - vmin, zb, zt
+
+
+def pier_corners(st, r):
+    """墩平面四角 + 中心（世界坐标 XY）。"""
+    g = st.pop('ground', None)
+    vc, W, zb, zt = pier_dims(st, r)
+    if g is not None:
+        st['ground'] = g
+    half = r["pier_len_mm"] * MM / 2.0
+    pts = [_world(st['origin'], st['ax'], st['t'], vc, 0)]
+    for du in (-half, half):
+        for dv in (-W / 2.0, W / 2.0):
+            pts.append(_world(st['origin'], st['ax'], st['t'] + du, vc + dv, 0))
+    return pts, zb
+
+
+# ============================================================
+# 地面：地形实体朝上的面，分桶；竖线求交取最高点
+# ============================================================
+GROUND_CELL = 20.0 / 0.3048
+
+
+def build_ground():
+    faces, grid = [], {}
+    for t in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_Toposolid).WhereElementIsNotElementType():
+        try:
+            geo = t.get_Geometry(DB.Options())
+        except Exception:
+            continue
+        for o in geo or []:
+            if not isinstance(o, DB.Solid):
+                continue
+            for f in o.Faces:
+                try:
+                    bb = f.GetBoundingBox()
+                    nrm = f.ComputeNormal((bb.Min + bb.Max) * 0.5)
+                    if nrm.Z <= 0.2:
+                        continue
+                    vs = list(f.Triangulate().Vertices)
+                except Exception:
+                    continue
+                if not vs:
+                    continue
+                box = (min(v.X for v in vs), min(v.Y for v in vs), max(v.X for v in vs), max(v.Y for v in vs))
+                faces.append((box, f))
+    for i, (box, f) in enumerate(faces):
+        for gx in range(int(math.floor(box[0] / GROUND_CELL)), int(math.floor(box[2] / GROUND_CELL)) + 1):
+            for gy in range(int(math.floor(box[1] / GROUND_CELL)), int(math.floor(box[3] / GROUND_CELL)) + 1):
+                grid.setdefault((gx, gy), []).append(i)
+    return faces, grid
+
+
+def ground_at(gd, x, y):
+    """(x, y) 处地形实体顶面标高（ft）；下面没有地形实体返回 None。"""
+    faces, grid = gd
+    best = None
+    for i in grid.get((int(math.floor(x / GROUND_CELL)), int(math.floor(y / GROUND_CELL))), []):
+        box, f = faces[i]
+        if not (box[0] <= x <= box[2] and box[1] <= y <= box[3]):
+            continue
+        ra = clr.Reference[DB.IntersectionResultArray]()
+        try:
+            res = f.Intersect(DB.Line.CreateBound(DB.XYZ(x, y, -3000.0), DB.XYZ(x, y, 3000.0)), ra)
+        except Exception:
+            continue
+        if res == DB.SetComparisonResult.Overlap and ra.Value is not None:
+            for k in range(ra.Value.Size):
+                z = ra.Value.get_Item(k).XYZPoint.Z
+                if best is None or z > best:
+                    best = z
+    return best
+
+
+def attach_ground(stations, r, gd):
+    """每个墩记下墩下地面最低点；返回 (加高的墩数, 地面太低没加高的墩数)。"""
+    up = deep = 0
+    if not r.get("to_ground", True) or not gd[0]:
+        return 0, 0
+    for st in stations:
+        pts, zb = pier_corners(st, r)
+        gs = [g for g in (ground_at(gd, p.X, p.Y) for p in pts) if g is not None]
+        if not gs:
+            continue
+        g = min(gs)
+        if g < zb - 1e-6:
+            if (zb - g) <= r.get("ground_max_mm", 3000.0) * MM:
+                st['ground'] = g
+                up += 1
+            else:
+                deep += 1
+    return up, deep
 
 
 def _box(origin, ax, t, half_len, vc, half_w, z0, h, opts):
@@ -1284,7 +1385,12 @@ def plan(elems, r, avoid=None):
         sts, sk = plan_group(g, r, avoid)
         stations.extend(sts)
         blocked += sk
-    return {'pipes': pipes, 'skipped': skipped, 'groups': groups, 'stations': stations, 'blocked': blocked}
+    up, deep = attach_ground(stations, r, build_ground()) if stations and r.get("to_ground", True) else (0, 0)
+    return {'pipes': pipes, 'skipped': skipped, 'groups': groups, 'stations': stations, 'blocked': blocked,
+            'raised': up, 'too_deep': deep}
+
+
+CHUNK = 500
 
 
 def execute(pl, r, old):
@@ -1298,7 +1404,11 @@ def execute(pl, r, old):
             ids = List[DB.ElementId]([e.Id for e in old])
             doc.Delete(ids)
             stats['deleted'] = len(old)
-        for st in pl['stations']:
+        for k, st in enumerate(pl['stations']):
+            if k and k % CHUNK == 0:          # 墩多时分批提交，避免一个事务太大
+                t.Commit()
+                t = _tx(TITLE)
+                t.Start()
             sub = DB.SubTransaction(doc)
             sub.Start()
             try:
@@ -1387,6 +1497,10 @@ def layout_flow():
          u"将生成支墩 %d 个%s。" % (len(pl['stations']), u"、垫层 %d 块" % len(pl['stations']) if r2["pad_thick_mm"] > 0 else u""),
          u"支墩：沿管长 %s，两侧外延 %s，管底以下 %s，做到管中心；垫层外延 %s、厚 %s（mm）。" % (
              _fmt(r2["pier_len_mm"]), _fmt(r2["pier_side_mm"]), _fmt(r2["pier_below_mm"]), _fmt(r2["pad_overhang_mm"]), _fmt(r2["pad_thick_mm"]))]
+    if pl.get('raised'):
+        q.append(u"地面比管底以下 %s 还低的墩 %d 个，加高落到地面。" % (_fmt(r2["pier_below_mm"]), pl['raised']))
+    if pl.get('too_deep'):
+        q.append(u"地面低于最多加高 %s 的墩 %d 个，不加高（照常管底以下 %s）。" % (_fmt(r2["ground_max_mm"]), pl['too_deep'], _fmt(r2["pier_below_mm"])))
     if pl['blocked']:
         q.append(u"压在管件 / 阀门上、挪 1 m 内也避不开的墩位 %d 个，不布置。" % pl['blocked'])
     if old:

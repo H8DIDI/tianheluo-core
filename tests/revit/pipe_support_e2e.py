@@ -166,6 +166,40 @@ try:
     dss2 = [e for e in DB.FilteredElementCollector(d).OfClass(DB.DirectShape) if e.ApplicationId == 'PipeSupportPlugin']
     check(u'重跑后不重复', len(dss2) == len(dss) and stats2['deleted'] == len(dss), u'%d -> %d' % (len(dss), len(dss2)))
 
+    # 墩底做到地面：在管子下面放一块地形实体，墩和垫层应落到地面
+    old = n['existing_supports'](ids_set)
+    allp = [p['a'] for p in pl['pipes']] + [p['b'] for p in pl['pipes']]
+    x0, x1 = min(q.X for q in allp) - 20, max(q.X for q in allp) + 20
+    y0, y1 = min(q.Y for q in allp) - 20, max(q.Y for q in allp) + 20
+    zmin_bot = min(min(p['a'].Z, p['b'].Z) - p['od'] / 2 for p in pl['pipes'])
+    lvl = DB.FilteredElementCollector(d).OfClass(DB.Level).FirstElement()
+    tt = DB.FilteredElementCollector(d).OfClass(DB.ToposolidType).FirstElementId()
+    tx = DB.Transaction(d, u'地形')
+    tx.Start()
+    loop = DB.CurveLoop()
+    pts = [DB.XYZ(x0, y0, 0), DB.XYZ(x1, y0, 0), DB.XYZ(x1, y1, 0), DB.XYZ(x0, y1, 0)]
+    for i in range(4):
+        loop.Append(DB.Line.CreateBound(pts[i], pts[(i + 1) % 4]))
+    topo = DB.Toposolid.Create(d, List[DB.CurveLoop]([loop]), tt, lvl.Id)
+    tx.Commit()
+    gtop = topo.get_BoundingBox(None).Max.Z
+    LOG.append(u'地形顶 %.0f，最低管底 %.0f' % (gtop * FT, zmin_bot * FT))
+    r3 = dict(r)
+    r3['ground_max_mm'] = 20000.0
+    n['RULES'].update(r3)
+    pl3 = n['plan'](pipes, r3)
+    check(u'全部墩都要加高到地面', pl3['raised'] == len(pl3['stations']), u'%d/%d' % (pl3['raised'], len(pl3['stations'])))
+    st3 = n['execute'](pl3, r3, old)
+    dss3 = [e for e in DB.FilteredElementCollector(d).OfClass(DB.DirectShape) if e.ApplicationId == 'PipeSupportPlugin']
+    pz = [e.get_BoundingBox(None).Min.Z for e in dss3 if _comment(e).startswith(u'管道支墩')]
+    dz = [e.get_BoundingBox(None).Min.Z for e in dss3 if not _comment(e).startswith(u'管道支墩')]
+    check(u'墩底 = 地面', pz and all(abs(z - gtop) * FT < 1 for z in pz), u'%.0f~%.0f' % (min(pz) * FT, max(pz) * FT))
+    check(u'垫层底 = 地面 - 100', dz and all(abs(z - gtop + 100 / FT) * FT < 1 for z in dz))
+    r4 = dict(r)
+    r4['ground_max_mm'] = 100.0
+    pl4 = n['plan'](pipes, r4)
+    check(u'超过最多加高的不加高', pl4['raised'] == 0 and pl4['too_deep'] == len(pl4['stations']))
+
     tb = n['parse_table']([u'DN50=0.9', u'100：1.3', u'300=2.5m'])
     check(u'表格解析', tb == {50: 900.0, 100: 1300.0, 300: 2500.0}, u'%s' % tb)
     check(u'查表：中间档取小、超出返回 None', n['lookup'](tb, 80) == 900.0 and n['lookup'](tb, 400) is None and n['lookup'](tb, 20) is None)
