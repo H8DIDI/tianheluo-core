@@ -241,6 +241,7 @@
       "group": "井与管线",
       "status": "tested"
     },
+    "pipe-support": {"group": "井与管线", "status": "beta"},
     "duct-route": {
       "group": "井与管线",
       "status": "beta"
