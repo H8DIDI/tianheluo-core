@@ -840,6 +840,58 @@ def _pt_mark(name):
 _PLAN_SRC = {}
 
 
+def _wall_angle(elem):
+    """井墙相对项目 X 轴的角度，折算到 (-45°, 45°]（弧度）。不是族实例或取不到方向时为 0。"""
+    try:
+        h = elem.HandOrientation
+        a = math.atan2(h.Y, h.X)
+    except Exception:
+        return 0.0
+    q = math.pi / 2
+    return ((a + q / 2) % q) - q / 2
+
+
+def _view_angle(view):
+    r = view.RightDirection
+    a = math.atan2(r.Y, r.X)
+    q = math.pi / 2
+    return ((a + q / 2) % q) - q / 2
+
+
+def _rotate_plan_crop(doc, view, center, th):
+    """把平面视图的裁剪区域绕井中心转 th，图纸上的井就是正的（与在 Revit 里手动旋转裁剪区域相同）。
+    裁剪区域元素在 API 里没有类别，是与视图同名的从属元素；逐个试，视图方向跟着转了的就是它。"""
+    axis = DB.Line.CreateBound(DB.XYZ(center.X, center.Y, center.Z), DB.XYZ(center.X, center.Y, center.Z + 1))
+    d = th - _view_angle(view)
+    if abs(d) < math.radians(0.2):
+        return True
+    doc.Regenerate()
+    cands = []
+    try:
+        ids = view.GetDependentElements(DB.ElementCategoryFilter(DB.BuiltInCategory.OST_CropBoundary))
+        cands += list(ids)
+    except Exception:
+        pass
+    for i in view.GetDependentElements(None):
+        e = doc.GetElement(i)
+        if e is not None and type(e).__name__ == 'Element' and e.Name == view.Name:
+            cands.append(i)
+    for ce in cands:
+        st = DB.SubTransaction(doc)
+        st.Start()
+        try:
+            DB.ElementTransformUtils.RotateElement(doc, ce, axis, d)
+            doc.Regenerate()
+            if abs(_view_angle(view) - th) < math.radians(0.2):
+                st.Commit()
+                return True
+            st.RollBack()
+        except Exception:
+            if st.HasStarted() and not st.HasEnded():
+                st.RollBack()
+    return False
+
+
 def _create_plan_view(doc, plan_type_id, level_id):
     if not _PLAN_SRC.get('_built'):
         _PLAN_SRC['_built'] = True
@@ -1553,7 +1605,13 @@ def main():
                         center_x = (bbox.Min.X + bbox.Max.X) / 2.0
                         center_y = (bbox.Min.Y + bbox.Max.Y) / 2.0
 
+                    # 2b. 井壁方向：井在平面里斜放时（如转了 8.7°），平面和四个立面都按井壁方向出图，
+                    #     图上的井是正的、剖切面平行井壁。角度折算到 (-45°, 45°]，不斜的井 = 0，与原来完全一样。
+                    wall_th = _wall_angle(elem)
+                    wc, wsn = math.cos(wall_th), math.sin(wall_th)
+
                     # 3. 平面外轮廓半长宽 (pit_dx, pit_dy)：从 Solid 真实顶点提取，消除 2D 符号线虚高
+                    #    （沿井自身的两个方向量取；井不斜时就是 X、Y）
                     pit_dx = (bbox.Max.X - bbox.Min.X) / 2.0
                     pit_dy = (bbox.Max.Y - bbox.Min.Y) / 2.0
                     try:
@@ -1585,15 +1643,19 @@ def main():
                                                     mesh = f.Triangulate()
                                                     if mesh:
                                                         for pt in mesh.Vertices:
-                                                            if pt.X < s_min_x: s_min_x = pt.X
-                                                            if pt.X > s_max_x: s_max_x = pt.X
-                                                            if pt.Y < s_min_y: s_min_y = pt.Y
-                                                            if pt.Y > s_max_y: s_max_y = pt.Y
+                                                            lx = pt.X * wc + pt.Y * wsn
+                                                            ly = -pt.X * wsn + pt.Y * wc
+                                                            if lx < s_min_x: s_min_x = lx
+                                                            if lx > s_max_x: s_max_x = lx
+                                                            if ly < s_min_y: s_min_y = ly
+                                                            if ly > s_max_y: s_max_y = ly
                             if found_s and s_max_x > s_min_x and s_max_y > s_min_y:
                                 pit_dx = (s_max_x - s_min_x) / 2.0
                                 pit_dy = (s_max_y - s_min_y) / 2.0
-                                center_x = (s_min_x + s_max_x) / 2.0
-                                center_y = (s_min_y + s_max_y) / 2.0
+                                _lcx = (s_min_x + s_max_x) / 2.0
+                                _lcy = (s_min_y + s_max_y) / 2.0
+                                center_x = _lcx * wc - _lcy * wsn
+                                center_y = _lcx * wsn + _lcy * wc
                     except:
                         pass
 
@@ -1630,6 +1692,9 @@ def main():
                                           center.Y + pit_dy + offset,
                                           center.Z + pit_dz + offset)
                         view_plan.CropBox = crop
+                        if abs(wall_th) > math.radians(0.2):
+                            if not _rotate_plan_crop(doc, view_plan, center, wall_th):
+                                _log(u'%s 斜井平面裁剪框旋转失败，平面按正南北出图' % base_name)
                         _pt_mark('plan_after_crop')
 
                         # 视图范围按标高的“相对项目基点高程”换算（ProjectElevation）。
@@ -1714,23 +1779,27 @@ def main():
 
                     # 北视图：BasisZ=(0,-1,0) 使局部 Z 的 Min 端位于北侧外墙外，观察者在北侧朝南看；
                     # BasisX=(1,0,0) → 视图 Right=(-1,0,0)，东在左。剖面框与南视图相同（外墙外 100mm 起算）。
+                    # 斜井：把下面的世界方向换成井自身的方向（U = 井的“东西”向，V = 井的“南北”向）
+                    _U = DB.XYZ(wc, wsn, 0)
+                    _V = DB.XYZ(-wsn, wc, 0)
+                    _UP = DB.XYZ(0, 0, 1)
                     view_back = create_elevation(
-                        DB.XYZ(0, -1, 0), DB.XYZ(0, 0, 1), DB.XYZ(1, 0, 0),
+                        _V.Negate(), _UP, _U,
                         "北", _z_near_ns, _z_near_ns + face_depth)
 
                     # 南立面 (下面)：观察者在南侧朝北看，ViewDirection=(0,-1,0)
                     view_front = create_elevation(
-                        DB.XYZ(0, 1, 0), DB.XYZ(0, 0, 1), DB.XYZ(-1, 0, 0),
+                        _V, _UP, _U.Negate(),
                         "南", _z_near_ns, _z_near_ns + face_depth)
 
                     # 西立面 (左边)：观察者在西侧朝东看，ViewDirection=(-1,0,0)
                     view_left = create_elevation(
-                        DB.XYZ(1, 0, 0), DB.XYZ(0, 0, 1), DB.XYZ(0, 1, 0),
+                        _U, _UP, _V,
                         "西", _z_near_ew, _z_near_ew + face_depth)
 
                     # 东立面 (右边)：观察者在东侧朝西看，ViewDirection=(1,0,0)
                     view_right = create_elevation(
-                        DB.XYZ(-1, 0, 0), DB.XYZ(0, 0, 1), DB.XYZ(0, -1, 0),
+                        _U.Negate(), _UP, _V.Negate(),
                         "东", _z_near_ew, _z_near_ew + face_depth)
 
                     all_views = [view_plan, view_front, view_back, view_left, view_right]
