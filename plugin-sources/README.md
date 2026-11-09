@@ -41,8 +41,8 @@
 | [`tag-check`](tag-check/) | 标注检查 | 0.2.1 | C#（源码在 `plugins/`） | didi | MIT |
 | [`tag-tidy`](tag-tidy/) | 构件标记一键整理 | 0.1.8 | Python | didi | MIT |
 | [`view-manager`](view-manager/) | 视图管理 | 0.2.1 | Python | lewismconte (Sendit) | MIT |
-| [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.38 | Python | didi | MIT |
-| [`well-audit`](well-audit/) | 井大样体检 | 0.2.0 | Python | didi | MIT |
+| [`well-annotate`](well-annotate/) | 一键井大样标注 | 0.3.39 | Python | didi | MIT |
+| [`well-audit`](well-audit/) | 井大样体检 | 0.2.1 | Python | didi | MIT |
 | [`well-config`](well-config/) | 井大样项目配置 | 0.1.1 | Python | didi | MIT |
 | [`well-depth`](well-depth/) | 井深调整 | 0.3.4 | C#（源码在 `plugins/`） | didi | MIT |
 | [`well-family-guard`](well-family-guard/) | 井族体检 | 0.1.2 | Python | didi | MIT |
@@ -53,5 +53,5 @@
 | [`well-sheet-no`](well-sheet-no/) | 井图号重编 | 0.1.7 | Python | didi | MIT |
 | [`well-sheets`](well-sheets/) | 一键井展开图 | 0.5.15 | Python | didi | MIT |
 | [`well-spec-table`](well-spec-table/) | 井规格表 | 0.1.5 | Python | didi | MIT |
-| [`well-sync`](well-sync/) | 井大样变动同步 | 0.1.0 | Python | didi | MIT |
+| [`well-sync`](well-sync/) | 井大样变动同步 | 0.1.1 | Python | didi | MIT |
 | [`well-zone`](well-zone/) | 井分区标记 | 0.1.6 | Python | didi | MIT |

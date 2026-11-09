@@ -763,16 +763,19 @@ def _annot_crop_on(view):
 def _crop_gap(view, p1, p2):
     """两个端点（已投影到视图平面）的水平、竖向坐标都要落在裁剪框内（各留 _CROP_TEXT_FT）。
     都在框内返回 None；否则返回缺口说明，如「下侧缺 350 mm」。只读，不改视图。"""
-    rng = crop_world_range(view)
-    if rng is None:
+    # 在裁剪框自己的局部坐标里比（X 向右、Y 向上）：斜放的视图按世界轴取包络会把框算大、漏报缺口
+    try:
+        cb = view.CropBox
+        inv = cb.Transform.Inverse
+        h0, h1 = min(cb.Min.X, cb.Max.X), max(cb.Min.X, cb.Max.X)
+        v0, v1 = min(cb.Min.Y, cb.Max.Y), max(cb.Min.Y, cb.Max.Y)
+    except:
         return None
-    fr = _frame(view)
-    h0, h1 = _rng_of(rng, fr['h'])
-    v0, v1 = _rng_of(rng, fr['v'])
     need = {}
     for p in (p1, p2):
-        ph = _coord(p, fr['h'])
-        pv = _coord(p, fr['v'])
+        q = inv.OfPoint(p)
+        ph = q.X
+        pv = q.Y
         for side, short in (('左侧', h0 + _CROP_TEXT_FT - ph), ('右侧', ph - (h1 - _CROP_TEXT_FT)),
                             ('下侧', v0 + _CROP_TEXT_FT - pv), ('上侧', pv - (v1 - _CROP_TEXT_FT))):
             if short > 0:
@@ -1842,6 +1845,21 @@ def make_cover_dims_rot(view, elems, ledger=None, stats=None, vertical=True):
 # ============================================================
 
 
+def _view_hd(view):
+    """立面/剖面视图的水平方向 R 与水平法线 D（单位向量，Z 分量为 0，R、D、Z 两两垂直）。"""
+    try:
+        r = view.RightDirection
+        R = DB.XYZ(r.X, r.Y, 0.0)
+        if R.GetLength() > 1e-6:
+            R = R.Normalize()
+            return R, DB.XYZ(-R.Y, R.X, 0.0)
+    except:
+        pass
+    fr = _frame(view)
+    R = _unit(fr['h'], 1)
+    return R, DB.XYZ(-R.Y, R.X, 0.0)
+
+
 def _rot_info(elems):
     """识别旋转井的局部坐标：返回 dict，找不到返回 None。
     a、b 为井自己的两个水平方向（单位向量，b = a 逆时针转 90°）；u = p·a、w = p·b 是局部坐标。
@@ -2135,10 +2153,12 @@ def _make_rotated_dims(view, elems, ledger=None, stats=None):
         return made, (None if made else '未生成尺寸')
 
     # ---------- 立面 ----------
-    h, d = fr['h'], fr['d']
+    # 用视图自己的水平方向（RightDirection）和法线投影，不能用世界 X/Y：
+    # 一键井展开图 0.5.15 起，斜放的井按井壁方向出立面，视图本身就是斜的，按世界轴投影会把井内腔算宽、引出线错位
+    R, D = _view_hd(view)
 
     def _hv(p):
-        return _coord(p, h)
+        return p.X * R.X + p.Y * R.Y
 
     # 井内腔四个内角的水平投影，取最左/最右
     corners = [_rot_pt(info, u_, w_, zmid) for u_ in (info['uL'], info['uR']) for w_ in (info['wB'], info['wT'])]
@@ -2147,7 +2167,7 @@ def _make_rotated_dims(view, elems, ledger=None, stats=None):
     outer = [_rot_pt(info, u_, w_, zmid) for u_ in (info['uo0'], info['uo1']) for w_ in (info['wo0'], info['wo1'])]
     hol = min(_hv(p) for p in outer)
     hor = max(_hv(p) for p in outer)
-    dmid = sum(_coord(p, d) for p in corners) / 4.0
+    dmid = sum(p.X * D.X + p.Y * D.Y for p in corners) / 4.0
     zB, zT = info['zB'], info['zT']
     zo0 = info['zo0']
     hmid = (hl + hr) / 2.0
@@ -2161,13 +2181,13 @@ def _make_rotated_dims(view, elems, ledger=None, stats=None):
         return off
 
     def PT(hv, vv):
-        return _mk(fr, hv, vv, dmid)
+        return DB.XYZ(R.X * hv + D.X * dmid, R.Y * hv + D.Y * dmid, vv)
 
     def _vline(hv):
         return _tline(('h', round(hv, 3)), PT(hv, zB - 0.2), PT(hv, zT + 0.2))
 
     # 竖向链：排管接触端的上下边到井内底/内顶
-    dvec = _unit(d, 1)
+    dvec = D
     for bk, (e, uh, pts) in live:
         try:
             zx = _rot_z_extent(bk, e)
