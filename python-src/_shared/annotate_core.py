@@ -57,6 +57,9 @@ _WALL_ZONE_FRAC = 1.0 / 3.0
 
 # 井内壁候选面最小面积（平方英尺，10 约 0.93 m2）：过滤碎面、倒角与小构件的面（待实测调整）
 _WALL_AREA_MIN_FT2 = 10.0
+# 某一侧按上面的门槛连内壁、外壁都找不到时，这一侧再按这个小门槛找一次（平方英尺，2 约 0.19 m2）。
+# 例：LV-低压拉线井 1000x1000 的井顶内壁（盖板底，带井脖子）只有约 0.77 m2，立面里「顶」一侧原来认不出，整条竖向链标不了
+_WALL_AREA_RELAX_FT2 = 2.0
 
 # 排管边到内壁的净距小于此值（英尺，0.005 约 1.5 mm）时不标：零长尺寸无法生成
 _GAP_MIN_FT = 0.005
@@ -541,6 +544,23 @@ def _frame(view):
     return {'h': h, 'v': 'Z', 'd': other, 'plan': False}
 
 
+# 结构框架里不是排管的构件（族名或类型名含这些词就不当排管）：路缘石也用结构框架建，穿过井口时会被误标成排管链
+_NOT_BANK_KEYS = (u'路缘石', u'路缘', u'curb', u'kerb')
+
+
+def _not_bank(e):
+    try:
+        nm = (e.Name or u'')
+        try:
+            nm += u' ' + (e.Symbol.Family.Name or u'')
+        except Exception:
+            pass
+        low = nm.lower()
+        return any(k in low for k in _NOT_BANK_KEYS)
+    except Exception:
+        return False
+
+
 def _find_banks(rng, fr, stats=None):
     """视图裁剪框内与之相交的排管（结构框架）。是否标注、标哪条链由 make_chain_dims 按截面判断。"""
     out = []
@@ -550,6 +570,8 @@ def _find_banks(rng, fr, stats=None):
         return out
     for e in col:
         try:
+            if _not_bank(e):
+                continue
             bb = e.get_BoundingBox(None)
             if bb is None:
                 continue
@@ -1316,33 +1338,38 @@ def _inner_walls(elems, box, fr, stats=None):
     zone_h = (h1 - h0) * _WALL_ZONE_FRAC
     zone_v = (v1 - v0) * _WALL_ZONE_FRAC
     tol = _AXIAL_TOL
-    inner_c = {'L': [], 'R': [], 'B': [], 'T': []}
-    outer_c = {'L': [], 'R': [], 'B': [], 'T': []}
-    for e in elems:
-        for f in _extract_faces(e):
-            a = f.get('area')
-            if a is None or a < _WALL_AREA_MIN_FT2:
-                continue
-            try:
-                n = f['norm']
-                o = f['orig']
-                nh = _coord(n, h)
-                ph = _coord(o, h)
-                nv = _coord(n, v)
-                pv = _coord(o, v)
-                if abs(nh) >= tol:
-                    if h0 <= ph <= h0 + zone_h:
-                        (inner_c['L'] if nh >= tol else outer_c['L']).append((ph, f))
-                    if h1 - zone_h <= ph <= h1:
-                        (inner_c['R'] if nh <= -tol else outer_c['R']).append((ph, f))
-                if abs(nv) >= tol:
-                    if v0 <= pv <= v0 + zone_v:
-                        (inner_c['B'] if nv >= tol else outer_c['B']).append((pv, f))
-                    if v1 - zone_v <= pv <= v1:
-                        (inner_c['T'] if nv <= -tol else outer_c['T']).append((pv, f))
-            except:
-                continue
 
+    def _collect(min_area):
+        inner_c = {'L': [], 'R': [], 'B': [], 'T': []}
+        outer_c = {'L': [], 'R': [], 'B': [], 'T': []}
+        for e in elems:
+            for f in _extract_faces(e):
+                a = f.get('area')
+                if a is None or a < min_area:
+                    continue
+                try:
+                    n = f['norm']
+                    o = f['orig']
+                    nh = _coord(n, h)
+                    ph = _coord(o, h)
+                    nv = _coord(n, v)
+                    pv = _coord(o, v)
+                    if abs(nh) >= tol:
+                        if h0 <= ph <= h0 + zone_h:
+                            (inner_c['L'] if nh >= tol else outer_c['L']).append((ph, f))
+                        if h1 - zone_h <= ph <= h1:
+                            (inner_c['R'] if nh <= -tol else outer_c['R']).append((ph, f))
+                    if abs(nv) >= tol:
+                        if v0 <= pv <= v0 + zone_v:
+                            (inner_c['B'] if nv >= tol else outer_c['B']).append((pv, f))
+                        if v1 - zone_v <= pv <= v1:
+                            (inner_c['T'] if nv <= -tol else outer_c['T']).append((pv, f))
+                except:
+                    continue
+        return inner_c, outer_c
+
+    inner_c, outer_c = _collect(_WALL_AREA_MIN_FT2)
+    relaxed = None
     walls = {}
     fb_sides = []
     for side, want_max in (('L', True), ('R', False), ('B', True), ('T', False)):
@@ -1351,6 +1378,16 @@ def _inner_walls(elems, box, fr, stats=None):
         if hit is None:
             hit = _pick(outer_c[side], not want_max)
             fb = True
+        if hit is None:
+            # 大面门槛下这一侧内外壁都没有：放宽面积再找（只救原来会失败的一侧，不影响已能识别的井）
+            if relaxed is None:
+                relaxed = _collect(_WALL_AREA_RELAX_FT2)
+            hit = _pick(relaxed[0][side], want_max)
+            fb = False
+            if hit is None:
+                hit = _pick(relaxed[1][side], not want_max)
+                fb = True
+        if fb and hit is not None:
             fb_sides.append(side)
         walls[side] = (hit[0], hit[1], fb) if hit is not None else None
     return walls, fb_sides
