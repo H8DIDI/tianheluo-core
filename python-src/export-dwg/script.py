@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 __title__ = '一键导出图纸DWG/PDF'
-__doc__ = ('批量导出图纸为 DWG / PDF：井大样按系列一键选，也能按范围框分区选（如「A栋北侧」），或导项目浏览器里选中的图纸、全部图纸、手动勾选。\n'
+__doc__ = ('批量导出图纸为 DWG / PDF：井大样按系列一键选，也能按范围框分区选（如「A栋北侧」），或导项目浏览器里选中的图纸、全部图纸、手动勾选；'
+           '还可以直接粘贴一批井号（从 Excel 复制一列也行），自动认出对应的井大样图纸，实时显示找到几张、哪些井没找到，再一起导出。\n'
            'DWG 每 20 张一批导出（比逐张快），导出前检查没有图框的图纸，文件名按图号去重不再互相覆盖，可只补导缺的；\n'
            '可选 AutoCAD 后台补 logo、瘦身（PurgeAll）；PDF 可合并成一个或每张一个。每次在文件夹里留一份导出清单。\n'
            '坐标：导出图纸时 DWG 按图纸尺寸摆放（没有测量坐标，Revit 本身如此）；导出视图按所选坐标（默认共享坐标）。'
@@ -484,6 +485,10 @@ Write-Log ('完成：补 logo ' + $done + ' 张，已有 logo 跳过 ' + $skip +
 """
 
 
+# 井大样图号：新旧两套都认（11kV ELE-SD-SD-002-N、LV ELE-SD-SD-001-N、Telco ICT-SD-SD-001-N、ELV ELV-SD-SD-001-N，旧的 …-SL-002-SD-00x-N）
+_WELL_NO_RE = re.compile(r"^((ELE|ELV)-SL-002-SD-00\d|(ELE|ELV|ICT)-SD-SD-00\d)-\d+$")
+
+
 def _well_mark(sheet):
     """图纸对应的井编号；不是井大样图纸返回空串。
     「井大样_」开头的，取前缀后面的部分；改过名的（例如 BTP-IF1 11KV-…-AA-01），
@@ -493,7 +498,7 @@ def _well_mark(sheet):
     if pre and nm.startswith(pre):
         return nm[len(pre):]
     p = sheet.LookupParameter(WCFG[u"system_param"])
-    if p is None or not p.HasValue or not p.AsString():
+    if (p is None or not p.HasValue or not p.AsString()) and not _WELL_NO_RE.match(sheet.SheetNumber or u""):
         return u""
     found = [m.group(0) for m in _MARK_RE.finditer(nm)]
     return found[-1] if found else u""
@@ -831,7 +836,53 @@ def _scope_items(sheets_all, well_sheets, mk_of):
     return items
 
 
-def _dialog(s, items):
+_TOKEN_RE = re.compile(u"^((?:" + re.escape(WCFG[u"indoor_prefix"]) + u")?[A-Za-z]{1,3})-0*(\\d+)$")
+
+
+def _mark_key(text):
+    """A-01 / a-1 / A-001 → (u'A', 1)；室内-A-01 → (u'室内-A', 1)。不是井号返回 None。"""
+    m = _TOKEN_RE.match((text or u"").strip())
+    if not m:
+        return None
+    return (m.group(1).upper(), int(m.group(2)))
+
+
+def _match_marks(text, well_sheets, mk_of):
+    """粘贴的井号清单 → (找到的图纸列表, 没找到的井号, 认不出的字, 识别出的井号个数)。
+    一口井有好几张图纸（如旧编号的重复图）时，优先取图号是标准井大样图号的那张。"""
+    toks = [t for t in re.split(u"[\\s,，;；、]+", text or u"") if t]
+    keys, seen, bad, notfound = [], set(), [], []
+    for t in toks:
+        k = _mark_key(t)
+        if k is None:
+            if t not in bad:
+                bad.append(t)
+            continue
+        if k not in seen:
+            seen.add(k)
+            keys.append((k, t))
+    by = {}
+    for x in well_sheets:
+        k = _mark_key(mk_of(x))
+        if k is not None:
+            by.setdefault(k, []).append(x)
+    got = []
+    for k, t in keys:
+        c = by.get(k)
+        if not c:
+            notfound.append(t)
+            continue
+        std = [x for x in c if _WELL_NO_RE.match(x.SheetNumber or u"")]
+        for x in (std or c):
+            if x not in got:
+                got.append(x)
+    return got, notfound, bad, len(keys)
+
+
+_MARK_HINT = u'一行一个，或用空格、逗号隔开，可以直接从 Excel 复制一列；A-1、A-01、a-001 都认。'
+
+
+def _dialog(s, items, matcher=None):
     f = WF.Form()
     f.Text = TITLE
     f.Font = SD.Font(u'Microsoft YaHei UI', 9.0)
@@ -865,6 +916,29 @@ def _dialog(s, items):
 
     label(u'导出范围', True); y[0] += 22
     cb_scope = combo([t for t, _l in items], 0)
+    t_marks = None
+    if matcher is not None:
+        label(u'或者粘贴井号清单（可选）：填了就按清单导出，上面的范围不用选', True); y[0] += 22
+        t_marks = WF.TextBox(); t_marks.Multiline = True; t_marks.AcceptsReturn = True; t_marks.ScrollBars = WF.ScrollBars.Vertical
+        t_marks.Location = SD.Point(28, y[0]); t_marks.Size = SD.Size(W - 44, 76); f.Controls.Add(t_marks); y[0] += 82
+        lab_m = WF.Label(); lab_m.Text = _MARK_HINT
+        lab_m.ForeColor = SD.Color.FromArgb(110, 110, 110); lab_m.Location = SD.Point(28, y[0] - 2); lab_m.Size = SD.Size(W - 44, 36); f.Controls.Add(lab_m)
+
+        def _mchg(sender, e):
+            if not t_marks.Text.strip():
+                lab_m.ForeColor = SD.Color.FromArgb(110, 110, 110)
+                lab_m.Text = _MARK_HINT
+                return
+            got, nf, bad, n = matcher(t_marks.Text)
+            t = u'识别 %d 个井号，找到 %d 张井大样图纸。' % (n, len(got))
+            if nf:
+                t += u'没找到：%s%s。' % (u'、'.join(nf[:12]), (u' 等 %d 个' % len(nf)) if len(nf) > 12 else u'')
+            if bad:
+                t += u'认不出：%s。' % u'、'.join(bad[:6])
+            lab_m.ForeColor = SD.Color.FromArgb(180, 40, 40) if (nf or bad or not got) else SD.Color.FromArgb(20, 120, 60)
+            lab_m.Text = t
+        t_marks.TextChanged += _mchg
+        y[0] += 38
     label(u'格式', True); y[0] += 22
     c_dwg = check(u'DWG（每次 %d 张一批导出，比逐张导快）' % BATCH, s[u'dwg'])
     c_logo = check(u'  DWG 导出后用 AutoCAD 在后台补插图框 logo（已有 logo 的跳过）', s[u'logo'] and LOGO_ENABLED, x=44)
@@ -906,6 +980,7 @@ def _dialog(s, items):
     if ff_fit(f).ShowDialog() != WF.DialogResult.OK:
         return None, None
     s = dict(s)
+    s[u'mark_text'] = t_marks.Text if t_marks is not None else u''
     s.update({u'dwg': c_dwg.Checked, u'logo': c_logo.Checked, u'slim': c_slim.Checked, u'pdf_merge': c_pm.Checked,
               u'pdf_each': c_pe.Checked, u'pdf_series': c_ps.Checked, u'zip_pack': c_zip.Checked, u'setup': setups[cb_setup.SelectedIndex], u'name_mode': NAME_MODES[cb_name.SelectedIndex][0],
               u'skip_existing': c_skip.Checked, u'folder': t_dir.Text.strip(),
@@ -1274,12 +1349,24 @@ def main():
             return marks.get(x.Id.Value, u"")
 
         items = _scope_items(sheets_all, well, mk_of)
-        s, idx = _dialog(_load_settings(), items)
+        s, idx = _dialog(_load_settings(), items, lambda t: _match_marks(t, well, mk_of))
         if s is None:
             return
+        mark_text = s.pop(u'mark_text', u'')      # 粘贴的井号清单只管这一次，不存进设置
         _save_settings(s)
         targets = items[idx][1]
-        if targets is None:
+        if mark_text.strip():
+            targets, _nf, _bad, _n = _match_marks(mark_text, well, mk_of)
+            if not targets:
+                forms.alert(u'清单里的井号没有找到对应的井大样图纸。\n没找到：%s' % u'、'.join(_nf[:20]), title=TITLE)
+                return
+            if _nf or _bad:
+                if not forms.alert(u'识别 %d 个井号，找到 %d 张图纸。\n\n没找到图纸的井号：%s%s\n\n其余照常导出，继续吗？'
+                                   % (_n, len(targets), u'、'.join(_nf[:20]) or u'无',
+                                      (u'\n认不出的内容：%s' % u'、'.join(_bad[:8])) if _bad else u''),
+                                   title=TITLE, yes=True, no=True):
+                    return
+        elif targets is None:
             got = forms.SelectFromList.show([_SheetItem(x) for x in sheets_all], title=u'勾选要导出的图纸',
                                             multiselect=True, button_name=u'导出')
             if not got:
