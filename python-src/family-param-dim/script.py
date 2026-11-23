@@ -26,6 +26,7 @@ import json
 
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -139,14 +140,14 @@ def dim_info(d):
         for r in d.References:
             e = doc.GetElement(r.ElementId)
             kinds.append(type(e).__name__ if e is not None else '?')
-            refs.append('%s#%d' % (type(e).__name__ if e is not None else '?', int(r.ElementId.Value)))
+            refs.append('%s#%d' % (type(e).__name__ if e is not None else '?', int(thl_eid(r.ElementId))))
     except Exception:
         pass
     try:
         lk = bool(d.IsLocked)
     except Exception:
         lk = False
-    return {'id': int(d.Id.Value), 'mm': v * FT, 'label': (lab.Definition.Name if lab is not None else None),
+    return {'id': int(thl_eid(d.Id)), 'mm': v * FT, 'label': (lab.Definition.Name if lab is not None else None),
             'locked': lk, 'kinds': kinds, 'refs': refs, 'el': d}
 
 

@@ -43,6 +43,7 @@ FT_MM = 304.8
 # @include _shared/well_config_ui.py
 # @include _shared/sheet_blocks.py
 # @include _shared/well_view_fix.py
+# @include _shared/compat.py
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]      # 默认「井大样_」
 WS_NUMPRE = WCFG[u"sheet_number_prefix"]    # 默认「AG-」
@@ -592,7 +593,7 @@ def _old_detail_candidates(doc):
     placed = set()
     for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
         try:
-            placed.add(_vp.ViewId.Value)
+            placed.add(thl_eid(_vp.ViewId))
         except:
             pass
     wells = []
@@ -613,7 +614,7 @@ def _old_detail_candidates(doc):
         try:
             if _v.IsTemplate or str(_v.ViewType) != "Detail":
                 continue
-            if _v.Id.Value in placed:
+            if thl_eid(_v.Id) in placed:
                 continue
             _nm = _v.Name or ""
             if _nm.startswith("SL"):
@@ -688,7 +689,7 @@ def _scan_existing_sheets(doc):
         _vp_by_sheet = {}
         for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
             try:
-                _vp_by_sheet.setdefault(_vp.OwnerViewId.Value, []).append(_vp.ViewId)
+                _vp_by_sheet.setdefault(thl_eid(_vp.OwnerViewId), []).append(_vp.ViewId)
             except:
                 pass
         for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
@@ -698,7 +699,7 @@ def _scan_existing_sheets(doc):
                 # 但图上视图名带 AG-井号-xxxx 的，都算井大样图（否则重新生成时旧图删不掉，会重复）
                 _is_prefix = _nm.startswith(WS_PREFIX)
                 _suffix = _nm[len(WS_PREFIX):] if _is_prefix else None
-                _kids = _vp_by_sheet.get(_s.Id.Value, [])
+                _kids = _vp_by_sheet.get(thl_eid(_s.Id), [])
                 _tag = None
                 for _vid in _kids:
                     _vv = doc.GetElement(_vid)
@@ -899,7 +900,7 @@ def _create_plan_view(doc, plan_type_id, level_id):
             try:
                 if _v.IsTemplate or u'_AG-' not in (_v.Name or u'') or not _v.CropBoxActive or _v.GenLevel is None:
                     continue
-                _k = _v.GenLevel.Id.Value
+                _k = thl_eid(_v.GenLevel.Id)
                 if _k not in _PLAN_SRC:
                     _PLAN_SRC[_k] = _v.Id
             except:
@@ -1041,8 +1042,8 @@ def _pick_incomplete(doc, wells, built_map):
     out, ids = [], set()
     for r in picked:
         r = getattr(r, "item", r)
-        if r.well.Id.Value not in ids:
-            ids.add(r.well.Id.Value)
+        if thl_eid(r.well.Id) not in ids:
+            ids.add(thl_eid(r.well.Id))
             out.append(r.well)
     return out
 
@@ -1072,7 +1073,7 @@ def main():
         if selected_ids:
             for eid in selected_ids:
                 e = doc.GetElement(eid)
-                if e and e.Category and e.Category.Id.Value == int(DB.BuiltInCategory.OST_GenericModel):
+                if e and e.Category and thl_eid(e.Category.Id) == int(DB.BuiltInCategory.OST_GenericModel):
                     valid_elems.append(e)
 
         picked_from_status = False
@@ -1126,14 +1127,14 @@ def main():
                         _vp_by_sheet = {}
                         for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
                             try:
-                                _vp_by_sheet.setdefault(_vp.OwnerViewId.Value, []).append(_vp.ViewId)
+                                _vp_by_sheet.setdefault(thl_eid(_vp.OwnerViewId), []).append(_vp.ViewId)
                             except:
                                 pass
                         for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
                             try:
                                 if not (_s.Name or "").startswith(WS_PREFIX):
                                     continue
-                                _kids = _vp_by_sheet.get(_s.Id.Value, [])
+                                _kids = _vp_by_sheet.get(thl_eid(_s.Id), [])
                                 doc.Delete(_s.Id)
                                 for _vid in _kids:
                                     try:
@@ -1154,7 +1155,7 @@ def main():
                         _placed_now = {}
                         for _vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
                             try:
-                                _placed_now[_vp.ViewId.Value] = True
+                                _placed_now[thl_eid(_vp.ViewId)] = True
                             except:
                                 pass
                         for _v in DB.FilteredElementCollector(doc).OfClass(DB.View).ToElements():
@@ -1169,7 +1170,7 @@ def main():
                                         break
                                 if not _is_agy:
                                     continue
-                                if _v.Id.Value in _placed_now:
+                                if thl_eid(_v.Id) in _placed_now:
                                     continue
                                 doc.Delete(_v.Id)
                                 _removed_views += 1
@@ -1218,7 +1219,7 @@ def main():
                 built_now = _scan_existing_sheets(doc)
             except:
                 built_now = {}
-            done_ids = set(e.Id.Value for e in valid_elems if _mark_of(e) in built_now)
+            done_ids = set(thl_eid(e.Id) for e in valid_elems if _mark_of(e) in built_now)
             if done_ids:
                 skip_choice = forms.CommandSwitchWindow.show(
                     ['跳过已出图的，只生成未出的（推荐）', '只重做移动过的（未动的跳过，最快）', '全部重做（替换已有图纸）'],
@@ -1228,7 +1229,7 @@ def main():
                 if '移动过' in skip_choice:
                     _only_moved[0] = True
                 elif '跳过' in skip_choice:
-                    valid_elems = [e for e in valid_elems if e.Id.Value not in done_ids]
+                    valid_elems = [e for e in valid_elems if thl_eid(e.Id) not in done_ids]
                     if not valid_elems:
                         forms.alert('所选的井都已出过图，没有需要生成的。', title='一键井展开图')
                         return
@@ -1281,9 +1282,9 @@ def main():
                             DB.BuiltInParameter.SYMBOL_FAMILY_NAME_PARAM).AsString()
                         type_name = self.item.get_Parameter(
                             DB.BuiltInParameter.SYMBOL_NAME_PARAM).AsString()
-                        return "{} - {} [ID {}]".format(family_name, type_name, self.item.Id.Value)
+                        return "{} - {} [ID {}]".format(family_name, type_name, thl_eid(self.item.Id))
                     except:
-                        return "图框 ID: " + str(self.item.Id.Value)
+                        return "图框 ID: " + str(thl_eid(self.item.Id))
 
             selected_tb = forms.SelectFromList.show(
                 [TitleblockOption(tb) for tb in titleblocks],
@@ -1316,7 +1317,7 @@ def main():
                 except:
                     kind = None
                 return "{}  【{}】  [ID {}]".format(
-                    self.item.Name, _kind_label.get(kind, '其他'), self.item.Id.Value)
+                    self.item.Name, _kind_label.get(kind, '其他'), thl_eid(self.item.Id))
 
         chosen_templates = {}     # 视图类型 -> 样板Id（按类型分别选时使用）
         picked_template_ids = []  # 按勾选顺序记录，供"统一套同一个样板"回退使用
@@ -1462,7 +1463,7 @@ def main():
                     _occ = set()
                     for _s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
                         try:
-                            if self_id is not None and _s.Id.Value == self_id:
+                            if self_id is not None and thl_eid(_s.Id) == self_id:
                                 continue          # 刚新建的这张图纸，Revit 给它的默认编号不算占用
                             _sn = (_s.SheetNumber or "").strip()
                             if _sn.isdigit():
@@ -1565,12 +1566,12 @@ def main():
                     if _old_no:
                         # 替换旧图：先挂一个不会重复的临时号，提交后改回旧号（旧号不占用号段里的新号）
                         sheet.SheetNumber = "TMP" + rand_suffix + str(len(_renumber_later))
-                        _renumber_later.append((sheet.Id.Value, _old_no))
+                        _renumber_later.append((thl_eid(sheet.Id), _old_no))
                     else:
-                        sheet.SheetNumber = _new_sheet_number(base_name, sheet.Id.Value)
+                        sheet.SheetNumber = _new_sheet_number(base_name, thl_eid(sheet.Id))
                     # 图纸集合：按井号系列放进对应的图纸集合（11KV/275KV/ELV/LV/TELCO），便于按集合导出 PDF
                     _set_sheet_collection(doc, sheet, base_name)
-                    _pos_cache[base_name] = {'bbox': _bbox_key(elem), 'sheet_id': int(sheet.Id.Value),
+                    _pos_cache[base_name] = {'bbox': _bbox_key(elem), 'sheet_id': int(thl_eid(sheet.Id)),
                                              'name': sheet.Name, 'number': sheet.SheetNumber}
                     for param_name in ["专业", "所属专业"]:
                         try:

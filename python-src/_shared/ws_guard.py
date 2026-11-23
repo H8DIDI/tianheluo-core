@@ -47,9 +47,9 @@ def wg_note(blocked, label=None, n=6):
         names = []
         for e in es[:n]:
             try:
-                names.append((label(e) if label else u'') or u'%s' % e.Id.Value)
+                names.append((label(e) if label else u'') or u'%s' % thl_eid(e.Id))
             except Exception:
-                names.append(u'%s' % e.Id.Value)
+                names.append(u'%s' % thl_eid(e.Id))
         lines.append(u'  · %s：%d 个（%s%s）' % (why, len(es), u'、'.join(names), u' 等' if len(es) > n else u''))
     lines.append(u'  请对方同步并释放，或先「与中心文件同步」后再运行一次。')
     return u'\n'.join(lines)

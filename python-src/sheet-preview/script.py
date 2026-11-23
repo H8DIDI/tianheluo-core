@@ -30,6 +30,7 @@ CACHE_LRU = 14      # 窗口里最多同时留多少张图在内存
 # ------------------------------------------------------------------
 
 # @include _shared/form_fit.py
+# @include _shared/compat.py
 
 
 def _natural_key(s):
@@ -51,7 +52,7 @@ def _collection_name(sheet):
 
 def _sheet_id(sheet):
     try:
-        return int(sheet.Id.Value)
+        return int(thl_eid(sheet.Id))
     except Exception:
         return int(sheet.Id.IntegerValue)
 

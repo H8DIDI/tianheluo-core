@@ -23,6 +23,7 @@ import json
 
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -243,7 +244,7 @@ def _bound_to_schedules(name):
             if it.Key.Name != name:
                 continue
             for c in it.Current.Categories:
-                if int(c.Id.Value) == sch:
+                if int(thl_eid(c.Id)) == sch:
                     return True
         except Exception:
             continue
@@ -365,7 +366,7 @@ def folder_ready(cfg, vs):
             return False
         bo = DB.BrowserOrganization.GetCurrentBrowserOrganizationForSchedules(doc)
         for f in bo.GetFolderItems(vs.Id):
-            if int(f.ElementId.Value) == int(pid.Value):
+            if int(thl_eid(f.ElementId)) == int(pid.Value):
                 return True
     except Exception:
         pass
@@ -396,7 +397,7 @@ def _field_map(df, sample=None):
                     p = None
                 if p is not None:
                     for f in lst:
-                        if int(f.ParameterId.Value) == int(p.Id.Value):
+                        if int(f.ParameterId.Value) == int(thl_eid(p.Id)):
                             pick = f
                             break
             except Exception:
@@ -417,7 +418,7 @@ def build_schedule(sheet, mark, cfg, existing, sample=None):
     vs = existing.get(name)
     status = 'new'
     if vs is not None:
-        on_sheet = [i for i in pre_inst if int(i.ScheduleId.Value) == int(vs.Id.Value)]
+        on_sheet = [i for i in pre_inst if int(thl_eid(i.ScheduleId)) == int(thl_eid(vs.Id))]
         if cfg.get('rebuild'):
             for i in on_sheet:
                 doc.Delete(i.Id)
@@ -557,7 +558,7 @@ def main():
         done_already = 0
         for sh, mk in todo:
             vs = have.get((cfg.get('name_prefix') or '') + mk)
-            if vs is not None and any(int(i.ScheduleId.Value) == int(vs.Id.Value) for i in placed_instances(sh)):
+            if vs is not None and any(int(thl_eid(i.ScheduleId)) == int(thl_eid(vs.Id)) for i in placed_instances(sh)):
                 done_already += 1
         n_new = len(todo) if cfg.get('rebuild') else len(todo) - done_already
         txt = '将处理 {} 张图纸。\n其中已有规格表 {} 张（{}），需要新做 {} 张。\n字段：{}\n位置：左上角 ({:g}, {:g}) mm。'.format(

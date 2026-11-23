@@ -18,6 +18,7 @@ from pyrevit import revit, DB, UI, forms
 WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]
 # @include _shared/annotate_core.py
+# @include _shared/compat.py
 
 
 def main():
@@ -186,7 +187,7 @@ def main():
         uniq_ids = set()
         for v in target_views:
             try:
-                vid = v.Id.Value
+                vid = thl_eid(v.Id)
             except:
                 vid = None
             if vid is not None:
@@ -200,10 +201,10 @@ def main():
         # ---------- 防呆：运行前确认；已经有尺寸的视图默认跳过 ----------
         annotated_ids = set()
         try:
-            want_ids = set(int(v_.Id.Value) for v_ in target_views)
+            want_ids = set(int(thl_eid(v_.Id)) for v_ in target_views)
             for dm_ in DB.FilteredElementCollector(doc).OfClass(DB.Dimension).ToElements():     # 全模型只扫一遍尺寸，按所属视图归类
                 try:
-                    ov_ = int(dm_.OwnerViewId.Value)
+                    ov_ = int(thl_eid(dm_.OwnerViewId))
                 except Exception:
                     continue
                 if ov_ in want_ids:
@@ -290,7 +291,7 @@ def main():
                     cancelled[0] = True
                     break
                 done_views[0] = _vi + 1
-                if skip_annotated and int(v.Id.Value) in annotated_ids:
+                if skip_annotated and int(thl_eid(v.Id)) in annotated_ids:
                     skipped_annot[0] += 1          # 已经有尺寸：不再重复跑
                     continue
                 try:

@@ -396,7 +396,7 @@ def collect_target_elems(view, stats=None, relax_span=False):
             if cat is None:
                 _bump(stats, _SKIP_CAT)
                 continue
-            cid = cat.Id.Value
+            cid = thl_eid(cat.Id)
             if cid in _EXCLUDE_IDS or cid in _PIPE_IDS:
                 _bump(stats, _SKIP_CAT)
                 continue
@@ -671,7 +671,7 @@ def _axis_of(vx, vy, vz):
 def _dim_sig(refs, vec):
     """一条尺寸的签名：(参照所属构件 id 集合, 尺寸方向轴)。"""
     try:
-        return (frozenset(int(r.ElementId.Value) for r in refs), _axis_of(vec[0], vec[1], vec[2]))
+        return (frozenset(int(thl_eid(r.ElementId)) for r in refs), _axis_of(vec[0], vec[1], vec[2]))
     except:
         return None
 
@@ -2064,7 +2064,7 @@ def _prune_unused_traces(view):
         for dm in DB.FilteredElementCollector(doc, view.Id).OfClass(DB.Dimension).ToElements():
             try:
                 for r in dm.References:
-                    used.add(int(r.ElementId.Value))
+                    used.add(int(thl_eid(r.ElementId)))
             except:
                 continue
         for cid in list(_TRACE_CREATED):
@@ -2406,7 +2406,7 @@ def _sheet_mark(sheet):
     取不到再按图名去掉前缀（旧命名「井大样_AA-01」）。图纸名改成「BTP-IF1 275Kv-AA-18 Detail Drawing」也能对上。
     结果按图纸缓存（见 _load_sheet_caches）。"""
     try:
-        sid = int(sheet.Id.Value)
+        sid = int(thl_eid(sheet.Id))
     except:
         sid = None
     if sid is not None and sid in _SHEET_MARK_CACHE:

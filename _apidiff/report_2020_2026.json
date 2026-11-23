@@ -1,0 +1,775 @@
+{
+ "control-points": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/xlsx_lite.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 1,
+  "new_types": [],
+  "new_members": [
+   "BasePoint.GetProjectBasePoint",
+   "BasePoint.GetSurveyPoint",
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "GeometryObject.Id",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "duct-elev": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/ws_guard.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 4,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "export-dwg": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/well_config.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size",
+   "ViewSheet.SheetCollectionId"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "ExternalDefinitionCreationOptions.Type",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "export-nwc": {
+  "includes": [
+   "_shared/form_fit.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 0,
+  "new_types": [],
+  "new_members": [
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "family-param-dim": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "Definition.GetDataType",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "pile-cushion": {
+  "includes": [
+   "_shared/form_fit.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 2,
+  "new_types": [],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "GeometryObject.Id",
+   "Point.Size",
+   "ViewSheet.Duplicate"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "GeometryInstance.Symbol",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "pipe-support": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/settings_ui.py",
+   "_shared/ws_guard.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 4,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "BuiltInCategory.OST_Toposolid",
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "GeometryObject.Id",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "quantity-export": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/well_config.py",
+   "_shared/xlsx_lite.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 4,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "Definition.GetDataType",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "GeometryInstance.Symbol",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "rebar-3d-view": {
+  "includes": [],
+  "id_value_uses": 0,
+  "integer_value_uses": 1,
+  "new_types": [],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value"
+  ],
+  "gone_members": [
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name"
+  ],
+  "ctor": []
+ },
+ "rebar-cage": {
+  "includes": [
+   "_shared/form_fit.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 1,
+  "new_types": [],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "Point.Size",
+   "RebarBarType.BarNominalDiameter"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "rfi-pack": {
+  "includes": [
+   "_shared/xlsx_lite.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value"
+  ],
+  "gone_members": [
+   "ElementId.IntegerValue",
+   "GeometryInstance.Symbol",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "sendit/tools/Issue Manager": {
+  "includes": [],
+  "id_value_uses": 0,
+  "integer_value_uses": 0,
+  "new_types": [
+   "Autodesk.Revit.DB.PDFExportOptions"
+  ],
+  "new_members": [],
+  "gone_members": [
+   "RibbonItemData.Name"
+  ],
+  "ctor": []
+ },
+ "sendit/tools/Sheet Manager": {
+  "includes": [],
+  "id_value_uses": 8,
+  "integer_value_uses": 0,
+  "new_types": [],
+  "new_members": [
+   "ElementId.Value"
+  ],
+  "gone_members": [
+   "RibbonItemData.Name"
+  ],
+  "ctor": []
+ },
+ "sendit/tools/View Manager": {
+  "includes": [],
+  "id_value_uses": 6,
+  "integer_value_uses": 0,
+  "new_types": [],
+  "new_members": [
+   "ElementId.Value"
+  ],
+  "gone_members": [
+   "ExternalDefinitionCreationOptions.Type",
+   "RibbonItemData.Name"
+  ],
+  "ctor": []
+ },
+ "sheet-organize": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/well_config.py",
+   "_shared/settings_ui.py",
+   "_shared/well_config_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "sheet-preview": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 4,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size",
+   "ViewSheet.SheetCollectionId"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name"
+  ],
+  "ctor": []
+ },
+ "tag-tidy": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "IndependentTag.GetLeaderEnd",
+   "IndependentTag.GetTaggedLocalElementIds",
+   "IndependentTag.GetTaggedReferences",
+   "IndependentTag.SetLeaderEnd",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "FabricationPartSizeMap.GroupId",
+   "GeometryInstance.Symbol",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-annotate": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/well_config.py",
+   "_shared/settings_ui.py",
+   "_shared/well_config_ui.py",
+   "_shared/annotate_core.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size",
+   "ViewSheet.SheetCollectionId"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "GeometryInstance.Symbol",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-audit": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/well_config.py",
+   "_shared/settings_ui.py",
+   "_shared/well_config_ui.py",
+   "_shared/xlsx_lite.py",
+   "_shared/xlsx_read.py",
+   "_shared/annotate_core.py",
+   "_shared/well_geo.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "GeometryInstance.Symbol",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-config": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/well_config.py",
+   "_shared/settings_ui.py",
+   "_shared/well_config_ui.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 0,
+  "new_types": [],
+  "new_members": [
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-family-guard": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "Definition.GetDataType",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-gap-dim": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/ws_guard.py",
+   "_shared/well_config.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 4,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size",
+   "Selection.GetReferences"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-number": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/ws_guard.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-param-sync": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-sheet-fit": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size",
+   "Viewport.GetProjectionToSheetTransform"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-sheet-no": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/sheet_blocks.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-sheets": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/well_config.py",
+   "_shared/settings_ui.py",
+   "_shared/well_config_ui.py",
+   "_shared/sheet_blocks.py",
+   "_shared/well_view_fix.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "BuiltInParameter.SHEET_COLLECTION",
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size",
+   "ViewSheet.Duplicate",
+   "Viewport.GetProjectionToSheetTransform"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-spec-table": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/settings_ui.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-sync": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/well_config.py",
+   "_shared/settings_ui.py",
+   "_shared/well_config_ui.py",
+   "_shared/annotate_core.py",
+   "_shared/well_geo.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 3,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "GeometryInstance.Symbol",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ },
+ "well-zone": {
+  "includes": [
+   "_shared/form_fit.py",
+   "_shared/settings_ui.py",
+   "_shared/ws_guard.py",
+   "_shared/compat.py"
+  ],
+  "id_value_uses": 0,
+  "integer_value_uses": 4,
+  "new_types": [
+   "Autodesk.Revit.DB.GroupTypeId",
+   "Autodesk.Revit.DB.PDFExportOptions",
+   "Autodesk.Revit.DB.SheetCollection",
+   "Autodesk.Revit.DB.SpecTypeId"
+  ],
+  "new_members": [
+   "Category.BuiltInCategory",
+   "Definition.GetDataType",
+   "ElementId.Value",
+   "Point.Size"
+  ],
+  "gone_members": [
+   "CeilingAndFloor.Dispose",
+   "ElementId.IntegerValue",
+   "RibbonItemData.Name",
+   "SpotDimension.Location"
+  ],
+  "ctor": []
+ }
+}

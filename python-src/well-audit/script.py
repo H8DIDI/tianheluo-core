@@ -21,6 +21,7 @@ WCFG = wcfg_load()
 WS_PREFIX = WCFG[u"sheet_name_prefix"]
 # @include _shared/annotate_core.py
 # @include _shared/well_geo.py
+# @include _shared/compat.py
 
 import System.Windows.Forms as WF
 

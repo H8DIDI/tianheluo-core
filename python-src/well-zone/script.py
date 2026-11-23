@@ -28,6 +28,7 @@ import System.Drawing as SD
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
 # @include _shared/ws_guard.py
+# @include _shared/compat.py
 
 doc = revit.doc
 uidoc = revit.uidoc

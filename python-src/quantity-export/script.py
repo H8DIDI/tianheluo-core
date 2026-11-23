@@ -79,6 +79,7 @@ SCHEDULE_SPECS = [
 # @include _shared/well_config.py
 # @include _shared/xlsx_lite.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 WCFG = wcfg_load()
 DEPTH_SET = os.path.join(OUT_DIR, u'井深统计设置.json')
 DEPTH_DEFAULTS = {
@@ -578,7 +579,7 @@ def _add_one(e, res):
         f, t = _ftname(e)
         m = _WELL_LW.search(t) or _WELL_LW.search(f) or _WELL_LW2.search(t)
         bot, top = _well_elev_m(e)
-        res['wells'].append((mk, _well_label(e) or u'其他', f, t, _depth_mm(e), e.Id.Value,
+        res['wells'].append((mk, _well_label(e) or u'其他', f, t, _depth_mm(e), thl_eid(e.Id),
                              int(m.group(1)) if m else None, int(m.group(2)) if m else None, bot, top))
         return
     if c == int(DB.BuiltInCategory.OST_Conduit) or (c == int(DB.BuiltInCategory.OST_StructuralFraming) and _is_bank(e)):

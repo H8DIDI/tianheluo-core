@@ -25,6 +25,7 @@ from pyrevit import revit, forms
 
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -205,7 +206,7 @@ def build_obstacles(view, extra_cats=()):
             c = e.Category
             if c is None or c.CategoryType != DB.CategoryType.Model:
                 continue
-            if c.Name not in OBSTACLE_CATS and c.Id.Value not in extra_cats:
+            if c.Name not in OBSTACLE_CATS and thl_eid(c.Id) not in extra_cats:
                 continue
             if isinstance(e, (DB.IndependentTag,)):
                 continue
@@ -213,13 +214,13 @@ def build_obstacles(view, extra_cats=()):
             if isinstance(loc, DB.LocationCurve):
                 cv = loc.Curve
                 p0, p1 = cv.GetEndPoint(0), cv.GetEndPoint(1)
-                ob.add_seg(p0.X, p0.Y, p1.X, p1.Y, _half_width(e), e.Id.Value)
+                ob.add_seg(p0.X, p0.Y, p1.X, p1.Y, _half_width(e), thl_eid(e.Id))
                 n += 1
                 continue
             bb = e.get_BoundingBox(view)
             if bb is None:
                 continue
-            ob.add_rect((bb.Min.X, bb.Min.Y, bb.Max.X, bb.Max.Y), e.Id.Value)
+            ob.add_rect((bb.Min.X, bb.Min.Y, bb.Max.X, bb.Max.Y), thl_eid(e.Id))
             n += 1
         except Exception:
             continue
@@ -265,9 +266,9 @@ def measure_tag_heads(view, items, est_w, est_h):
         for x in items:
             tg = x['t']
             try:
-                key = (tg.GetTypeId().Value, tg.TagText, x.get('orient'))
+                key = (thl_eid(tg.GetTypeId()), tg.TagText, x.get('orient'))
             except Exception:
-                key = (tg.GetTypeId().Value, '', x.get('orient'))
+                key = (thl_eid(tg.GetTypeId()), '', x.get('orient'))
             if key in cache:
                 x['size'], x['size_ok'] = cache[key]
                 continue
@@ -297,7 +298,7 @@ def measure_tag_heads(view, items, est_w, est_h):
     groups = {}
     for x in items:
         try:
-            gk = (x['t'].GetTypeId().Value, x.get('orient'), len(x['t'].TagText or ''))
+            gk = (thl_eid(x['t'].GetTypeId()), x.get('orient'), len(x['t'].TagText or ''))
         except Exception:
             gk = None
         x['_gk'] = gk
@@ -772,7 +773,7 @@ def plan(view, cfg):
         if not refs or a is None:
             multi.append(t)
             continue
-        items.append({'t': t, 'el': el, 'ref': refs[0], 'a': a, 'head': t.TagHeadPosition, 'own': el.Id.Value})
+        items.append({'t': t, 'el': el, 'ref': refs[0], 'a': a, 'head': t.TagHeadPosition, 'own': thl_eid(el.Id)})
     # 一管一标：同一构件上有多个标记，只留离构件中心最近的那个，其余当重复标记（可删除）
     by_el = {}
     for x in items:
@@ -796,7 +797,7 @@ def plan(view, cfg):
     tagged_cats = set()
     for x in items:
         try:
-            tagged_cats.add(x['el'].Category.Id.Value)
+            tagged_cats.add(thl_eid(x['el'].Category.Id))
         except Exception:
             pass
     ob, n_ob = build_obstacles(view, tagged_cats)
@@ -973,7 +974,7 @@ def measure_result(items, ob, placed, gap, p_mm, cfg):
 def _fam_key(e):
     """（类别, 族名）：补标只补「视图里这个族已经有标记」的同族构件。"""
     try:
-        cat = e.Category.Id.Value
+        cat = thl_eid(e.Category.Id)
     except Exception:
         return None
     try:
@@ -995,14 +996,14 @@ def missing_elements(view, cfg, items, multi_tagged_ids=()):
         k = _fam_key(x['el'])
         if k is None:
             continue
-        fam_type.setdefault(k, {}).setdefault(x['t'].GetTypeId().Value, 0)
-        fam_type[k][x['t'].GetTypeId().Value] += 1
+        fam_type.setdefault(k, {}).setdefault(thl_eid(x['t'].GetTypeId()), 0)
+        fam_type[k][thl_eid(x['t'].GetTypeId())] += 1
     out = []
     min_len = cfg['min_pipe_mm'] / FT
     for cid in set(k[0] for k in fam_type):
         col = DB.FilteredElementCollector(doc, view.Id).OfCategoryId(DB.ElementId(cid)).WhereElementIsNotElementType()
         for e in col:
-            if e.Id.Value in tagged:
+            if thl_eid(e.Id) in tagged:
                 continue
             k = _fam_key(e)
             if k not in fam_type:
@@ -1025,12 +1026,12 @@ def create_missing(view, add_list):
         try:
             pt = center_of(e)
             if pt is None:
-                fails.append((e.Id.Value, '取不到构件中心'))
+                fails.append((thl_eid(e.Id), '取不到构件中心'))
                 continue
             DB.IndependentTag.Create(doc, ttid, view.Id, DB.Reference(e), True, DB.TagOrientation.Horizontal, DB.XYZ(pt.X, pt.Y, pt.Z))
             n += 1
         except Exception as ex:
-            fails.append((e.Id.Value, ('%s' % ex).splitlines()[0][:60]))
+            fails.append((thl_eid(e.Id), ('%s' % ex).splitlines()[0][:60]))
     return n, fails
 
 
@@ -1053,7 +1054,7 @@ def untagged_report(view, cfg, pl):
             c = e.Category
             if c is None or c.CategoryType != DB.CategoryType.Model or c.Name in skip:
                 continue
-            if e.Id.Value in tagged:
+            if thl_eid(e.Id) in tagged:
                 continue
             k = _fam_key(e)
             if k is None:
@@ -1075,10 +1076,10 @@ def verify(items, tol_ft=1.0 / FT):
         try:
             le = x['t'].GetLeaderEnd(x['ref'])
         except Exception:
-            bad.append(x['t'].Id.Value)
+            bad.append(thl_eid(x['t'].Id))
             continue
         if math.hypot(le.X - x['a'].X, le.Y - x['a'].Y) > tol_ft:
-            bad.append(x['t'].Id.Value)
+            bad.append(thl_eid(x['t'].Id))
     return bad
 
 
@@ -1143,7 +1144,7 @@ def run_all(view, cfg):
         n_add = 0
         fail_total = []
         if cfg['add_missing']:
-            add_list = [a for a in missing_elements(view, cfg, pl['items']) if a[0].Id.Value not in pl['locked_tagged']]
+            add_list = [a for a in missing_elements(view, cfg, pl['items']) if thl_eid(a[0].Id) not in pl['locked_tagged']]
             if add_list:
                 t = DB.Transaction(doc, '补标缺标构件')
                 fh = t.GetFailureHandlingOptions()
@@ -1205,7 +1206,7 @@ def main():
                 ids_ = list(t_.GetTaggedLocalElementIds())
                 if len(ids_) > 1:
                     multi_ids.update(i.Value for i in ids_)
-            add_list = [a for a in add_list if a[0].Id.Value not in multi_ids and a[0].Id.Value not in pl['locked_tagged']]
+            add_list = [a for a in add_list if thl_eid(a[0].Id) not in multi_ids and thl_eid(a[0].Id) not in pl['locked_tagged']]
         msg = ('当前视图（比例 1:%d）：\n'
                '  单构件标记 %d 个：引线末端设到构件中心，标记头选空的一侧、不压任何构件、同侧平齐（已吸附 %d 个）\n'
                '  悬空标记 %d 个、同一构件上的重复标记 %d 个%s\n'

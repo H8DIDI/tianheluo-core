@@ -13,6 +13,7 @@ from Autodesk.Revit.UI.Selection import ISelectionFilter
 
 # @include _shared/form_fit.py
 # @include _shared/ws_guard.py
+# @include _shared/compat.py
 import clr
 import System
 clr.AddReference('System.Windows.Forms')

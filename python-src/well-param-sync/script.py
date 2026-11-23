@@ -22,6 +22,7 @@ import json
 
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -149,7 +150,7 @@ def apply(rows, cfg):
         n = 0
         try:
             for e, mk, tp, off in todo:
-                if int(e.Id.Value) in blocked:
+                if int(thl_eid(e.Id)) in blocked:
                     continue
                 tp.Set(off)
                 n += 1
@@ -160,7 +161,7 @@ def apply(rows, cfg):
         if str(st) == 'Committed' or not ids:
             break
         blocked |= ids
-    names = dict((int(e.Id.Value), mk) for e, mk, tp, off in rows)
+    names = dict((int(thl_eid(e.Id)), mk) for e, mk, tp, off in rows)
     return str(st) == 'Committed', n, [names.get(i, str(i)) for i in sorted(blocked)]
 
 

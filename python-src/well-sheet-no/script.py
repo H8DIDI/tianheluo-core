@@ -25,6 +25,7 @@ import System.Drawing as SD
 # @include _shared/form_fit.py
 # @include _shared/sheet_blocks.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -37,7 +38,7 @@ def scan_sheets():
     out = []
     for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
         try:
-            out.append({'key': int(s.Id.Value), 'sheet': s, 'old': (s.SheetNumber or '').strip(), 'name': s.Name or ''})
+            out.append({'key': int(thl_eid(s.Id)), 'sheet': s, 'old': (s.SheetNumber or '').strip(), 'name': s.Name or ''})
         except Exception:
             continue
     return out
