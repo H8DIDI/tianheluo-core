@@ -39,6 +39,7 @@ DEFAULTS = {'prefix': '', 'start': 1, 'digits': 2, 'step': 1, 'sort': 'X_ASC', '
 
 # @include _shared/form_fit.py
 # @include _shared/ws_guard.py
+# @include _shared/compat.py
 
 
 def load():
@@ -306,7 +307,7 @@ def _cm_mark_param(elem):
 
 def _cm_is_well(elem):
     try:
-        return isinstance(elem, DB.FamilyInstance) and elem.Category is not None and elem.Category.Id.Value == _WELL_CAT
+        return isinstance(elem, DB.FamilyInstance) and elem.Category is not None and thl_eid(elem.Category.Id) == _WELL_CAT
     except Exception:
         return False
 

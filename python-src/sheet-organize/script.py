@@ -31,6 +31,7 @@ TITLE = u"一键图纸归类与图框编号"
 # @include _shared/well_config.py
 # @include _shared/settings_ui.py
 # @include _shared/well_config_ui.py
+# @include _shared/compat.py
 WCFG = wcfg_load()
 SHEET_PREFIX_NAME = WCFG[u"sheet_name_prefix"]
 DEFAULT_PREFIX = WCFG[u"sheet_number_prefix"]
@@ -293,7 +294,7 @@ def _system_hints():
                 continue
             v = p.AsString()
             if v:
-                out[int(s.Id.Value)] = v
+                out[int(thl_eid(s.Id))] = v
         except Exception:
             continue
     return out
@@ -309,7 +310,7 @@ def _titleblock_by_sheet():
     for tb in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_TitleBlocks) \
             .WhereElementIsNotElementType().ToElements():
         try:
-            result[int(tb.OwnerViewId.Value)] = tb
+            result[int(thl_eid(tb.OwnerViewId))] = tb
         except Exception:
             continue
     return result
@@ -441,7 +442,7 @@ def apply_plan(plan, tb_type, keep_tb=True, set_system=True):
                 old = _sheet_state(sheet)
                 if not keep_tb and tb_type is not None:
                     tb = tb_map.get(int(sid.Value))
-                    if tb is not None and tb.GetTypeId().Value != tb_type.Id.Value:
+                    if tb is not None and thl_eid(tb.GetTypeId()) != thl_eid(tb_type.Id):
                         tb.ChangeTypeId(tb_type.Id)
                 if set_system:
                     p = sheet.LookupParameter(SYSTEM_PARAM)
@@ -497,7 +498,7 @@ def _sheet_info():
         try:
             if s.IsTemplate:
                 continue
-            out.append((int(s.Id.Value), s.Name or u"", s.SheetNumber or u""))
+            out.append((int(thl_eid(s.Id)), s.Name or u"", s.SheetNumber or u""))
         except Exception:
             continue
     return out

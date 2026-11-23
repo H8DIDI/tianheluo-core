@@ -25,6 +25,7 @@ import json
 
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -196,7 +197,7 @@ def read_family(fam_name):
                 assoc = 0
             rows.append({
                 'name': nm, 'guid': (str(p.GUID) if p.IsShared else None), 'inst': bool(p.IsInstance), 'shared': bool(p.IsShared),
-                'builtin': int(p.Id.Value) < 0, 'formula': p.Formula or '', 'dtype': _data_type_name(p),
+                'builtin': int(thl_eid(p.Id)) < 0, 'formula': p.Formula or '', 'dtype': _data_type_name(p),
                 'assoc': assoc, 'labels': labels.get(nm, 0), 'used_by': used_by.get(nm, []),
             })
         return {'params': rows, 'types': fm.Types.Size}
@@ -352,7 +353,7 @@ def take_snapshot(cfg, wells_by_fam, infos, progress=None):
                     rec['geom'] = geom_sig(e)
                 except Exception:
                     pass
-            snap['wells'][str(int(e.Id.Value))] = rec
+            snap['wells'][str(int(thl_eid(e.Id)))] = rec
     return snap
 
 
@@ -416,7 +417,7 @@ def compare_snapshot(cfg, old, wells_by_fam, infos):
     cur_ids = {}
     for fam, lst in wells_by_fam.items():
         for e, mk in lst:
-            cur_ids[str(int(e.Id.Value))] = (e, mk, fam)
+            cur_ids[str(int(thl_eid(e.Id)))] = (e, mk, fam)
     for wid, rec in old['wells'].items():
         if wid not in cur_ids:
             missing_wells.append(rec['mark'])

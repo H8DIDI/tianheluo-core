@@ -16,6 +16,7 @@ from pyrevit import revit, DB, UI, forms
 # @include _shared/ws_guard.py
 # @include _shared/well_config.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 import io
 import os
 import json

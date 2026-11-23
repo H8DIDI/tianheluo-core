@@ -9,6 +9,7 @@ import math
 from pyrevit import revit, DB, UI, forms
 
 # @include _shared/xlsx_lite.py
+# @include _shared/compat.py
 import io
 import os
 import traceback
@@ -91,7 +92,7 @@ def build_rows(elems):
             d = e.Location.Curve.Length * FT
         for lab, p in _pts(e):
             q = tf.OfPoint(p)
-            rows.append([e.Id.Value, cat, f, t, mk, _comment(e), round(d) if d else u'', lab,
+            rows.append([thl_eid(e.Id), cat, f, t, mk, _comment(e), round(d) if d else u'', lab,
                          round(p.X * M, 3), round(p.Y * M, 3), round(p.Z * M, 3),
                          round(q.X * M, 3), round(q.Y * M, 3), round(q.Z * M, 3)])
         pts = _pts(e)

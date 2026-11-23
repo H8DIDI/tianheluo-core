@@ -16,6 +16,7 @@ WS_PREFIX = WCFG[u"sheet_name_prefix"]
 # @include _shared/annotate_core.py
 
 # @include _shared/well_geo.py
+# @include _shared/compat.py
 
 TITLE = u'井大样变动同步'
 
@@ -47,7 +48,7 @@ def step(name, work):
 def _viewer_of(v):
     for i in v.GetDependentElements(None):
         e = doc.GetElement(i)
-        if e is not None and e.Category is not None and e.Category.Id.Value == int(DB.BuiltInCategory.OST_Viewers):
+        if e is not None and e.Category is not None and thl_eid(e.Category.Id) == int(DB.BuiltInCategory.OST_Viewers):
             return i
     return None
 
@@ -169,7 +170,7 @@ def _save_cache(row):
         bb = row['well'].get_BoundingBox(None)
         ent['bbox'] = [round(bb.Min.X, 2), round(bb.Min.Y, 2), round(bb.Min.Z, 2),
                        round(bb.Max.X, 2), round(bb.Max.Y, 2), round(bb.Max.Z, 2)]
-        ent['sheet_id'] = int(row['sheet'].Id.Value)
+        ent['sheet_id'] = int(thl_eid(row['sheet'].Id))
         ent.setdefault('number', row['sheet'].SheetNumber)
         ent.setdefault('name', row['sheet'].Name)
         cache[row['mark']] = ent

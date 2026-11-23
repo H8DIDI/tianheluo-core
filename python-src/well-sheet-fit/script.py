@@ -26,6 +26,7 @@ import json
 
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
+# @include _shared/compat.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -272,7 +273,7 @@ def collect_sheets(cfg):
     for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSheet).ToElements():
         if flt and flt not in (s.Name or ''):
             continue
-        sheets[int(s.Id.Value)] = s
+        sheets[int(thl_eid(s.Id))] = s
     got = {}
     for vp in DB.FilteredElementCollector(doc).OfClass(DB.Viewport).ToElements():
         sid = int(vp.SheetId.Value)

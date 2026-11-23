@@ -74,5 +74,18 @@ for d in sorted(SRC.iterdir()):
     if uses_form or "@include _shared/settings_ui.py" in t:
         check("接了 form_fit：" + d.name, "@include _shared/form_fit.py" in t)
 
+# ⑤ 多版本兼容（Revit 2020–2026）：脚本里不再直接写 .Id.Value（2024 起才有）；用了 thl_eid / 用了依赖它的公共片段的，必须内联 compat
+import re as _re
+_SHARED_USING = [c.name for c in (SRC / "_shared").glob("*.py") if c.name != "compat.py" and "thl_eid(" in c.read_text(encoding="utf-8")]
+for d in sorted(SRC.iterdir()):
+    f = d / "script.py"
+    if d.name.startswith("_") or d.name == "sendit" or not f.exists():
+        continue
+    t = f.read_text(encoding="utf-8")
+    check("没有直接 .Id.Value：" + d.name, not _re.search(r"\.Id\.Value\b", t))
+    needs = "thl_eid(" in t or any(("@include _shared/" + n) in t for n in _SHARED_USING)
+    if needs:
+        check("接了 compat：" + d.name, "@include _shared/compat.py" in t)
+
 print("\n%s" % ("全部通过" if not fail else "%d 项失败" % fail))
 sys.exit(1 if fail else 0)

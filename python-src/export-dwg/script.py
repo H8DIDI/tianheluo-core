@@ -24,6 +24,7 @@ uidoc = revit.uidoc
 # 图纸名前缀、井编号系列、logo 位置都来自项目配置（文档\KaifaTools\井大样配置.json），默认值与原来一样
 # @include _shared/form_fit.py
 # @include _shared/well_config.py
+# @include _shared/compat.py
 WCFG = wcfg_load()
 
 # 井的编号：AA-01、室内-A-01 这种。改过名的图纸里也能找到
@@ -622,7 +623,7 @@ def _titleblock_sheet_ids():
     ids = set()
     for tb in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_TitleBlocks).WhereElementIsNotElementType():
         try:
-            ids.add(tb.OwnerViewId.Value)
+            ids.add(thl_eid(tb.OwnerViewId))
         except Exception:
             pass
     return ids
@@ -643,10 +644,10 @@ def _file_stems(sheets, mode):
         stem = {u'num_name': u'%s_%s' % (num, nm), u'num': num}.get(mode, nm)
         stem = _safe_name(stem)
         used[stem] = used.get(stem, 0) + 1
-        out[s.Id.Value] = stem
+        out[thl_eid(s.Id)] = stem
     for s in sheets:
-        if used[out[s.Id.Value]] > 1:
-            out[s.Id.Value] = _safe_name(u'%s_%s' % (out[s.Id.Value], getattr(s, 'SheetNumber', None) or s.Id.Value))
+        if used[out[thl_eid(s.Id)]] > 1:
+            out[thl_eid(s.Id)] = _safe_name(u'%s_%s' % (out[thl_eid(s.Id)], getattr(s, 'SheetNumber', None) or thl_eid(s.Id)))
     return out
 
 
@@ -682,9 +683,9 @@ def _well_zone_items(sheets_all, well_sheets):
     每个分区一项，里面是这个分区的井对应的井大样图纸。图纸对应哪口井：
     取图纸上第一个平面视图裁剪框中心最近的那口井（相距 10 米内才算）。"""
     cand = list(well_sheets)
-    seen = set(x.Id.Value for x in cand)
+    seen = set(thl_eid(x.Id) for x in cand)
     for x in sheets_all:
-        if x.Id.Value not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
+        if thl_eid(x.Id) not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
             cand.append(x)
     if not cand:
         return []
@@ -738,9 +739,9 @@ def _zone_scope_items(sheets_all, well_sheets):
     """按范围框分区：每个范围框一项，里面是「平面视图裁剪框中心落在这个范围框里」的井大样图纸。
     范围框用它的外包盒判断（斜放的范围框边缘可能多选，导出前请看一眼清单）。"""
     cand = list(well_sheets)
-    seen = set(x.Id.Value for x in cand)
+    seen = set(thl_eid(x.Id) for x in cand)
     for x in sheets_all:      # 改过名的井大样（Manhole Details / 井大样）也算
-        if x.Id.Value not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
+        if thl_eid(x.Id) not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
             cand.append(x)
     if not cand:
         return []
@@ -757,10 +758,10 @@ def _zone_scope_items(sheets_all, well_sheets):
     for nm, bb in sorted(boxes, key=lambda t: wcfg_natural_key(t[0])):
         inside = [s for s, c in centers if c is not None and bb.Min.X <= c[0] <= bb.Max.X and bb.Min.Y <= c[1] <= bb.Max.Y]
         inside.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
-        in_any.update(x.Id.Value for x in inside)
+        in_any.update(thl_eid(x.Id) for x in inside)
         # 所有范围框都列出来（0 张的也列，选了会提示没有图纸），免得看不到某个分区
         out.append((u'范围框「%s」的井大样（%d 张）' % (nm, len(inside)), inside))
-    rest = [s for s, c in centers if s.Id.Value not in in_any]
+    rest = [s for s, c in centers if thl_eid(s.Id) not in in_any]
     if rest:
         rest.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
         out.append((u'不在任何范围框内的井大样（%d 张，含没有平面视图的）' % len(rest), rest))
@@ -1171,7 +1172,7 @@ def _export_dwg_batches(sheets, folder, stems, opt, pb, report, slim=(False, Fal
         try:
             ids = List[DB.ElementId]([x.Id for x in chunk])
             if len(chunk) == 1:
-                doc.Export(folder, stems[chunk[0].Id.Value], ids, opt)
+                doc.Export(folder, stems[thl_eid(chunk[0].Id)], ids, opt)
             else:
                 doc.Export(folder, tag, ids, opt)
         except Exception as ex:
@@ -1188,7 +1189,7 @@ def _export_dwg_batches(sheets, folder, stems, opt, pb, report, slim=(False, Fal
         sec = (_time.time() - t0) / max(1, len(chunk))
         new = [n for n in os.listdir(folder) if n not in before and n.lower().endswith(u'.dwg')]
         for x in chunk:
-            stem = stems[x.Id.Value]
+            stem = stems[thl_eid(x.Id)]
             target = os.path.join(folder, stem + u'.dwg')
             src = None
             if len(chunk) == 1:
@@ -1270,7 +1271,7 @@ def _export_pdf_each(sheets, folder, stems):
     for x in sheets:
         o = DB.PDFExportOptions()
         o.Combine = True
-        o.FileName = stems[x.Id.Value]
+        o.FileName = stems[thl_eid(x.Id)]
         try:
             if doc.Export(pdf_dir, List[DB.ElementId]([x.Id]), o):
                 n += 1
@@ -1298,17 +1299,17 @@ def _export_coord_copies(sheets, folder, stems, s, pb, report, slim):
     pairs = _plan_views_on(sheets)
     cnt = {}
     for sh, v in pairs:
-        cnt[sh.Id.Value] = cnt.get(sh.Id.Value, 0) + 1
+        cnt[thl_eid(sh.Id)] = cnt.get(thl_eid(sh.Id), 0) + 1
     opt = _dwg_options(dict(s, coords=u'shared'))
     done = []
     for sh, v in pairs:
         if pb.cancelled:
             break
-        stem = stems[sh.Id.Value] + u'_坐标'
-        if cnt[sh.Id.Value] > 1:
+        stem = stems[thl_eid(sh.Id)] + u'_坐标'
+        if cnt[thl_eid(sh.Id)] > 1:
             stem += u'_' + _safe_name(v.Name)
         sub = []
-        done += _export_dwg_batches([v], folder, {v.Id.Value: stem}, opt, pb, sub, slim)
+        done += _export_dwg_batches([v], folder, {thl_eid(v.Id): stem}, opt, pb, sub, slim)
         for x, fn, size, res in sub:
             report.append((x, fn, size, res, u'共享坐标（%s 的平面）' % (sh.SheetNumber or u'')))
     return done
@@ -1341,12 +1342,12 @@ def main():
         for x in sheets_all:
             mk = _well_mark(x)
             if mk:
-                marks[x.Id.Value] = mk
+                marks[thl_eid(x.Id)] = mk
                 well.append(x)
-        well.sort(key=lambda x: wcfg_well_sort_key(marks[x.Id.Value], WCFG))
+        well.sort(key=lambda x: wcfg_well_sort_key(marks[thl_eid(x.Id)], WCFG))
 
         def mk_of(x):
-            return marks.get(x.Id.Value, u"")
+            return marks.get(thl_eid(x.Id), u"")
 
         items = _scope_items(sheets_all, well, mk_of)
         s, idx = _dialog(_load_settings(), items, lambda t: _match_marks(t, well, mk_of))
@@ -1384,7 +1385,7 @@ def main():
 
         # 导出前检查图框：没有图框、或图框类别在图纸上被隐藏的，先告诉你
         has_tb = _titleblock_sheet_ids()
-        no_frame = [x for x in targets if isinstance(x, DB.ViewSheet) and (x.Id.Value not in has_tb or _frame_hidden(x))]
+        no_frame = [x for x in targets if isinstance(x, DB.ViewSheet) and (thl_eid(x.Id) not in has_tb or _frame_hidden(x))]
         if no_frame:
             names = u'\n'.join(u'  %s  %s' % (x.SheetNumber, x.Name) for x in no_frame[:15])
             pick = forms.CommandSwitchWindow.show(
@@ -1394,8 +1395,8 @@ def main():
             if not pick or pick.startswith(u'取消'):
                 return
             if pick.startswith(u'跳过'):
-                bad = set(x.Id.Value for x in no_frame)
-                targets = [x for x in targets if x.Id.Value not in bad]
+                bad = set(thl_eid(x.Id) for x in no_frame)
+                targets = [x for x in targets if thl_eid(x.Id) not in bad]
                 if not targets:
                     return
 
@@ -1403,10 +1404,10 @@ def main():
         report = []
         dwg_targets = targets
         if s[u'skip_existing']:
-            dwg_targets = [x for x in targets if not os.path.exists(os.path.join(folder, stems[x.Id.Value] + u'.dwg'))]
+            dwg_targets = [x for x in targets if not os.path.exists(os.path.join(folder, stems[thl_eid(x.Id)] + u'.dwg'))]
             for x in targets:
                 if x not in dwg_targets:
-                    report.append((x, stems[x.Id.Value] + u'.dwg', os.path.getsize(os.path.join(folder, stems[x.Id.Value] + u'.dwg')), u'已存在，跳过'))
+                    report.append((x, stems[thl_eid(x.Id)] + u'.dwg', os.path.getsize(os.path.join(folder, stems[thl_eid(x.Id)] + u'.dwg')), u'已存在，跳过'))
 
         t_start = _time.time()
         exported = []
