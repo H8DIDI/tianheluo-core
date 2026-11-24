@@ -351,11 +351,29 @@ public static class Store
         var url = LoadConfig().CatalogUrl;
         // 支持本地路径（C:\...\plugins.json）或 file:// 地址，方便离线/内网使用
         if (!url.Contains("://")) url = new Uri(Path.GetFullPath(url)).AbsoluteUri;
-        var text = new Uri(url).IsFile ? await ReadAllTextAsyncC(new Uri(url).LocalPath) : await WithRetry(c => c.GetStringAsync(url));
+        string text;
+        var baseUri = new Uri(url);
+        if (baseUri.IsFile)
+        {
+            text = await ReadAllTextAsyncC(baseUri.LocalPath);
+        }
+        else
+        {
+            var (body, finalUri) = await WithRetry(async c =>
+            {
+                using var resp = await c.GetAsync(url);
+                resp.EnsureSuccessStatusCode();
+                return (await resp.Content.ReadAsStringAsync(), resp.RequestMessage?.RequestUri);
+            });
+            text = body;
+            // 用重定向后的最终地址作基址：国内请求清单会被主站 302 到 cn.tianheluo.com
+            // (EdgeOne)，清单里的相对下载路径随之落到 cn，插件下载自动走加速；
+            // 海外无重定向，finalUri 与配置地址一致，行为不变。
+            if (finalUri != null) baseUri = finalUri;
+        }
         var list = ParseCatalog(text);
         // 存一份到本地：功能区按钮名字、提示用它（离线时也有），不用为改个名字重新发插件包
         try { Directory.CreateDirectory(Root); File.WriteAllText(CatalogCachePath, text); _cached = null; } catch { }
-        var baseUri = new Uri(url);
         foreach (var c in list) // 站内相对路径（/dl/xxx.thlp）→ 绝对地址
             if (!string.IsNullOrWhiteSpace(c.Download))
             {

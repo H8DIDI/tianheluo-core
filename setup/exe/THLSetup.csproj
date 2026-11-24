@@ -15,7 +15,7 @@
     <Company>didi</Company>
     <Product>天河落 THL 安装程序</Product>
     <Copyright>© 2026 didi · tianheluo.com</Copyright>
-    <Version>0.2.6</Version>
+    <Version>0.2.7</Version>
     <Deterministic>true</Deterministic>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>

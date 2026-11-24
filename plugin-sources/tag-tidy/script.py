@@ -535,6 +535,159 @@ def su_fields_dialog(title, intro, fields, values, defaults=None, extra_buttons=
     ff_fit(f).ShowDialog()
     return result[u"v"]
 
+# ---- compat（天河落共用片段，打包时内联进脚本）---------------------------------
+# 让同一份插件脚本在 Revit 2020 和 Revit 2026 里都能跑（中间的 2021–2025 大体按功能探测，同样适用）。
+# 原则：不用「年份」判断，用「这个 API 在不在」判断（hasattr），Autodesk 以后再改名也不用来改版本表。
+#   thl_eid(x)      ElementId → 整数（2024 起新增 .Value，更早只有 .IntegerValue；2026 已删 .IntegerValue）
+#   thl_make_eid(n) 整数 → ElementId（2024 起要 Int64）
+#   thl_bic(cat)    Category → BuiltInCategory 枚举（Category.BuiltInCategory 是 2022 起才有的）
+#   THL_HAS_*       有没有某个新功能，没有的时候脚本走降级写法，别硬调（硬调会 AttributeError）
+# 名字都带 thl_ 前缀，是为了不和插件里常见的局部变量名 eid / bic 撞上（局部变量会盖住同名函数）。
+import clr as _cp_clr
+import System as _cp_System
+from Autodesk.Revit import DB as _cpDB
+
+THL_HAS_ID_VALUE = hasattr(_cpDB.ElementId, 'Value')                       # 2024+
+THL_HAS_CAT_BIC = hasattr(_cpDB.Category, 'BuiltInCategory')               # 2022+
+THL_HAS_FORGE_TYPES = hasattr(_cpDB, 'SpecTypeId') and hasattr(_cpDB, 'GroupTypeId')   # 2022+ / 2024+
+THL_HAS_PDF_EXPORT = hasattr(_cpDB, 'PDFExportOptions')                    # 2022+
+THL_HAS_TOPOSOLID = hasattr(_cpDB.BuiltInCategory, 'OST_Toposolid')        # 2024+
+THL_HAS_SHEET_COLLECTION = hasattr(_cpDB, 'SheetCollection')               # 2025+
+
+
+def thl_eid(x):
+    """ElementId → 整数；None 或不是 ElementId 返回 -1。"""
+    if x is None:
+        return -1
+    if THL_HAS_ID_VALUE:
+        try:
+            return int(x.Value)
+        except AttributeError:
+            pass
+    try:
+        return int(x.IntegerValue)
+    except AttributeError:
+        return int(x)
+
+
+def thl_make_eid(n):
+    """整数 → ElementId。"""
+    n = int(n)
+    if THL_HAS_ID_VALUE:
+        return _cpDB.ElementId(_cp_System.Int64(n))
+    return _cpDB.ElementId(n)
+
+
+def thl_bic(cat):
+    """Category → DB.BuiltInCategory 枚举值；自定义类别（ID 为正数）返回 None。"""
+    if cat is None:
+        return None
+    if THL_HAS_CAT_BIC:
+        try:
+            return cat.BuiltInCategory
+        except Exception:
+            return None
+    v = thl_eid(cat.Id)
+    if v >= 0:
+        return None
+    try:
+        return _cp_System.Enum.ToObject(_cpDB.BuiltInCategory, v)
+    except Exception:
+        return None
+
+
+def thl_bic_by_name(name):
+    """按名字取 BuiltInCategory（如 'OST_Toposolid'）；这个版本没有就返回 None，不报错。"""
+    return getattr(_cpDB.BuiltInCategory, name, None)
+
+# ---- compat2020（天河落共用片段，打包时内联进脚本）--------------------------------
+# 只给「要在 Revit 2020 跑」的插件用的补丁（和 compat.py 分开，免得改 compat 牵动所有插件）。
+# 都是按 API 在不在判断，不按年份。
+from Autodesk.Revit import DB as _c2DB
+
+
+def thl2_is_length(p):
+    """参数是不是长度类型（2022+ 用 GetDataType，更早用 ParameterType）。"""
+    d = p.Definition
+    if hasattr(d, 'GetDataType'):
+        try:
+            return d.GetDataType() == _c2DB.SpecTypeId.Length
+        except Exception:
+            return False
+    try:
+        return d.ParameterType == _c2DB.ParameterType.Length
+    except Exception:
+        return False
+
+
+def thl2_bar_dia(t):
+    """钢筋类型的公称直径（ft）：新版 BarNominalDiameter，2020 是 BarDiameter。"""
+    if t is None:
+        return 0.0
+    try:
+        return t.BarNominalDiameter
+    except AttributeError:
+        return t.BarDiameter
+
+
+def thl2_base_point(doc, survey=False):
+    """项目基点 / 测量点：新版有静态方法，2020 要从图元里找。"""
+    if hasattr(_c2DB.BasePoint, 'GetProjectBasePoint'):
+        return _c2DB.BasePoint.GetSurveyPoint(doc) if survey else _c2DB.BasePoint.GetProjectBasePoint(doc)
+    cat = _c2DB.BuiltInCategory.OST_SharedBasePoint if survey else _c2DB.BuiltInCategory.OST_ProjectBasePoint
+    for e in _c2DB.FilteredElementCollector(doc).OfCategory(cat).WhereElementIsNotElementType():
+        return e
+    return None
+def thl2_tagged_ids(t):
+    """标记指向的本文档构件 id 列表（2022+ 一个标记可指多个，更早只有一个）。"""
+    if hasattr(t, 'GetTaggedLocalElementIds'):
+        return list(t.GetTaggedLocalElementIds())
+    try:
+        i = t.TaggedLocalElementId
+        return [] if i is None or i == _c2DB.ElementId.InvalidElementId else [i]
+    except Exception:
+        return []
+
+
+def thl2_tagged_refs(t):
+    if hasattr(t, 'GetTaggedReferences'):
+        return list(t.GetTaggedReferences())
+    try:
+        r = t.GetTaggedReference()
+        return [] if r is None else [r]
+    except Exception:
+        return []
+
+
+def thl2_leader_end(t, ref):
+    """引线端点：新版按参照取，2020 是标记自己的 LeaderEnd 属性。"""
+    if hasattr(t, 'GetLeaderEnd'):
+        return t.GetLeaderEnd(ref)
+    return t.LeaderEnd
+
+
+def thl2_set_leader_end(t, ref, pt):
+    if hasattr(t, 'SetLeaderEnd'):
+        t.SetLeaderEnd(ref, pt)
+    else:
+        t.LeaderEnd = pt
+
+def thl2_create_tag(doc, ttid, view, ref, add_leader, orient, pt):
+    """新建标记：2023+ 的 Create 带标记类型 id，更早的要 TagMode，建完再换类型。"""
+    try:
+        return _c2DB.IndependentTag.Create(doc, ttid, view.Id, ref, add_leader, orient, pt)
+    except TypeError:
+        tag = _c2DB.IndependentTag.Create(doc, view.Id, ref, add_leader, _c2DB.TagMode.TM_ADDBY_CATEGORY, orient, pt)
+        try:
+            if ttid is not None and ttid != _c2DB.ElementId.InvalidElementId:
+                tag.ChangeTypeId(ttid)
+        except Exception:
+            pass
+        return tag
+
+
+# ---- compat2020 结束 ----------------------------------------------------------------
+
 doc = revit.doc
 uidoc = revit.uidoc
 TITLE = '构件标记一键整理'
@@ -714,7 +867,7 @@ def build_obstacles(view, extra_cats=()):
             c = e.Category
             if c is None or c.CategoryType != DB.CategoryType.Model:
                 continue
-            if c.Name not in OBSTACLE_CATS and c.Id.Value not in extra_cats:
+            if c.Name not in OBSTACLE_CATS and thl_eid(c.Id) not in extra_cats:
                 continue
             if isinstance(e, (DB.IndependentTag,)):
                 continue
@@ -722,13 +875,13 @@ def build_obstacles(view, extra_cats=()):
             if isinstance(loc, DB.LocationCurve):
                 cv = loc.Curve
                 p0, p1 = cv.GetEndPoint(0), cv.GetEndPoint(1)
-                ob.add_seg(p0.X, p0.Y, p1.X, p1.Y, _half_width(e), e.Id.Value)
+                ob.add_seg(p0.X, p0.Y, p1.X, p1.Y, _half_width(e), thl_eid(e.Id))
                 n += 1
                 continue
             bb = e.get_BoundingBox(view)
             if bb is None:
                 continue
-            ob.add_rect((bb.Min.X, bb.Min.Y, bb.Max.X, bb.Max.Y), e.Id.Value)
+            ob.add_rect((bb.Min.X, bb.Min.Y, bb.Max.X, bb.Max.Y), thl_eid(e.Id))
             n += 1
         except Exception:
             continue
@@ -774,9 +927,9 @@ def measure_tag_heads(view, items, est_w, est_h):
         for x in items:
             tg = x['t']
             try:
-                key = (tg.GetTypeId().Value, tg.TagText, x.get('orient'))
+                key = (thl_eid(tg.GetTypeId()), tg.TagText, x.get('orient'))
             except Exception:
-                key = (tg.GetTypeId().Value, '', x.get('orient'))
+                key = (thl_eid(tg.GetTypeId()), '', x.get('orient'))
             if key in cache:
                 x['size'], x['size_ok'] = cache[key]
                 continue
@@ -806,7 +959,7 @@ def measure_tag_heads(view, items, est_w, est_h):
     groups = {}
     for x in items:
         try:
-            gk = (x['t'].GetTypeId().Value, x.get('orient'), len(x['t'].TagText or ''))
+            gk = (thl_eid(x['t'].GetTypeId()), x.get('orient'), len(x['t'].TagText or ''))
         except Exception:
             gk = None
         x['_gk'] = gk
@@ -1265,7 +1418,7 @@ def plan(view, cfg):
                 continue
         except Exception:
             pass
-        ids = list(t.GetTaggedLocalElementIds())
+        ids = thl2_tagged_ids(t)
         if len(ids) != 1:
             multi.append(t)
             continue
@@ -1274,14 +1427,14 @@ def plan(view, cfg):
             orphans.append(t)
             continue
         try:
-            refs = list(t.GetTaggedReferences())
+            refs = thl2_tagged_refs(t)
         except Exception:
             refs = []
         a = center_of(el)
         if not refs or a is None:
             multi.append(t)
             continue
-        items.append({'t': t, 'el': el, 'ref': refs[0], 'a': a, 'head': t.TagHeadPosition, 'own': el.Id.Value})
+        items.append({'t': t, 'el': el, 'ref': refs[0], 'a': a, 'head': t.TagHeadPosition, 'own': thl_eid(el.Id)})
     # 一管一标：同一构件上有多个标记，只留离构件中心最近的那个，其余当重复标记（可删除）
     by_el = {}
     for x in items:
@@ -1305,7 +1458,7 @@ def plan(view, cfg):
     tagged_cats = set()
     for x in items:
         try:
-            tagged_cats.add(x['el'].Category.Id.Value)
+            tagged_cats.add(thl_eid(x['el'].Category.Id))
         except Exception:
             pass
     ob, n_ob = build_obstacles(view, tagged_cats)
@@ -1313,8 +1466,8 @@ def plan(view, cfg):
     fixed = []
     locked_tagged = set()
     for t in in_group:
-        for i in t.GetTaggedLocalElementIds():
-            locked_tagged.add(i.Value)
+        for i in thl2_tagged_ids(t):
+            locked_tagged.add(thl_eid(i))
     for t in list(multi) + list(in_group):
         try:
             bb = t.get_BoundingBox(view)
@@ -1482,7 +1635,7 @@ def measure_result(items, ob, placed, gap, p_mm, cfg):
 def _fam_key(e):
     """（类别, 族名）：补标只补「视图里这个族已经有标记」的同族构件。"""
     try:
-        cat = e.Category.Id.Value
+        cat = thl_eid(e.Category.Id)
     except Exception:
         return None
     try:
@@ -1504,14 +1657,14 @@ def missing_elements(view, cfg, items, multi_tagged_ids=()):
         k = _fam_key(x['el'])
         if k is None:
             continue
-        fam_type.setdefault(k, {}).setdefault(x['t'].GetTypeId().Value, 0)
-        fam_type[k][x['t'].GetTypeId().Value] += 1
+        fam_type.setdefault(k, {}).setdefault(thl_eid(x['t'].GetTypeId()), 0)
+        fam_type[k][thl_eid(x['t'].GetTypeId())] += 1
     out = []
     min_len = cfg['min_pipe_mm'] / FT
     for cid in set(k[0] for k in fam_type):
         col = DB.FilteredElementCollector(doc, view.Id).OfCategoryId(DB.ElementId(cid)).WhereElementIsNotElementType()
         for e in col:
-            if e.Id.Value in tagged:
+            if thl_eid(e.Id) in tagged:
                 continue
             k = _fam_key(e)
             if k not in fam_type:
@@ -1534,12 +1687,12 @@ def create_missing(view, add_list):
         try:
             pt = center_of(e)
             if pt is None:
-                fails.append((e.Id.Value, '取不到构件中心'))
+                fails.append((thl_eid(e.Id), '取不到构件中心'))
                 continue
-            DB.IndependentTag.Create(doc, ttid, view.Id, DB.Reference(e), True, DB.TagOrientation.Horizontal, DB.XYZ(pt.X, pt.Y, pt.Z))
+            thl2_create_tag(doc, ttid, view, DB.Reference(e), True, DB.TagOrientation.Horizontal, DB.XYZ(pt.X, pt.Y, pt.Z))
             n += 1
         except Exception as ex:
-            fails.append((e.Id.Value, ('%s' % ex).splitlines()[0][:60]))
+            fails.append((thl_eid(e.Id), ('%s' % ex).splitlines()[0][:60]))
     return n, fails
 
 
@@ -1548,8 +1701,8 @@ def untagged_report(view, cfg, pl):
     并说明会不会补：该族视图里已有标记的补；一个标记都没有的族不补（口径：只补同族已有标记的）。返回 [(类别, 族, 个数, '补'/'不补')]。"""
     tagged = set(x['own'] for x in pl['items']) | set(pl.get('locked_tagged', set()))
     for t in view_tags(view):
-        for i in t.GetTaggedLocalElementIds():
-            tagged.add(i.Value)
+        for i in thl2_tagged_ids(t):
+            tagged.add(thl_eid(i))
     fam_has = set()
     for x in pl['items']:
         k = _fam_key(x['el'])
@@ -1562,7 +1715,7 @@ def untagged_report(view, cfg, pl):
             c = e.Category
             if c is None or c.CategoryType != DB.CategoryType.Model or c.Name in skip:
                 continue
-            if e.Id.Value in tagged:
+            if thl_eid(e.Id) in tagged:
                 continue
             k = _fam_key(e)
             if k is None:
@@ -1582,12 +1735,12 @@ def verify(items, tol_ft=1.0 / FT):
     bad = []
     for x in items:
         try:
-            le = x['t'].GetLeaderEnd(x['ref'])
+            le = thl2_leader_end(x['t'], x['ref'])
         except Exception:
-            bad.append(x['t'].Id.Value)
+            bad.append(thl_eid(x['t'].Id))
             continue
         if math.hypot(le.X - x['a'].X, le.Y - x['a'].Y) > tol_ft:
-            bad.append(x['t'].Id.Value)
+            bad.append(thl_eid(x['t'].Id))
     return bad
 
 
@@ -1619,7 +1772,7 @@ def apply(view, pl, cfg, add_list):
             except Exception:
                 pass
             tg.TagHeadPosition = DB.XYZ(x['new'][0], x['new'][1], x['head'].Z)
-            tg.SetLeaderEnd(x['ref'], DB.XYZ(x['a'].X, x['a'].Y, x['head'].Z))
+            thl2_set_leader_end(tg, x['ref'], DB.XYZ(x['a'].X, x['a'].Y, x['head'].Z))
         doc.Regenerate()
         n_add = 0
         bad = verify(pl['items'])
@@ -1652,7 +1805,7 @@ def run_all(view, cfg):
         n_add = 0
         fail_total = []
         if cfg['add_missing']:
-            add_list = [a for a in missing_elements(view, cfg, pl['items']) if a[0].Id.Value not in pl['locked_tagged']]
+            add_list = [a for a in missing_elements(view, cfg, pl['items']) if thl_eid(a[0].Id) not in pl['locked_tagged']]
             if add_list:
                 t = DB.Transaction(doc, '补标缺标构件')
                 fh = t.GetFailureHandlingOptions()
@@ -1711,10 +1864,10 @@ def main():
         if cfg['add_missing']:
             multi_ids = set()
             for t_ in view_tags(view):
-                ids_ = list(t_.GetTaggedLocalElementIds())
+                ids_ = thl2_tagged_ids(t_)
                 if len(ids_) > 1:
-                    multi_ids.update(i.Value for i in ids_)
-            add_list = [a for a in add_list if a[0].Id.Value not in multi_ids and a[0].Id.Value not in pl['locked_tagged']]
+                    multi_ids.update(thl_eid(i) for i in ids_)
+            add_list = [a for a in add_list if thl_eid(a[0].Id) not in multi_ids and thl_eid(a[0].Id) not in pl['locked_tagged']]
         msg = ('当前视图（比例 1:%d）：\n'
                '  单构件标记 %d 个：引线末端设到构件中心，标记头选空的一侧、不压任何构件、同侧平齐（已吸附 %d 个）\n'
                '  悬空标记 %d 个、同一构件上的重复标记 %d 个%s\n'

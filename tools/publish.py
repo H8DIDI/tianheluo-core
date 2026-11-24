@@ -29,7 +29,7 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SITE = pathlib.Path(os.environ.get("THL_SITE_DIR", r"C:\KAIFA\tianheluo-web"))
 LIVE = "https://tianheluo.com"
-GIT = ["git", "-c", "user.name=H8DIDI", "-c", "user.email=jiajiabimer@gmail.com"]
+GIT = ["git", "-c", "user.name=H8DIDI", "-c", "user.email=" + os.environ.get("THL_GIT_EMAIL", "H8DIDI@users.noreply.github.com")]
 ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
 
 
