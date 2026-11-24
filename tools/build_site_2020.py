@@ -85,7 +85,8 @@ except Exception:
 host = {
     "version": version,
     "released": prev["released"] if prev.get("version") == version and prev.get("released") else today,
-    "notes": "Revit 2020 版宿主：只显示支持 Revit 2020 的插件，独立的 2020 商店；与 2026 版共用同一套功能。",
+    # 更新说明与 2026 版共用 docs/host_notes.txt 的第一段（两版共用同一套源码）
+    "notes": (ROOT / "docs" / "host_notes.txt").read_text(encoding="utf-8").strip().split("\n\n")[0].replace("\n", " "),
     "assets": {"net472": {"url": "/api/dl/host2020-net472", "file": f"/dl/host2020/{name}", "sha256": sha, "size": pkg.stat().st_size}},
     "installer": {"file": "/dl/THL-Host.zip"},
 }

@@ -61,6 +61,25 @@ public sealed class CatalogItem
     public bool IsCommunity => string.Equals(Tier, "community", StringComparison.OrdinalIgnoreCase);
     /// <summary>支持的 Revit 版本，写法同 plugin.json 的 revit（"2020"、"2020,2026"、"2020-2026"、"2024+"）。缺省按 2026。</summary>
     [JsonPropertyName("revit")] public string Revit { get; set; } = "2026";
+    /// <summary>一句话看懂：【动作】对象 → 结果（网站 content/plugins/&lt;id&gt;.json 写的，清单里带下来）。</summary>
+    [JsonPropertyName("pitch")] public Pitch? Pitch { get; set; }
+    /// <summary>改名前的旧名字：搜旧名也能搜到。</summary>
+    [JsonPropertyName("aliases")] public List<string> Aliases { get; set; } = new();
+    public string SearchText => Name + " " + Id + " " + Summary + " " + string.Join(" ", Aliases) + " " + (Pitch?.Text ?? "");
+}
+
+/// <summary>插件一句话：verb=动作、obj=对象、result=结果、how=怎么用（一键/框选/点选/先选中/对话框）、safe=只读/先预览/可撤销/可还原/可恢复。</summary>
+public sealed class Pitch
+{
+    [JsonPropertyName("verb")] public string Verb { get; set; } = "";
+    [JsonPropertyName("obj")] public string Obj { get; set; } = "";
+    [JsonPropertyName("result")] public string Result { get; set; } = "";
+    [JsonPropertyName("how")] public string How { get; set; } = "";
+    [JsonPropertyName("safe")] public string Safe { get; set; } = "";
+    public bool Valid => Verb.Length > 0 && Obj.Length > 0;
+    public string Text => Valid ? $"【{Verb}】{Obj} → {Result}" : "";
+    /// <summary>功能区按钮的提示：第一行一句话，第二行怎么用 / 会不会改模型。</summary>
+    public string Tip => Valid ? Text + "\n" + string.Join(" · ", new[] { How, Safe }.Where(s => s.Length > 0)) : "";
 }
 
 /// <summary>用户数据目录 + 已安装插件管理（安装 / 卸载 / 启用 / 停用）</summary>
@@ -333,9 +352,9 @@ public static class Store
         // 支持本地路径（C:\...\plugins.json）或 file:// 地址，方便离线/内网使用
         if (!url.Contains("://")) url = new Uri(Path.GetFullPath(url)).AbsoluteUri;
         var text = new Uri(url).IsFile ? await ReadAllTextAsyncC(new Uri(url).LocalPath) : await WithRetry(c => c.GetStringAsync(url));
-        using var doc = JsonDocument.Parse(text);
-        var arr = doc.RootElement.GetProperty("plugins");
-        var list = JsonSerializer.Deserialize<List<CatalogItem>>(arr.GetRawText(), Json) ?? new();
+        var list = ParseCatalog(text);
+        // 存一份到本地：功能区按钮名字、提示用它（离线时也有），不用为改个名字重新发插件包
+        try { Directory.CreateDirectory(Root); File.WriteAllText(CatalogCachePath, text); _cached = null; } catch { }
         var baseUri = new Uri(url);
         foreach (var c in list) // 站内相对路径（/dl/xxx.thlp）→ 绝对地址
             if (!string.IsNullOrWhiteSpace(c.Download))
@@ -346,6 +365,36 @@ public static class Store
             }
         return list.Where(c => c.Status != "planned" && !string.IsNullOrWhiteSpace(c.Download) && SupportsRevit(c.Revit)).ToList();
     }
+
+    static List<CatalogItem> ParseCatalog(string text)
+    {
+        using var doc = JsonDocument.Parse(text);
+        return JsonSerializer.Deserialize<List<CatalogItem>>(doc.RootElement.GetProperty("plugins").GetRawText(), Json) ?? new();
+    }
+
+    static string CatalogCachePath => Path.Combine(Root, "catalog-cache.json");
+    static Dictionary<string, CatalogItem>? _cached;
+
+    /// <summary>上次成功读到的商店清单（本地缓存）里的这个插件；没有缓存返回 null。</summary>
+    public static CatalogItem? Cached(string id)
+    {
+        if (_cached == null)
+        {
+            _cached = new();
+            try { if (File.Exists(CatalogCachePath)) foreach (var c in ParseCatalog(File.ReadAllText(CatalogCachePath))) _cached[c.Id] = c; }
+            catch { /* 缓存坏了就当没有 */ }
+        }
+        return _cached.TryGetValue(id, out var item) ? item : null;
+    }
+
+    /// <summary>显示用的名字：商店里改过名就用新名字，否则用插件包里的名字。</summary>
+    public static string DisplayName(Manifest m)
+    {
+        var c = Cached(m.Id);
+        return c != null && !string.IsNullOrWhiteSpace(c.Name) ? c.Name : m.Name;
+    }
+
+    public static Pitch? PitchOf(string id) => Cached(id)?.Pitch is { Valid: true } p ? p : null;
 
     /// <summary>下载并安装一个商店条目。</summary>
     public static async Task<Manifest> InstallFromCatalogAsync(CatalogItem item)

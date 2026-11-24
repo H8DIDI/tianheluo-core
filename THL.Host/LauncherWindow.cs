@@ -130,7 +130,8 @@ public sealed class LauncherWindow : Window
     IEnumerable<Installed> Filter(IEnumerable<Installed> src)
     {
         var q = _search.Text.Trim();
-        return q.Length == 0 ? src : src.Where(p => (p.Manifest.Name + p.Manifest.Id + p.Manifest.Description + p.Manifest.Category)
+        return q.Length == 0 ? src : src.Where(p => (p.Manifest.Name + p.Manifest.Id + p.Manifest.Description + p.Manifest.Category
+                + " " + (Store.Cached(p.Manifest.Id)?.SearchText ?? ""))
             .Contains(q, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -177,7 +178,7 @@ public sealed class LauncherWindow : Window
             }
             buttons.AddRange(new[] { run, toggle, del });
             var verText = upd != null ? $"v{p.Manifest.Version} → v{upd.Version}" : "v" + p.Manifest.Version;
-            _list.Children.Add(Row(Icons.ForPlugin(p, 96), p.Manifest.Name, verText, p.Manifest.Description, p.Manifest.Category, p.Enabled, buttons.ToArray()));
+            _list.Children.Add(Row(Icons.ForPlugin(p, 96), Store.DisplayName(p.Manifest), verText, p.Manifest.Description, p.Manifest.Category, p.Enabled, Store.PitchOf(p.Manifest.Id), buttons.ToArray()));
         }
     }
 
@@ -186,7 +187,7 @@ public sealed class LauncherWindow : Window
         if (_catalog == null) { _list.Children.Add(Empty("正在连接商店…")); return; }
         var installed = Store.List().ToDictionary(i => i.Manifest.Id, i => i.Manifest.Version);
         var q = _search.Text.Trim();
-        var items = _catalog.Where(c => q.Length == 0 || (c.Name + c.Id + c.Summary).Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
+        var items = _catalog.Where(c => q.Length == 0 || c.SearchText.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
         if (items.Count == 0) { _list.Children.Add(Empty("商店里暂时没有可安装的插件。")); return; }
         foreach (var c in items)
         {
@@ -206,14 +207,14 @@ public sealed class LauncherWindow : Window
                 catch (Exception ex) { Flash("安装失败：" + Store.Describe(ex)); }
                 Render();
             };
-            _list.Children.Add(Row(Icons.Generate(new Manifest { Name = c.Name, Category = c.Category, Glyph = c.Glyph, Color = c.Color }, 96), c.Name, "v" + c.Version + (_counts.TryGetValue(c.Id, out var dl) && dl > 0 ? $"  ·  ⬇ {dl}" : ""), c.Summary, c.Category, true, btn));
+            _list.Children.Add(Row(Icons.Generate(new Manifest { Name = c.Name, Category = c.Category, Glyph = c.Glyph, Color = c.Color }, 96), c.Name, "v" + c.Version + (_counts.TryGetValue(c.Id, out var dl) && dl > 0 ? $"  ·  ⬇ {dl}" : ""), c.Summary, c.Category, true, c.Pitch is { Valid: true } ? c.Pitch : null, btn));
         }
     }
 
     async Task LoadCatalogAsync()
     {
         Flash("正在读取商店…");
-        try { _catalog = await Store.FetchCatalogAsync(); Flash("商店已更新，共 " + _catalog.Count + " 个可安装插件。"); }
+        try { _catalog = await Store.FetchCatalogAsync(); Flash("商店已更新，共 " + _catalog.Count + " 个可安装插件。"); App.SyncRibbon(); }
         catch (Exception ex) { _catalog = new(); Flash("连接商店失败：" + Store.Describe(ex)); }
         if (_storeTab) Render();
     }
@@ -254,6 +255,7 @@ public sealed class LauncherWindow : Window
                 catch (Exception ex) { return Store.Describe(ex); }
             });
             var catErr = await tCat; var hostErr = await tHost;
+            if (catErr == null) App.SyncRibbon();   // 商店里改了名字/一句话，功能区按钮跟着变（回到界面线程后才做）
             UpdateBanner(); Render();
             var n = PluginUpdates().Count;
             var hostNew = _hostRelease != null && HostUpdater.IsNewer(_hostRelease.Version);
@@ -373,7 +375,37 @@ public sealed class LauncherWindow : Window
         Margin = new Thickness(0, 60, 0, 0), TextWrapping = TextWrapping.Wrap,
     };
 
-    static UIElement Row(ImageSource icon, string name, string ver, string desc, string cat, bool enabled, params Button[] buttons)
+    // 一句话看懂的配色：与网站一致（动作=蓝底、对象=金、安全承诺：只读绿 / 先预览青 / 会改模型琥珀）
+    static readonly Brush VerbBg = B("#1D3A5C"), VerbLine = B("#3FA9FF"), ObjFg = B("#FCD34D"), ResFg = B("#CBD5E1"),
+                          HowFg = B("#C7D2FE"), HowLine = B("#4B4F8C");
+
+    static Brush SafeBrush(string safe) => safe switch
+    {
+        "只读" => B("#34D399"),
+        "先预览" => B("#67E8F9"),
+        _ => B("#FBBF24"),
+    };
+
+    static Border Chip(string text, Brush fg, Brush line, Brush? bg = null, double size = 11, bool bold = false) => new()
+    {
+        Margin = new Thickness(0, 0, 6, 0), Padding = new Thickness(7, 1, 7, 1), CornerRadius = new CornerRadius(6),
+        BorderBrush = line, BorderThickness = new Thickness(1), Background = bg ?? Brushes.Transparent, VerticalAlignment = VerticalAlignment.Center,
+        Child = new TextBlock { Text = text, FontSize = size, Foreground = fg, FontWeight = bold ? FontWeights.Bold : FontWeights.Normal },
+    };
+
+    /// <summary>【动作】对象 → 结果　[怎么用] [只读/可撤销…]</summary>
+    static UIElement PitchLine(Pitch p)
+    {
+        var wrap = new WrapPanel { Margin = new Thickness(0, 6, 12, 0) };
+        wrap.Children.Add(Chip(p.Verb, Brushes.White, VerbLine, VerbBg, 13, true));
+        wrap.Children.Add(new TextBlock { Text = p.Obj, FontSize = 13.5, FontWeight = FontWeights.Bold, Foreground = ObjFg, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
+        wrap.Children.Add(new TextBlock { Text = "→ " + p.Result, FontSize = 13.5, Foreground = ResFg, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0), TextWrapping = TextWrapping.Wrap });
+        if (p.How.Length > 0) wrap.Children.Add(Chip(p.How, HowFg, HowLine));
+        if (p.Safe.Length > 0) { var s = SafeBrush(p.Safe); wrap.Children.Add(Chip(p.Safe, s, s)); }
+        return wrap;
+    }
+
+    static UIElement Row(ImageSource icon, string name, string ver, string desc, string cat, bool enabled, Pitch? pitch, params Button[] buttons)
     {
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -388,7 +420,11 @@ public sealed class LauncherWindow : Window
             head.Children.Add(new Border { Margin = new Thickness(8, 1, 0, 0), Padding = new Thickness(8, 1, 8, 1), CornerRadius = new CornerRadius(10), BorderBrush = Line, BorderThickness = new Thickness(1), Child = new TextBlock { Text = cat, FontSize = 11, Foreground = Mute } });
         if (!enabled) head.Children.Add(new TextBlock { Text = "已停用", FontSize = 11, Foreground = Warn, Margin = new Thickness(8, 3, 0, 0) });
         left.Children.Add(head);
-        left.Children.Add(new TextBlock { Text = desc, Foreground = Mute, FontSize = 13, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 12, 0) });
+        if (pitch != null) left.Children.Add(PitchLine(pitch));
+        // 有一句话时，长说明收成两行（完整内容在鼠标提示里）
+        var d = new TextBlock { Text = desc, Foreground = Mute, FontSize = 13, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 12, 0) };
+        if (pitch != null) { d.MaxHeight = 40; d.TextTrimming = TextTrimming.CharacterEllipsis; d.ToolTip = desc; }
+        left.Children.Add(d);
         var img = new System.Windows.Controls.Image { Source = icon, Width = 44, Height = 44, Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center, Opacity = enabled ? 1 : 0.45 };
         RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
         Grid.SetColumn(img, 0); grid.Children.Add(img);
