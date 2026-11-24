@@ -22,7 +22,7 @@ public class DuctRouteCommand : IExternalCommand
         if (open is not null) { open.Activate(); return Result.Succeeded; }
         var rules = RouteRules.Load(out var err);
         var form = new DuctRouteForm(rules, uidoc.Selection.GetElementIds().Count);
-        form.SetBoxes(new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_VolumeOfInterest).WhereElementIsNotElementType().Select(e => (e.Id.Value, e.Name)));
+        form.SetBoxes(new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_VolumeOfInterest).WhereElementIsNotElementType().Select(e => (e.Id.V(), e.Name)));
         var handler = new RouteHandler { Form = form };
         var ev = ExternalEvent.Create(handler);
         form.Requested = req => { if (req.Kind == ReqKind.Cancel) handler.Cancel(); else { handler.Post(req); ev.Raise(); } };
@@ -170,7 +170,7 @@ public sealed class RouteHandler : IExternalEventHandler
                         var csv = Path.Combine(dir, $"碰撞检查_{DateTime.Now:yyyyMMdd-HHmmss}.csv"); File.WriteAllText(csv, GeneralCheck.ToCsv(list));
                         foreach (var cl in list.Take(40)) form.Log($"  {cl.Id} {cl.Category} {cl.System}：撞 {cl.With.Count} 个（{string.Join("、", cl.With.Take(4).Select(w => $"{w.other}·{w.category}"))}）");
                         form.ShowMessage($"检查了 {ids.Count} 个构件，{list.Count} 个有碰撞（只读，没改模型）。清单：{csv}");
-                        if (list.Count > 0) uidoc.Selection.SetElementIds(list.Select(x => new ElementId(x.Id)).ToList());
+                        if (list.Count > 0) uidoc.Selection.SetElementIds(list.Select(x => EidCompat.MakeEid(x.Id)).ToList());
                         form.Busy(false); break;
                     }
                 case ReqKind.Apply:
@@ -216,8 +216,8 @@ public sealed class RouteHandler : IExternalEventHandler
                         form.Busy(false); break;
                     }
                 case ReqKind.Select:
-                    uidoc.Selection.SetElementIds(new[] { new ElementId(req.SelectId) });
-                    try { uidoc.ShowElements(new ElementId(req.SelectId)); } catch { }
+                    uidoc.Selection.SetElementIds(new[] { EidCompat.MakeEid(req.SelectId) });
+                    try { uidoc.ShowElements(EidCompat.MakeEid(req.SelectId)); } catch { }
                     break;
             }
         }
@@ -231,7 +231,7 @@ public sealed class RouteHandler : IExternalEventHandler
         if (req.Scope == ScopeKind.Selection) { sel = uidoc.Selection.GetElementIds(); if (sel.Count == 0) { form.ShowMessage("没有选中构件，请先在 Revit 里选排管，或改选范围框"); form.Busy(false); return (null, rules); } }
         else if (req.Scope == ScopeKind.ScopeBox)
         {
-            var bb = doc.GetElement(new ElementId(req.ScopeBoxId))?.get_BoundingBox(null);
+            var bb = doc.GetElement(EidCompat.MakeEid(req.ScopeBoxId))?.get_BoundingBox(null);
             if (bb is null) { form.ShowMessage("请先选一个范围框"); form.Busy(false); return (null, rules); }
             region = new[] { bb.Min.X, bb.Min.Y, bb.Max.X, bb.Max.Y };
         }
@@ -265,7 +265,7 @@ public sealed class RouteHandler : IExternalEventHandler
 
     sealed class BankFilter : Autodesk.Revit.UI.Selection.ISelectionFilter
     {
-        public bool AllowElement(Element e) => e is FamilyInstance fi && fi.Category?.Id.Value == (long)BuiltInCategory.OST_StructuralFraming && Extractor.BankKind(fi.Symbol?.FamilyName ?? "") is not null;
+        public bool AllowElement(Element e) => e is FamilyInstance fi && fi.Category?.Id.V() == (long)BuiltInCategory.OST_StructuralFraming && Extractor.BankKind(fi.Symbol?.FamilyName ?? "") is not null;
         public bool AllowReference(Reference r, XYZ p) => false;
     }
 
@@ -313,7 +313,7 @@ public sealed class RouteHandler : IExternalEventHandler
         if (req.Scope == ScopeKind.Selection) { sel = uidoc.Selection.GetElementIds(); if (sel.Count == 0) { form.ShowMessage("没有选中构件"); form.Busy(false); return; } }
         else if (req.Scope == ScopeKind.ScopeBox)
         {
-            var bb = doc.GetElement(new ElementId(req.ScopeBoxId))?.get_BoundingBox(null);
+            var bb = doc.GetElement(EidCompat.MakeEid(req.ScopeBoxId))?.get_BoundingBox(null);
             if (bb is null) { form.ShowMessage("请先选一个范围框"); form.Busy(false); return; }
             region = new[] { bb.Min.X, bb.Min.Y, bb.Max.X, bb.Max.Y };
         }
@@ -337,7 +337,7 @@ public sealed class RouteHandler : IExternalEventHandler
         if (req.Scope == ScopeKind.Selection) { sel = uidoc.Selection.GetElementIds(); if (sel.Count == 0) { form.ShowMessage("没有选中构件，请先在 Revit 里框选排管"); form.Busy(false); return; } }
         else if (req.Scope == ScopeKind.ScopeBox)
         {
-            var bb = doc.GetElement(new ElementId(req.ScopeBoxId))?.get_BoundingBox(null);
+            var bb = doc.GetElement(EidCompat.MakeEid(req.ScopeBoxId))?.get_BoundingBox(null);
             if (bb is null) { form.ShowMessage("请先选一个范围框"); form.Busy(false); return; }
             region = new[] { bb.Min.X, bb.Min.Y, bb.Max.X, bb.Max.Y };
         }

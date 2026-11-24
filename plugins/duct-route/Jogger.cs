@@ -80,7 +80,7 @@ public static partial class Jogger
             double a = double.MaxValue, b = double.MinValue;
             foreach (var x in new[] { bb.Min.X, bb.Max.X }) foreach (var y in new[] { bb.Min.Y, bb.Max.Y })
                 { var q = new XYZ(x, y, z0) - p0; double t = q.DotProduct(u); a = Math.Min(a, t); b = Math.Max(b, t); double l = q.DotProduct(nrm); lmax = Math.Max(lmax, l); lmin = Math.Min(lmin, l); }
-            tmin = Math.Min(tmin, Math.Max(a, 0)); tmax = Math.Max(tmax, Math.Min(b, L)); top = Math.Max(top, bb.Max.Z); bot = Math.Min(bot, bb.Min.Z); obs.Add((h.Id.Value, h.Category?.Name ?? ""));
+            tmin = Math.Min(tmin, Math.Max(a, 0)); tmax = Math.Max(tmax, Math.Min(b, L)); top = Math.Max(top, bb.Max.Z); bot = Math.Min(bot, bb.Min.Z); obs.Add((h.Id.V(), h.Category?.Name ?? ""));
         }
         z0 = p0.Z + u.Z * ((tmin + tmax) / 2);                           // axis height in the middle of the clash window (the run may slope)
         double up = top + clr + r - z0, down = bot - clr - r - z0;        // down is negative
@@ -96,7 +96,7 @@ public static partial class Jogger
         if (ta - run < 0.5 || tb + run > L - 0.5) { error = $"这一段太短，放不下绕行（需要在碰撞两侧各留 {(run + margin) * Ft:0.0} m）"; return null; }
         string way = plane ? (dl > 0 ? "左边" : "右边") : (dz > 0 ? "上面" : "下面");
         string sum = $"{m.Category?.Name} {m.Id}：碰撞 {obs.Count} 个，从{way}绕，{(plane ? "平移" : "抬/压")} {dist * Ft:0.00} m，窗口 {(tb - ta) * Ft:0.0} m，斜段各 {run * Ft:0.0} m" + (plane ? "（会改平面位置）" : "");
-        return new JogPlan(m.Id.Value, m.Category?.Name ?? "", p0, p1, off, ta, tb, run, obs, sum);
+        return new JogPlan(m.Id.V(), m.Category?.Name ?? "", p0, p1, off, ta, tb, run, obs, sum);
     }
 
     /// <summary>Several parallel straight runs (a bundle) get ONE common shift so that they stay parallel and never cross each other.</summary>
@@ -370,9 +370,9 @@ public static partial class Jogger
     public static (bool ok, string message, string backup) Apply(Document doc, JogPlan pl, UIApplication? app, string? stamp = null, int index = 1)
     {
         using var guard = new Writer.DialogGuard(app);
-        var m = (MEPCurve)doc.GetElement(new ElementId(pl.Id)); var u = (pl.P1 - pl.P0).Normalize();
+        var m = (MEPCurve)doc.GetElement(EidCompat.MakeEid(pl.Id)); var u = (pl.P1 - pl.P0).Normalize();
         var far = new List<Connector>(); foreach (Connector c in m.ConnectorManager.Connectors) if (c.Origin.DistanceTo(pl.P1) < 0.02) foreach (Connector r in c.AllRefs) if (r.Owner.Id != m.Id) far.Add(r);
-        var farOwners = far.Select(c => c.Owner.Id.Value).ToList();
+        var farOwners = far.Select(c => c.Owner.Id.V()).ToList();
         var xyz = pl.Offset;
         var pa = pl.P0 + u * (pl.TaFt - pl.RunFt); var pa2 = pl.P0 + u * pl.TaFt + xyz; var pb2 = pl.P0 + u * pl.TbFt + xyz; var pb = pl.P0 + u * (pl.TbFt + pl.RunFt);
         var pts = pl.Points ?? new List<XYZ> { pl.P0, pa, pa2, pb2, pb, pl.P1 };
@@ -386,8 +386,8 @@ public static partial class Jogger
             ((LocationCurve)m.Location).Curve = Line.CreateBound(pts[0], pts[1]);
             var pieces = new List<MEPCurve> { m };
             for (int i = 1; i + 1 < pts.Count; i++) pieces.Add(Create(doc, m, pts[i], pts[i + 1]));
-            foreach (var piece in pieces.Skip(1)) { created.Add(piece.Id.Value); AddInsulation(doc, piece, ins); }
-            for (int i = 1; i + 1 < pts.Count; i++) created.Add(doc.Create.NewElbowFitting(Near(pieces[i - 1], pts[i]), Near(pieces[i], pts[i])).Id.Value);
+            foreach (var piece in pieces.Skip(1)) { created.Add(piece.Id.V()); AddInsulation(doc, piece, ins); }
+            for (int i = 1; i + 1 < pts.Count; i++) created.Add(doc.Create.NewElbowFitting(Near(pieces[i - 1], pts[i]), Near(pieces[i], pts[i])).Id.V());
             var cc = Near(pieces[^1], pl.P1); foreach (var r in far) { try { cc.ConnectTo(r); } catch { } }
             if (t.Commit() != TransactionStatus.Committed) { tg.RollBack(); return (false, "被回滚（Revit 没接受这次绕行）", ""); }
         }
@@ -427,7 +427,7 @@ public static partial class Jogger
         var parts = new List<string>();
         try
         {
-            var pieces = created.Select(i => doc.GetElement(new ElementId(i))).OfType<MEPCurve>().ToList();
+            var pieces = created.Select(i => doc.GetElement(EidCompat.MakeEid(i))).OfType<MEPCurve>().ToList();
             if (m is Pipe or Duct)
             {
                 var bad = pieces.Count(p => SysName(p) != sysBefore);
@@ -435,7 +435,7 @@ public static partial class Jogger
             }
             if (hadInsulation) parts.Add($"保温层已加到 {pieces.Count(p => InsulationOf(doc, p) is not null)}/{pieces.Count} 段");
             var obstacleIds = pl.Obstacles.Select(o => o.id).ToHashSet();
-            var again = GeneralCheck.Run(doc, created.Select(i => new ElementId(i)), 100, null).SelectMany(c => c.With).Where(w => !created.Contains(w.other) && w.other != m.Id.Value).Select(w => w.other).Distinct().ToList();
+            var again = GeneralCheck.Run(doc, created.Select(i => EidCompat.MakeEid(i)), 100, null).SelectMany(c => c.With).Where(w => !created.Contains(w.other) && w.other != m.Id.V()).Select(w => w.other).Distinct().ToList();
             parts.Add(again.Count == 0 ? "绕行后新位置没有再碰到别的构件" : $"绕行后新位置还碰到 {again.Count} 个构件：{string.Join("、", again.Take(5))}");
         }
         catch (Exception ex) { parts.Add("复检出错：" + ex.Message); }
@@ -470,7 +470,7 @@ public static partial class Jogger
     static (bool ok, string message) RestoreOne(Document doc, string file, UIApplication? app)
     {
         using var guard = new Writer.DialogGuard(app); using var d = JsonDocument.Parse(File.ReadAllText(file)); var root = d.RootElement;
-        var m = doc.GetElement(new ElementId(root.GetProperty("id").GetInt64())) as MEPCurve; if (m is null) return (false, "找不到原来的构件");
+        var m = doc.GetElement(EidCompat.MakeEid(root.GetProperty("id").GetInt64())) as MEPCurve; if (m is null) return (false, "找不到原来的构件");
         var p0 = root.GetProperty("p0").EnumerateArray().Select(x => x.GetDouble()).ToArray(); var p1 = root.GetProperty("p1").EnumerateArray().Select(x => x.GetDouble()).ToArray();
         var P0 = new XYZ(p0[0], p0[1], p0[2]); var P1 = new XYZ(p1[0], p1[1], p1[2]);
         var owners = root.GetProperty("farOwners").EnumerateArray().Select(x => x.GetInt64()).ToList();
@@ -478,11 +478,11 @@ public static partial class Jogger
         try
         {
             using var t = new Transaction(doc, "还原"); t.Start();
-            foreach (var id in root.GetProperty("created").EnumerateArray()) { var e = doc.GetElement(new ElementId(id.GetInt64())); if (e is not null) doc.Delete(e.Id); }
+            foreach (var id in root.GetProperty("created").EnumerateArray()) { var e = doc.GetElement(EidCompat.MakeEid(id.GetInt64())); if (e is not null) doc.Delete(e.Id); }
             ((LocationCurve)m.Location).Curve = Line.CreateBound(P0, P1);
             foreach (var oid in owners)
             {
-                var ow = doc.GetElement(new ElementId(oid)); if (ow is null) continue;
+                var ow = doc.GetElement(EidCompat.MakeEid(oid)); if (ow is null) continue;
                 try { Near(m, P1).ConnectTo(Near(ow, P1)); } catch { }
             }
             if (t.Commit() != TransactionStatus.Committed) { tg.RollBack(); return (false, "还原被回滚"); }

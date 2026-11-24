@@ -27,7 +27,7 @@ public static class Extractor
     public static Scene Read(Document doc, RouteRules rules, ICollection<ElementId>? selection, double[]? region, Action<string>? log = null)
     {
         var s = new Scene();
-        var sel = selection?.Select(i => i.Value).ToHashSet();
+        var sel = selection?.Select(i => i.V()).ToHashSet();
         var frames = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_StructuralFraming).WhereElementIsNotElementType().OfType<FamilyInstance>().ToList();
         foreach (var f in frames)
         {
@@ -38,7 +38,7 @@ public static class Extractor
             if (fam.StartsWith("雨水沟"))
             {
                 double dx = b.X - a.X, dy = b.Y - a.Y, dn = Math.Sqrt(dx * dx + dy * dy);
-                s.Drains.Add(new BoxObs { Id = f.Id.Value, Family = fam, IsDrain = true, MinX = box.Min.X * Ft, MinY = box.Min.Y * Ft, MinZ = box.Min.Z * Ft, MaxX = box.Max.X * Ft, MaxY = box.Max.Y * Ft, MaxZ = box.Max.Z * Ft, HasDir = dn > 1e-6, Dx = dn > 1e-6 ? dx / dn : 0, Dy = dn > 1e-6 ? dy / dn : 0 });
+                s.Drains.Add(new BoxObs { Id = f.Id.V(), Family = fam, IsDrain = true, MinX = box.Min.X * Ft, MinY = box.Min.Y * Ft, MinZ = box.Min.Z * Ft, MaxX = box.Max.X * Ft, MaxY = box.Max.Y * Ft, MaxZ = box.Max.Z * Ft, HasDir = dn > 1e-6, Dx = dn > 1e-6 ? dx / dn : 0, Dy = dn > 1e-6 ? dy / dn : 0 });
                 continue;
             }
             var kind = BankKind(fam); if (kind is null) continue;
@@ -49,7 +49,7 @@ public static class Extractor
             double h = bh - Math.Abs(b.Z - a.Z) * Ft; double off = (box.Min.Z - Math.Min(a.Z, b.Z)) * Ft;
             var bk = new Bank
             {
-                Id = f.Id.Value, Kind = kind, Family = fam, Comment = f.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() ?? "",
+                Id = f.Id.V(), Kind = kind, Family = fam, Comment = f.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() ?? "",
                 Ax = a.X * Ft, Ay = a.Y * Ft, Bx = b.X * Ft, By = b.Y * Ft, L = L, Ux = ux, Uy = uy, Nx = -uy, Ny = ux, W = w, H = h,
                 O0 = a.Z * Ft + off, O1 = b.Z * Ft + off
             };
@@ -74,7 +74,7 @@ public static class Extractor
             string fam = g.Symbol?.FamilyName ?? "";
             s.Wells.Add(new BoxObs
             {
-                Id = g.Id.Value, Family = fam, Mark = g.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)?.AsString() ?? "", Kind = WellKind(fam),
+                Id = g.Id.V(), Family = fam, Mark = g.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)?.AsString() ?? "", Kind = WellKind(fam),
                 MinX = box.Min.X * Ft, MinY = box.Min.Y * Ft, MinZ = box.Min.Z * Ft, MaxX = box.Max.X * Ft, MaxY = box.Max.Y * Ft, MaxZ = box.Max.Z * Ft
             });
         }

@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 天河落宿主 · Revit 2020 版（.NET Framework 4.7.2）。源码与 THL.Host 共用（用 #if NETFRAMEWORK 区分），
+       这样两个宿主的功能区/商店/热加载/Python 兼容层永远是同一份逻辑。 -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>THL.Host</RootNamespace>
+    <AssemblyName>THL.Host</AssemblyName>
+    <Company>didi</Company>
+    <Authors>didi</Authors>
+    <Product>天河落 THL</Product>
+    <Copyright>© 2026 didi · tianheluo.com</Copyright>
+    <Description>天河落 THL：Revit 2020 插件宿主</Description>
+    <AssemblyVersion>0.2.5.0</AssemblyVersion>
+    <FileVersion>0.2.5.0</FileVersion>
+    <InformationalVersion>0.2.5</InformationalVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <RevitVersion>2020</RevitVersion>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
+    <RevitAddinsDir>$(AppData)\Autodesk\Revit\Addins\$(RevitVersion)</RevitAddinsDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\THL.Host\*.cs" Exclude="..\THL.Host\KAIFAthl_deploytest\**" />
+    <Compile Include="Compat\*.cs" />
+    <EmbeddedResource Include="..\THL.Host\pyrevit_shim.py" LogicalName="THL.Host.pyrevit_shim.py" />
+    <EmbeddedResource Include="..\THL.Host\apply-update.ps1" LogicalName="THL.Host.apply-update.ps1" />
+    <None Include="THL.addin" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="RevitAPI"><HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="RevitAPIUI"><HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <PackageReference Include="IronPython" Version="3.4.2" />
+    <PackageReference Include="IronPython.StdLib" Version="3.4.2" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="System" />
+    <Using Include="System.Collections.Generic" />
+    <Using Include="System.Linq" />
+    <Using Include="System.Threading" />
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+    <Using Include="System.Threading.Tasks" />
+  </ItemGroup>
+
+  <!-- 构建后部署到 Revit 2020 的用户插件目录。Revit 运行时会锁定 THL.Host.dll，部署前请先关闭 Revit（或用 KaifaRun 卸载）。 -->
+  <Target Name="DeployToRevit" AfterTargets="Build" Condition="'$(DeployRevit)'=='1'">
+    <ItemGroup>
+      <DeployFiles Include="$(TargetDir)*.dll;$(TargetDir)*.pdb" />
+      <PyLib Include="$(TargetDir)lib\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="$(TargetDir)THL.addin" DestinationFolder="$(RevitAddinsDir)" ContinueOnError="true" />
+    <Copy SourceFiles="@(DeployFiles)" DestinationFolder="$(RevitAddinsDir)\THL" ContinueOnError="true" />
+    <Copy SourceFiles="@(PyLib)" DestinationFiles="@(PyLib->'$(RevitAddinsDir)\THL\lib\%(RecursiveDir)%(Filename)%(Extension)')" ContinueOnError="true" />
+    <Message Importance="high" Text="Deployed THL.Host to $(RevitAddinsDir)" />
+  </Target>
+
+</Project>

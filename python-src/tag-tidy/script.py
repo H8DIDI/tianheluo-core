@@ -26,6 +26,7 @@ from pyrevit import revit, forms
 # @include _shared/form_fit.py
 # @include _shared/settings_ui.py
 # @include _shared/compat.py
+# @include _shared/compat2020.py
 
 doc = revit.doc
 uidoc = revit.uidoc
@@ -757,7 +758,7 @@ def plan(view, cfg):
                 continue
         except Exception:
             pass
-        ids = list(t.GetTaggedLocalElementIds())
+        ids = thl2_tagged_ids(t)
         if len(ids) != 1:
             multi.append(t)
             continue
@@ -766,7 +767,7 @@ def plan(view, cfg):
             orphans.append(t)
             continue
         try:
-            refs = list(t.GetTaggedReferences())
+            refs = thl2_tagged_refs(t)
         except Exception:
             refs = []
         a = center_of(el)
@@ -805,8 +806,8 @@ def plan(view, cfg):
     fixed = []
     locked_tagged = set()
     for t in in_group:
-        for i in t.GetTaggedLocalElementIds():
-            locked_tagged.add(i.Value)
+        for i in thl2_tagged_ids(t):
+            locked_tagged.add(thl_eid(i))
     for t in list(multi) + list(in_group):
         try:
             bb = t.get_BoundingBox(view)
@@ -1028,7 +1029,7 @@ def create_missing(view, add_list):
             if pt is None:
                 fails.append((thl_eid(e.Id), '取不到构件中心'))
                 continue
-            DB.IndependentTag.Create(doc, ttid, view.Id, DB.Reference(e), True, DB.TagOrientation.Horizontal, DB.XYZ(pt.X, pt.Y, pt.Z))
+            thl2_create_tag(doc, ttid, view, DB.Reference(e), True, DB.TagOrientation.Horizontal, DB.XYZ(pt.X, pt.Y, pt.Z))
             n += 1
         except Exception as ex:
             fails.append((thl_eid(e.Id), ('%s' % ex).splitlines()[0][:60]))
@@ -1040,8 +1041,8 @@ def untagged_report(view, cfg, pl):
     并说明会不会补：该族视图里已有标记的补；一个标记都没有的族不补（口径：只补同族已有标记的）。返回 [(类别, 族, 个数, '补'/'不补')]。"""
     tagged = set(x['own'] for x in pl['items']) | set(pl.get('locked_tagged', set()))
     for t in view_tags(view):
-        for i in t.GetTaggedLocalElementIds():
-            tagged.add(i.Value)
+        for i in thl2_tagged_ids(t):
+            tagged.add(thl_eid(i))
     fam_has = set()
     for x in pl['items']:
         k = _fam_key(x['el'])
@@ -1074,7 +1075,7 @@ def verify(items, tol_ft=1.0 / FT):
     bad = []
     for x in items:
         try:
-            le = x['t'].GetLeaderEnd(x['ref'])
+            le = thl2_leader_end(x['t'], x['ref'])
         except Exception:
             bad.append(thl_eid(x['t'].Id))
             continue
@@ -1111,7 +1112,7 @@ def apply(view, pl, cfg, add_list):
             except Exception:
                 pass
             tg.TagHeadPosition = DB.XYZ(x['new'][0], x['new'][1], x['head'].Z)
-            tg.SetLeaderEnd(x['ref'], DB.XYZ(x['a'].X, x['a'].Y, x['head'].Z))
+            thl2_set_leader_end(tg, x['ref'], DB.XYZ(x['a'].X, x['a'].Y, x['head'].Z))
         doc.Regenerate()
         n_add = 0
         bad = verify(pl['items'])
@@ -1203,9 +1204,9 @@ def main():
         if cfg['add_missing']:
             multi_ids = set()
             for t_ in view_tags(view):
-                ids_ = list(t_.GetTaggedLocalElementIds())
+                ids_ = thl2_tagged_ids(t_)
                 if len(ids_) > 1:
-                    multi_ids.update(i.Value for i in ids_)
+                    multi_ids.update(thl_eid(i) for i in ids_)
             add_list = [a for a in add_list if thl_eid(a[0].Id) not in multi_ids and thl_eid(a[0].Id) not in pl['locked_tagged']]
         msg = ('当前视图（比例 1:%d）：\n'
                '  单构件标记 %d 个：引线末端设到构件中心，标记头选空的一侧、不压任何构件、同侧平齐（已吸附 %d 个）\n'

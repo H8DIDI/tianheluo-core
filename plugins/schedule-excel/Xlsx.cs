@@ -74,7 +74,7 @@ public static class Xlsx
         var colsEl = new XElement(Main + "cols", Enumerable.Range(0, cols).Select(c =>
         {
             int w = s.Rows.Take(200).Select(r => c < r.Count ? DisplayWidth(r[c]) : 0).DefaultIfEmpty(8).Max();
-            return new XElement(Main + "col", new XAttribute("min", c + 1), new XAttribute("max", c + 1), new XAttribute("width", Math.Clamp(w + 2, 8, 60)), new XAttribute("customWidth", 1));
+            return new XElement(Main + "col", new XAttribute("min", c + 1), new XAttribute("max", c + 1), new XAttribute("width", Math.Min(Math.Max(w + 2, 8), 60)), new XAttribute("customWidth", 1));
         }));
         return new XDocument(new XElement(Main + "worksheet",
             new XElement(Main + "sheetViews", new XElement(Main + "sheetView", new XAttribute("workbookViewId", 0),

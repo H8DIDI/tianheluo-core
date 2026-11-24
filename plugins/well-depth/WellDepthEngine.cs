@@ -143,8 +143,8 @@ public static class WellDepthEngine
     /// <summary>Pipes ignored because they lie above the well top.</summary>
     public static int IgnoredAbovePipes { get; private set; }
 
-    private static double ToMm(double feet) => UnitUtils.ConvertFromInternalUnits(feet, UnitTypeId.Millimeters);
-    public static double ToFeet(double mm) => UnitUtils.ConvertToInternalUnits(mm, UnitTypeId.Millimeters);
+    private static double ToMm(double feet) => feet * 304.8;
+    public static double ToFeet(double mm) => mm / 304.8;
 
     // ---- which families are "wells we may touch" ---------------------------------
 
@@ -260,7 +260,7 @@ public static class WellDepthEngine
                     zOffset = d is null ? 0 : -ToMm(d.AsDouble()) / 2.0;
                 }
 
-                list.Add(new PipeInfo(e.Id.Value, system.Value,
+                list.Add(new PipeInfo(e.Id.V(), system.Value,
                     ToMm(a.X), ToMm(a.Y), ToMm(a.Z) + zOffset,
                     ToMm(b.X), ToMm(b.Y), ToMm(b.Z) + zOffset));
             }
@@ -291,7 +291,7 @@ public static class WellDepthEngine
             var offset = DoubleParam(fi, ParamOffsetA) ?? DoubleParam(fi, ParamOffsetB);
             var w = new WellResult
             {
-                Id = fi.Id.Value,
+                Id = fi.Id.V(),
                 Mark = fi.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)?.AsString() ?? "",
                 Family = family,
                 System = system.Value,
@@ -447,7 +447,7 @@ public static class WellDepthEngine
     /// </summary>
     public static string? Apply(Document doc, WellResult w, double bottomMm, double? depthMm)
     {
-        if (doc.GetElement(new ElementId(w.Id)) is not Element e) return "找不到图元";
+        if (doc.GetElement(EidCompat.MakeEid(w.Id)) is not Element e) return "找不到图元";
 
         if (doc.IsWorkshared &&
             WorksharingUtils.GetCheckoutStatus(doc, e.Id) == CheckoutStatus.OwnedByOtherUser)

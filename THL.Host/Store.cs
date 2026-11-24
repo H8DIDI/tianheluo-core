@@ -59,6 +59,8 @@ public sealed class CatalogItem
     [JsonPropertyName("tier")] public string Tier { get; set; } = "";
     [JsonPropertyName("author")] public string Author { get; set; } = "";
     public bool IsCommunity => string.Equals(Tier, "community", StringComparison.OrdinalIgnoreCase);
+    /// <summary>支持的 Revit 版本，写法同 plugin.json 的 revit（"2020"、"2020,2026"、"2020-2026"、"2024+"）。缺省按 2026。</summary>
+    [JsonPropertyName("revit")] public string Revit { get; set; } = "2026";
 }
 
 /// <summary>用户数据目录 + 已安装插件管理（安装 / 卸载 / 启用 / 停用）</summary>
@@ -70,7 +72,12 @@ public static class Store
     /// <summary>用户数据目录。可用环境变量 THL_HOME 覆盖（测试用）。</summary>
     public static readonly string Root =
         Environment.GetEnvironmentVariable("THL_HOME")
+#if NETFRAMEWORK
+        // Revit 2020 宿主用独立的数据目录：2026 版插件（.NET 8/10）不能在 2020 里运行，两边不能共用一份已装插件
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Tianheluo", "Revit2020");
+#else
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Tianheluo");
+#endif
     public static string PluginsDir => Path.Combine(Root, "plugins");
     static string ConfigPath => Path.Combine(Root, "config.json");
 
@@ -78,15 +85,46 @@ public static class Store
 
     public sealed class Config
     {
+#if NETFRAMEWORK
+        // Revit 2020 宿主：单独的商店清单和宿主更新地址（2026 的插件 / 宿主更新包不能用在 2020）
+        [JsonPropertyName("catalogUrl")] public string CatalogUrl { get; set; } = "https://tianheluo.com/plugins2020.json";
+#else
         [JsonPropertyName("catalogUrl")] public string CatalogUrl { get; set; } = "https://tianheluo.com/plugins.json";
+#endif
         /// <summary>宿主最新版本信息（可改成本地路径或内网地址，便于离线/测试）。</summary>
+#if NETFRAMEWORK
+        [JsonPropertyName("hostUpdateUrl")] public string HostUpdateUrl { get; set; } = "https://tianheluo.com/host2020.json";
+#else
         [JsonPropertyName("hostUpdateUrl")] public string HostUpdateUrl { get; set; } = "https://tianheluo.com/host.json";
+#endif
         [JsonPropertyName("disabled")] public List<string> Disabled { get; set; } = new();
         /// <summary>功能区槽位 → 插件 id。装卸插件后槽位保持稳定，按钮不会串。</summary>
         [JsonPropertyName("slots")] public Dictionary<string, string> Slots { get; set; } = new();
     }
 
     public const int MaxSlots = 12;
+
+    /// <summary>这个宿主跑在哪个 Revit 年份上：net472 版 = 2020，其余 = 2026。</summary>
+#if NETFRAMEWORK
+    public const int HostRevitYear = 2020;
+#else
+    public const int HostRevitYear = 2026;
+#endif
+
+    /// <summary>版本说明（"2020"、"2020,2026"、"2020-2026"、"2024+"）是否包含当前宿主的 Revit 版本。空 = 只算 2026。</summary>
+    public static bool SupportsRevit(string? spec, int year = 0)
+    {
+        if (year == 0) year = HostRevitYear;
+        if (string.IsNullOrWhiteSpace(spec)) spec = "2026";
+        foreach (var raw in spec!.Split(new[] { ',', ';', ' ', '、', '，' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var t = raw.Trim();
+            if (t.EndsWith("+")) { if (int.TryParse(t.TrimEnd('+'), out var lo) && year >= lo) return true; }
+            else if (t.Contains("-")) { var ab = t.Split('-'); if (ab.Length == 2 && int.TryParse(ab[0], out var a) && int.TryParse(ab[1], out var b) && year >= a && year <= b) return true; }
+            else if (int.TryParse(t, out var y) && y == year) return true;
+        }
+        return false;
+    }
 
     /// <summary>给插件分配（或取回）一个功能区槽位；没有空位返回 0。</summary>
     public static int AssignSlot(string id)
@@ -141,6 +179,7 @@ public static class Store
             {
                 var m = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(mf), Json);
                 if (m == null || string.IsNullOrWhiteSpace(m.Id) || string.IsNullOrWhiteSpace(m.IsPython ? m.Script : m.Dll)) continue;
+                if (!SupportsRevit(m.Revit)) continue; // 不支持当前 Revit 版本的插件不显示、不出按钮
                 result.Add(new Installed { Manifest = m, Dir = dir, Enabled = !cfg.Disabled.Contains(m.Id) });
             }
             catch { /* 跳过损坏的清单 */ }
@@ -157,7 +196,7 @@ public static class Store
     }
 
     static bool ValidId(string id) =>
-        id.Length is > 0 and <= 64 && id.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
+        id.Length is > 0 and <= 64 && id.All(c => (c < 128 && char.IsLetterOrDigit(c)) || c is '-' or '_');
 
     /// <summary>从 .thlp（zip）安装；同 id 已存在则原地更新。返回安装后的清单。</summary>
     public static Manifest InstallPackage(string thlpPath)
@@ -167,6 +206,7 @@ public static class Store
         Manifest m;
         using (var s = mfEntry.Open()) m = JsonSerializer.Deserialize<Manifest>(s, Json) ?? throw new InvalidDataException("plugin.json 无法解析");
         if (!ValidId(m.Id)) throw new InvalidDataException("插件 id 只能包含字母、数字、- 和 _");
+        if (!SupportsRevit(m.Revit)) throw new InvalidDataException($"「{m.Name}」不支持 Revit {HostRevitYear}（适用版本：{m.Revit}）。");
         if (m.HostApi > HostApiVersion) throw new InvalidDataException($"「{m.Name}」需要更新的宿主（插件接口 v{m.HostApi}，当前宿主支持 v{HostApiVersion}）。请先在插件中心更新宿主。");
         if (m.IsPython) { if (string.IsNullOrWhiteSpace(m.Script)) throw new InvalidDataException("plugin.json 缺少 script"); }
         else if (string.IsNullOrWhiteSpace(m.Dll) || string.IsNullOrWhiteSpace(m.Entry)) throw new InvalidDataException("plugin.json 缺少 dll 或 entry");
@@ -213,11 +253,20 @@ public static class Store
 
     // ---------- 商店 ----------
     // 每次请求新建连接并自动重试：Revit 进程里长期复用的连接可能已被服务器关闭
+#if NETFRAMEWORK
+    static HttpClient NewClient()
+    {
+        // .NET Framework 默认只开 TLS 1.0/1.1；Cloudflare 要 TLS 1.2
+        System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+        return new HttpClient(new HttpClientHandler()) { Timeout = TimeSpan.FromSeconds(30) };
+    }
+#else
     static HttpClient NewClient() => new(new SocketsHttpHandler
     {
         PooledConnectionLifetime = TimeSpan.FromSeconds(20),
         PooledConnectionIdleTimeout = TimeSpan.FromSeconds(5),
     }) { Timeout = TimeSpan.FromSeconds(30) };
+#endif
 
     static async Task<T> WithRetry<T>(Func<HttpClient, Task<T>> op)
     {
@@ -244,13 +293,13 @@ public static class Store
     public static async Task<string> ReadTextAsync(string urlOrPath)
     {
         var u = new Uri(ToUrl(urlOrPath));
-        return u.IsFile ? await File.ReadAllTextAsync(u.LocalPath) : await WithRetry(c => c.GetStringAsync(u));
+        return u.IsFile ? await ReadAllTextAsyncC(u.LocalPath) : await WithRetry(c => c.GetStringAsync(u));
     }
 
     public static async Task<byte[]> ReadBytesAsync(string urlOrPath)
     {
         var u = new Uri(ToUrl(urlOrPath));
-        return u.IsFile ? await File.ReadAllBytesAsync(u.LocalPath) : await WithRetry(c => c.GetByteArrayAsync(u));
+        return u.IsFile ? await ReadAllBytesAsyncC(u.LocalPath) : await WithRetry(c => c.GetByteArrayAsync(u));
     }
 
     /// <summary>把相对地址（/dl/x、/api/dl/x）按基准地址补全；本地清单里的 /xxx 相对清单所在目录。</summary>
@@ -283,7 +332,7 @@ public static class Store
         var url = LoadConfig().CatalogUrl;
         // 支持本地路径（C:\...\plugins.json）或 file:// 地址，方便离线/内网使用
         if (!url.Contains("://")) url = new Uri(Path.GetFullPath(url)).AbsoluteUri;
-        var text = new Uri(url).IsFile ? await File.ReadAllTextAsync(new Uri(url).LocalPath) : await WithRetry(c => c.GetStringAsync(url));
+        var text = new Uri(url).IsFile ? await ReadAllTextAsyncC(new Uri(url).LocalPath) : await WithRetry(c => c.GetStringAsync(url));
         using var doc = JsonDocument.Parse(text);
         var arr = doc.RootElement.GetProperty("plugins");
         var list = JsonSerializer.Deserialize<List<CatalogItem>>(arr.GetRawText(), Json) ?? new();
@@ -295,7 +344,7 @@ public static class Store
                 var rel = baseUri.IsFile ? c.Download.TrimStart('/') : c.Download;
                 c.Download = new Uri(baseUri, rel).ToString();
             }
-        return list.Where(c => c.Status != "planned" && !string.IsNullOrWhiteSpace(c.Download)).ToList();
+        return list.Where(c => c.Status != "planned" && !string.IsNullOrWhiteSpace(c.Download) && SupportsRevit(c.Revit)).ToList();
     }
 
     /// <summary>下载并安装一个商店条目。</summary>
@@ -305,17 +354,29 @@ public static class Store
         try
         {
             var du = new Uri(item.Download);
-            var bytes = du.IsFile ? await File.ReadAllBytesAsync(du.LocalPath) : await WithRetry(c => c.GetByteArrayAsync(item.Download));
+            var bytes = du.IsFile ? await ReadAllBytesAsyncC(du.LocalPath) : await WithRetry(c => c.GetByteArrayAsync(item.Download));
             if (!string.IsNullOrWhiteSpace(item.Sha256))
             {
-                var got = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+                var got = Sha256Hex(bytes);
                 if (!string.Equals(got, item.Sha256.Trim(), StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("下载的文件校验失败（SHA256 与商店清单不一致），已拒绝安装。请稍后重试；若反复出现请联系维护者。");
             }
-            await File.WriteAllBytesAsync(tmp, bytes);
+            await WriteAllBytesAsyncC(tmp, bytes);
             return InstallPackage(tmp);
         }
         finally { try { File.Delete(tmp); } catch { } }
+    }
+
+    // 读写文件的异步包装：.NET Framework 没有 File.ReadAllTextAsync 等
+    static Task<string> ReadAllTextAsyncC(string p) => Task.Run(() => File.ReadAllText(p));
+    static Task<byte[]> ReadAllBytesAsyncC(string p) => Task.Run(() => File.ReadAllBytes(p));
+    static Task WriteAllBytesAsyncC(string p, byte[] b) => Task.Run(() => File.WriteAllBytes(p, b));
+    public static string Sha256Hex(byte[] data)
+    {
+        using var h = System.Security.Cryptography.SHA256.Create();
+        var sb = new System.Text.StringBuilder(64);
+        foreach (var b in h.ComputeHash(data)) sb.Append(b.ToString("x2"));
+        return sb.ToString();
     }
 
     public static bool IsNewer(string remote, string local) =>

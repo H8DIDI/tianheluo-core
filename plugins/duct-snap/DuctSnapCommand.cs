@@ -69,7 +69,7 @@ internal sealed class DuctSnapHandler : IExternalEventHandler
             switch (req.Kind)
             {
                 case DuctSnapRequestKind.Jump:
-                    var eid = new ElementId(req.Id);
+                    var eid = EidCompat.MakeEid(req.Id);
                     if (doc.GetElement(eid) is null)
                     {
                         Form.ShowMessage("这根排管已经不在模型里了，请点“重新检查”。");

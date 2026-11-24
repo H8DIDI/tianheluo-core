@@ -109,7 +109,7 @@ public static class MepTools
         var list = GeneralCheck.Run(doc, ids, 400, null);
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "KaifaTools"); Directory.CreateDirectory(dir);
         var csv = Path.Combine(dir, $"碰撞检查_{DateTime.Now:yyyyMMdd-HHmmss}.csv"); File.WriteAllText(csv, GeneralCheck.ToCsv(list));
-        if (list.Count > 0) uidoc.Selection.SetElementIds(list.Select(x => new ElementId(x.Id)).ToList());
+        if (list.Count > 0) uidoc.Selection.SetElementIds(list.Select(x => EidCompat.MakeEid(x.Id)).ToList());
         Say("管线碰撞检查", $"检查了 {ids.Count} 个构件，{list.Count} 个有碰撞（只读，没改模型）。有碰撞的已选中。\n清单：{csv}"); return Result.Succeeded;
     }
 
@@ -122,7 +122,7 @@ public static class MepTools
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "KaifaTools"); Directory.CreateDirectory(dir);
         var csv = Path.Combine(dir, $"连续性检查_{DateTime.Now:yyyyMMdd-HHmmss}.csv");
         File.WriteAllText(csv, "﻿id,类别,系统,问题\r\n" + string.Join("\r\n", issues.Select(i => $"{i.Id},{i.Category},\"{i.System}\",\"{i.Problem}\"")));
-        if (issues.Count > 0) uidoc.Selection.SetElementIds(issues.Select(i => new ElementId(i.Id)).Distinct().ToList());
+        if (issues.Count > 0) uidoc.Selection.SetElementIds(issues.Select(i => EidCompat.MakeEid(i.Id)).Distinct().ToList());
         Say("管线连续性检查", $"检查了 {ms.Count} 根，发现 {issues.Count} 处问题（只读）。有问题的已选中。\n" + string.Join("\n", issues.Take(8).Select(i => $"· {i.Id} {i.Problem}")) + $"\n清单：{csv}");
         return Result.Succeeded;
     }

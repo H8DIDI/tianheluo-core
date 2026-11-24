@@ -419,7 +419,7 @@ public sealed class ReviewForm : Form
     }
 
     private static string[] Split(string s) =>
-        s.Split(new[] { ',', '，' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        s.Split(new[] { ',', '，' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Where(x => x.Length > 0).ToArray();
 
     // ---------------- actions (all Revit work is requested, never done here) ----------------
 

@@ -164,8 +164,8 @@ public static partial class Jogger
         { var u2 = new XYZ(p1.X - p0.X, p1.Y - p0.Y, 0); double L2 = u2.GetLength(); u2 = u2.Normalize(); for (int i = 1; i + 1 < path.Count; i++) { double t = Math.Max(0, Math.Min(1, (new XYZ(path[i].X - p0.X, path[i].Y - p0.Y, 0)).DotProduct(u2) / L2)); path[i] = new XYZ(path[i].X, path[i].Y, p0.Z + (p1.Z - p0.Z) * t); } }
         for (int i = 0; i + 1 < path.Count; i++) if ((path[i + 1] - path[i]).GetLength() < 0.6 / Ft) { error = "绕行路径里有太短的一段（小于 0.6 m），弯头放不下"; return null; }
         double extra = 0, straight = ln.Length; for (int i = 0; i + 1 < path.Count; i++) extra += (path[i + 1] - path[i]).GetLength(); extra -= straight;
-        var obs = hits.Select(x => (x.Id.Value, x.Category?.Name ?? "")).ToList();
+        var obs = hits.Select(x => (x.Id.V(), x.Category?.Name ?? "")).ToList();
         string sum = $"{m.Category?.Name} {m.Id}：碰撞 {obs.Count} 个，沿障碍外沿绕，{path.Count - 2} 个转折点，多走 {extra * Ft:0.0} m（会改平面位置）";
-        return new JogPlan(m.Id.Value, m.Category?.Name ?? "", p0, p1, XYZ.Zero, 0, 0, 0, obs, sum, path);
+        return new JogPlan(m.Id.V(), m.Category?.Name ?? "", p0, p1, XYZ.Zero, 0, 0, 0, obs, sum, path);
     }
 }

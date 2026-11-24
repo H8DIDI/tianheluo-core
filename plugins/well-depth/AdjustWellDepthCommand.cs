@@ -109,7 +109,7 @@ internal sealed class ReviewHandler : IExternalEventHandler
 
     private static void Jump(UIDocument uidoc, long id)
     {
-        var eid = new ElementId(id);
+        var eid = EidCompat.MakeEid(id);
         if (uidoc.Document.GetElement(eid) is null)
         {
             TaskDialog.Show("调整井深", "这口井已经不在模型里了，请重新检查（点“保存规则并重新分析”）。");

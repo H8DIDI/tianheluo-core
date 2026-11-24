@@ -81,8 +81,8 @@ public static class Icons
     {
         var n = name.Trim();
         foreach (var pre in new[] { "一键", "清理重复", "清理", "强电" })
-            if (n.StartsWith(pre) && n.Length > pre.Length) { n = n[pre.Length..]; break; }
-        return n.Length > 0 ? n[..1] : "T";
+            if (n.StartsWith(pre) && n.Length > pre.Length) { n = n.Substring(pre.Length); break; }
+        return n.Length > 0 ? n.Substring(0, 1) : "T";
     }
 
     static BitmapSource Badge(int px, string text, Color baseColor, double fontScale, bool bold)

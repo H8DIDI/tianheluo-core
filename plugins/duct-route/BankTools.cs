@@ -104,7 +104,7 @@ public static class BankTools
         var ln = (Line)((LocationCurve)bank.Location).Curve; var p0 = ln.GetEndPoint(0);
         double t = (pt - p0).DotProduct(ln.Direction) * 0.3048, L = ln.Length * 0.3048;
         if (t < 0.5 || t > L - 0.5) return "离管端太近（两边都要留 0.5 m）";
-        var r = Cutter.Apply(doc, new List<CutPlan> { new CutPlan(bank.Id.Value, "", L, new List<(double, double)> { (0, Math.Round(t, 3)), (Math.Round(t, 3), Math.Round(L, 3)) }, new List<string>()) }, app);
+        var r = Cutter.Apply(doc, new List<CutPlan> { new CutPlan(bank.Id.V(), "", L, new List<(double, double)> { (0, Math.Round(t, 3)), (Math.Round(t, 3), Math.Round(L, 3)) }, new List<string>()) }, app);
         return r.cut == 1 ? null : string.Join("；", r.failed);
     }
 

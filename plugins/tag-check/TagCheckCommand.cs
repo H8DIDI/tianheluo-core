@@ -64,7 +64,7 @@ internal sealed class TagCheckHandler : IExternalEventHandler
         switch (req.Kind)
         {
             case TagRequestKind.Jump:
-                var eid = new ElementId(req.Id);
+                var eid = EidCompat.MakeEid(req.Id);
                 if (doc.GetElement(eid) is null)
                 {
                     TaskDialog.Show("标注检查", "这个构件已经不在模型里了，请点“重新检查”。");

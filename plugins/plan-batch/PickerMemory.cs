@@ -75,7 +75,12 @@ public static class PickerMemoryStore
             // write to a temp file first, so a crash mid-write does not leave a broken memory file
             string tmp = file + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(model, Options), Encoding.UTF8);
+            #if NETFRAMEWORK
+            if (File.Exists(file)) File.Delete(file);
+            File.Move(tmp, file);
+#else
             File.Move(tmp, file, overwrite: true);
+#endif
             return true;
         }
         catch (Exception)

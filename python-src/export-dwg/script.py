@@ -25,6 +25,7 @@ uidoc = revit.uidoc
 # @include _shared/form_fit.py
 # @include _shared/well_config.py
 # @include _shared/compat.py
+# @include _shared/compat2020.py
 WCFG = wcfg_load()
 
 # 井的编号：AA-01、室内-A-01 这种。改过名的图纸里也能找到
@@ -559,6 +560,8 @@ def _export_pdf(sheets, folder):
     ids = List[DB.ElementId]()
     for s in ordered:
         ids.Add(s.Id)
+    if not hasattr(DB, 'PDFExportOptions'):
+        return False, u"这个 Revit 版本（2022 以前）没有直接导出 PDF 的功能，只导出了 DWG；PDF 请用「打印」到 PDF 打印机。"
     o = DB.PDFExportOptions()
     o.Combine = True
     base = _safe_name(ordered[0].Name)
