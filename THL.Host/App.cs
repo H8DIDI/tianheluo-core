@@ -123,8 +123,12 @@ public class App : IExternalApplication
                     btn = (PushButton)_panel.AddItem(data);
                     _buttons[slot] = btn;
                 }
-                btn.ItemText = p.Manifest.Name;
-                btn.ToolTip = string.IsNullOrWhiteSpace(p.Manifest.Description) ? p.Manifest.Name : p.Manifest.Description;
+                var name = Store.DisplayName(p.Manifest);
+                var pitch = Store.PitchOf(p.Manifest.Id);
+                btn.ItemText = name;
+                // 提示第一行就是一句话看懂；详细说明放到按住不放才出来的长说明里
+                btn.ToolTip = pitch?.Tip ?? (string.IsNullOrWhiteSpace(p.Manifest.Description) ? name : p.Manifest.Description);
+                if (pitch != null && !string.IsNullOrWhiteSpace(p.Manifest.Description)) btn.LongDescription = p.Manifest.Description;
                 try { btn.LargeImage = Icons.ForPlugin(p, 32); btn.Image = Icons.ForPlugin(p, 16); } catch { }
                 btn.Visible = true;
             }
