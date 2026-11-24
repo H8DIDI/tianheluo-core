@@ -923,6 +923,159 @@ def su_fields_dialog(title, intro, fields, values, defaults=None, extra_buttons=
     ff_fit(f).ShowDialog()
     return result[u"v"]
 
+# ---- compat（天河落共用片段，打包时内联进脚本）---------------------------------
+# 让同一份插件脚本在 Revit 2020 和 Revit 2026 里都能跑（中间的 2021–2025 大体按功能探测，同样适用）。
+# 原则：不用「年份」判断，用「这个 API 在不在」判断（hasattr），Autodesk 以后再改名也不用来改版本表。
+#   thl_eid(x)      ElementId → 整数（2024 起新增 .Value，更早只有 .IntegerValue；2026 已删 .IntegerValue）
+#   thl_make_eid(n) 整数 → ElementId（2024 起要 Int64）
+#   thl_bic(cat)    Category → BuiltInCategory 枚举（Category.BuiltInCategory 是 2022 起才有的）
+#   THL_HAS_*       有没有某个新功能，没有的时候脚本走降级写法，别硬调（硬调会 AttributeError）
+# 名字都带 thl_ 前缀，是为了不和插件里常见的局部变量名 eid / bic 撞上（局部变量会盖住同名函数）。
+import clr as _cp_clr
+import System as _cp_System
+from Autodesk.Revit import DB as _cpDB
+
+THL_HAS_ID_VALUE = hasattr(_cpDB.ElementId, 'Value')                       # 2024+
+THL_HAS_CAT_BIC = hasattr(_cpDB.Category, 'BuiltInCategory')               # 2022+
+THL_HAS_FORGE_TYPES = hasattr(_cpDB, 'SpecTypeId') and hasattr(_cpDB, 'GroupTypeId')   # 2022+ / 2024+
+THL_HAS_PDF_EXPORT = hasattr(_cpDB, 'PDFExportOptions')                    # 2022+
+THL_HAS_TOPOSOLID = hasattr(_cpDB.BuiltInCategory, 'OST_Toposolid')        # 2024+
+THL_HAS_SHEET_COLLECTION = hasattr(_cpDB, 'SheetCollection')               # 2025+
+
+
+def thl_eid(x):
+    """ElementId → 整数；None 或不是 ElementId 返回 -1。"""
+    if x is None:
+        return -1
+    if THL_HAS_ID_VALUE:
+        try:
+            return int(x.Value)
+        except AttributeError:
+            pass
+    try:
+        return int(x.IntegerValue)
+    except AttributeError:
+        return int(x)
+
+
+def thl_make_eid(n):
+    """整数 → ElementId。"""
+    n = int(n)
+    if THL_HAS_ID_VALUE:
+        return _cpDB.ElementId(_cp_System.Int64(n))
+    return _cpDB.ElementId(n)
+
+
+def thl_bic(cat):
+    """Category → DB.BuiltInCategory 枚举值；自定义类别（ID 为正数）返回 None。"""
+    if cat is None:
+        return None
+    if THL_HAS_CAT_BIC:
+        try:
+            return cat.BuiltInCategory
+        except Exception:
+            return None
+    v = thl_eid(cat.Id)
+    if v >= 0:
+        return None
+    try:
+        return _cp_System.Enum.ToObject(_cpDB.BuiltInCategory, v)
+    except Exception:
+        return None
+
+
+def thl_bic_by_name(name):
+    """按名字取 BuiltInCategory（如 'OST_Toposolid'）；这个版本没有就返回 None，不报错。"""
+    return getattr(_cpDB.BuiltInCategory, name, None)
+
+# ---- compat2020（天河落共用片段，打包时内联进脚本）--------------------------------
+# 只给「要在 Revit 2020 跑」的插件用的补丁（和 compat.py 分开，免得改 compat 牵动所有插件）。
+# 都是按 API 在不在判断，不按年份。
+from Autodesk.Revit import DB as _c2DB
+
+
+def thl2_is_length(p):
+    """参数是不是长度类型（2022+ 用 GetDataType，更早用 ParameterType）。"""
+    d = p.Definition
+    if hasattr(d, 'GetDataType'):
+        try:
+            return d.GetDataType() == _c2DB.SpecTypeId.Length
+        except Exception:
+            return False
+    try:
+        return d.ParameterType == _c2DB.ParameterType.Length
+    except Exception:
+        return False
+
+
+def thl2_bar_dia(t):
+    """钢筋类型的公称直径（ft）：新版 BarNominalDiameter，2020 是 BarDiameter。"""
+    if t is None:
+        return 0.0
+    try:
+        return t.BarNominalDiameter
+    except AttributeError:
+        return t.BarDiameter
+
+
+def thl2_base_point(doc, survey=False):
+    """项目基点 / 测量点：新版有静态方法，2020 要从图元里找。"""
+    if hasattr(_c2DB.BasePoint, 'GetProjectBasePoint'):
+        return _c2DB.BasePoint.GetSurveyPoint(doc) if survey else _c2DB.BasePoint.GetProjectBasePoint(doc)
+    cat = _c2DB.BuiltInCategory.OST_SharedBasePoint if survey else _c2DB.BuiltInCategory.OST_ProjectBasePoint
+    for e in _c2DB.FilteredElementCollector(doc).OfCategory(cat).WhereElementIsNotElementType():
+        return e
+    return None
+def thl2_tagged_ids(t):
+    """标记指向的本文档构件 id 列表（2022+ 一个标记可指多个，更早只有一个）。"""
+    if hasattr(t, 'GetTaggedLocalElementIds'):
+        return list(t.GetTaggedLocalElementIds())
+    try:
+        i = t.TaggedLocalElementId
+        return [] if i is None or i == _c2DB.ElementId.InvalidElementId else [i]
+    except Exception:
+        return []
+
+
+def thl2_tagged_refs(t):
+    if hasattr(t, 'GetTaggedReferences'):
+        return list(t.GetTaggedReferences())
+    try:
+        r = t.GetTaggedReference()
+        return [] if r is None else [r]
+    except Exception:
+        return []
+
+
+def thl2_leader_end(t, ref):
+    """引线端点：新版按参照取，2020 是标记自己的 LeaderEnd 属性。"""
+    if hasattr(t, 'GetLeaderEnd'):
+        return t.GetLeaderEnd(ref)
+    return t.LeaderEnd
+
+
+def thl2_set_leader_end(t, ref, pt):
+    if hasattr(t, 'SetLeaderEnd'):
+        t.SetLeaderEnd(ref, pt)
+    else:
+        t.LeaderEnd = pt
+
+def thl2_create_tag(doc, ttid, view, ref, add_leader, orient, pt):
+    """新建标记：2023+ 的 Create 带标记类型 id，更早的要 TagMode，建完再换类型。"""
+    try:
+        return _c2DB.IndependentTag.Create(doc, ttid, view.Id, ref, add_leader, orient, pt)
+    except TypeError:
+        tag = _c2DB.IndependentTag.Create(doc, view.Id, ref, add_leader, _c2DB.TagMode.TM_ADDBY_CATEGORY, orient, pt)
+        try:
+            if ttid is not None and ttid != _c2DB.ElementId.InvalidElementId:
+                tag.ChangeTypeId(ttid)
+        except Exception:
+            pass
+        return tag
+
+
+# ---- compat2020 结束 ----------------------------------------------------------------
+
 WCFG = wcfg_load()
 DEPTH_SET = os.path.join(OUT_DIR, u'井深统计设置.json')
 DEPTH_DEFAULTS = {
@@ -1097,7 +1250,7 @@ def _num_mm(p):
         if p.StorageType == DB.StorageType.Double:
             v = p.AsDouble()
             try:
-                if p.Definition.GetDataType() == DB.SpecTypeId.Length:
+                if thl2_is_length(p):
                     return v * FT_TO_MM
             except Exception:
                 pass
@@ -1404,7 +1557,7 @@ def _add_one(e, res):
     if _eid(e.Category.Id) == int(DB.BuiltInCategory.OST_Rebar):
         lvl = _level_name(e)
         t = doc.GetElement(e.GetTypeId())
-        d_ft = t.BarNominalDiameter if t is not None else 0.0
+        d_ft = thl2_bar_dia(t)
         dia = round(d_ft * FT_TO_MM, 1)
         bars = int(e.NumberOfBarPositions) if int(e.NumberOfBarPositions) > 0 else 1
         length_m = e.TotalLength * FT_TO_M
@@ -1422,7 +1575,7 @@ def _add_one(e, res):
         f, t = _ftname(e)
         m = _WELL_LW.search(t) or _WELL_LW.search(f) or _WELL_LW2.search(t)
         bot, top = _well_elev_m(e)
-        res['wells'].append((mk, _well_label(e) or u'其他', f, t, _depth_mm(e), e.Id.Value,
+        res['wells'].append((mk, _well_label(e) or u'其他', f, t, _depth_mm(e), thl_eid(e.Id),
                              int(m.group(1)) if m else None, int(m.group(2)) if m else None, bot, top))
         return
     if c == int(DB.BuiltInCategory.OST_Conduit) or (c == int(DB.BuiltInCategory.OST_StructuralFraming) and _is_bank(e)):

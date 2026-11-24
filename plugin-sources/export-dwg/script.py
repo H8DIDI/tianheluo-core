@@ -485,6 +485,159 @@ def wcfg_cache_save(d):
     except Exception:
         pass
 
+# ---- compat（天河落共用片段，打包时内联进脚本）---------------------------------
+# 让同一份插件脚本在 Revit 2020 和 Revit 2026 里都能跑（中间的 2021–2025 大体按功能探测，同样适用）。
+# 原则：不用「年份」判断，用「这个 API 在不在」判断（hasattr），Autodesk 以后再改名也不用来改版本表。
+#   thl_eid(x)      ElementId → 整数（2024 起新增 .Value，更早只有 .IntegerValue；2026 已删 .IntegerValue）
+#   thl_make_eid(n) 整数 → ElementId（2024 起要 Int64）
+#   thl_bic(cat)    Category → BuiltInCategory 枚举（Category.BuiltInCategory 是 2022 起才有的）
+#   THL_HAS_*       有没有某个新功能，没有的时候脚本走降级写法，别硬调（硬调会 AttributeError）
+# 名字都带 thl_ 前缀，是为了不和插件里常见的局部变量名 eid / bic 撞上（局部变量会盖住同名函数）。
+import clr as _cp_clr
+import System as _cp_System
+from Autodesk.Revit import DB as _cpDB
+
+THL_HAS_ID_VALUE = hasattr(_cpDB.ElementId, 'Value')                       # 2024+
+THL_HAS_CAT_BIC = hasattr(_cpDB.Category, 'BuiltInCategory')               # 2022+
+THL_HAS_FORGE_TYPES = hasattr(_cpDB, 'SpecTypeId') and hasattr(_cpDB, 'GroupTypeId')   # 2022+ / 2024+
+THL_HAS_PDF_EXPORT = hasattr(_cpDB, 'PDFExportOptions')                    # 2022+
+THL_HAS_TOPOSOLID = hasattr(_cpDB.BuiltInCategory, 'OST_Toposolid')        # 2024+
+THL_HAS_SHEET_COLLECTION = hasattr(_cpDB, 'SheetCollection')               # 2025+
+
+
+def thl_eid(x):
+    """ElementId → 整数；None 或不是 ElementId 返回 -1。"""
+    if x is None:
+        return -1
+    if THL_HAS_ID_VALUE:
+        try:
+            return int(x.Value)
+        except AttributeError:
+            pass
+    try:
+        return int(x.IntegerValue)
+    except AttributeError:
+        return int(x)
+
+
+def thl_make_eid(n):
+    """整数 → ElementId。"""
+    n = int(n)
+    if THL_HAS_ID_VALUE:
+        return _cpDB.ElementId(_cp_System.Int64(n))
+    return _cpDB.ElementId(n)
+
+
+def thl_bic(cat):
+    """Category → DB.BuiltInCategory 枚举值；自定义类别（ID 为正数）返回 None。"""
+    if cat is None:
+        return None
+    if THL_HAS_CAT_BIC:
+        try:
+            return cat.BuiltInCategory
+        except Exception:
+            return None
+    v = thl_eid(cat.Id)
+    if v >= 0:
+        return None
+    try:
+        return _cp_System.Enum.ToObject(_cpDB.BuiltInCategory, v)
+    except Exception:
+        return None
+
+
+def thl_bic_by_name(name):
+    """按名字取 BuiltInCategory（如 'OST_Toposolid'）；这个版本没有就返回 None，不报错。"""
+    return getattr(_cpDB.BuiltInCategory, name, None)
+
+# ---- compat2020（天河落共用片段，打包时内联进脚本）--------------------------------
+# 只给「要在 Revit 2020 跑」的插件用的补丁（和 compat.py 分开，免得改 compat 牵动所有插件）。
+# 都是按 API 在不在判断，不按年份。
+from Autodesk.Revit import DB as _c2DB
+
+
+def thl2_is_length(p):
+    """参数是不是长度类型（2022+ 用 GetDataType，更早用 ParameterType）。"""
+    d = p.Definition
+    if hasattr(d, 'GetDataType'):
+        try:
+            return d.GetDataType() == _c2DB.SpecTypeId.Length
+        except Exception:
+            return False
+    try:
+        return d.ParameterType == _c2DB.ParameterType.Length
+    except Exception:
+        return False
+
+
+def thl2_bar_dia(t):
+    """钢筋类型的公称直径（ft）：新版 BarNominalDiameter，2020 是 BarDiameter。"""
+    if t is None:
+        return 0.0
+    try:
+        return t.BarNominalDiameter
+    except AttributeError:
+        return t.BarDiameter
+
+
+def thl2_base_point(doc, survey=False):
+    """项目基点 / 测量点：新版有静态方法，2020 要从图元里找。"""
+    if hasattr(_c2DB.BasePoint, 'GetProjectBasePoint'):
+        return _c2DB.BasePoint.GetSurveyPoint(doc) if survey else _c2DB.BasePoint.GetProjectBasePoint(doc)
+    cat = _c2DB.BuiltInCategory.OST_SharedBasePoint if survey else _c2DB.BuiltInCategory.OST_ProjectBasePoint
+    for e in _c2DB.FilteredElementCollector(doc).OfCategory(cat).WhereElementIsNotElementType():
+        return e
+    return None
+def thl2_tagged_ids(t):
+    """标记指向的本文档构件 id 列表（2022+ 一个标记可指多个，更早只有一个）。"""
+    if hasattr(t, 'GetTaggedLocalElementIds'):
+        return list(t.GetTaggedLocalElementIds())
+    try:
+        i = t.TaggedLocalElementId
+        return [] if i is None or i == _c2DB.ElementId.InvalidElementId else [i]
+    except Exception:
+        return []
+
+
+def thl2_tagged_refs(t):
+    if hasattr(t, 'GetTaggedReferences'):
+        return list(t.GetTaggedReferences())
+    try:
+        r = t.GetTaggedReference()
+        return [] if r is None else [r]
+    except Exception:
+        return []
+
+
+def thl2_leader_end(t, ref):
+    """引线端点：新版按参照取，2020 是标记自己的 LeaderEnd 属性。"""
+    if hasattr(t, 'GetLeaderEnd'):
+        return t.GetLeaderEnd(ref)
+    return t.LeaderEnd
+
+
+def thl2_set_leader_end(t, ref, pt):
+    if hasattr(t, 'SetLeaderEnd'):
+        t.SetLeaderEnd(ref, pt)
+    else:
+        t.LeaderEnd = pt
+
+def thl2_create_tag(doc, ttid, view, ref, add_leader, orient, pt):
+    """新建标记：2023+ 的 Create 带标记类型 id，更早的要 TagMode，建完再换类型。"""
+    try:
+        return _c2DB.IndependentTag.Create(doc, ttid, view.Id, ref, add_leader, orient, pt)
+    except TypeError:
+        tag = _c2DB.IndependentTag.Create(doc, view.Id, ref, add_leader, _c2DB.TagMode.TM_ADDBY_CATEGORY, orient, pt)
+        try:
+            if ttid is not None and ttid != _c2DB.ElementId.InvalidElementId:
+                tag.ChangeTypeId(ttid)
+        except Exception:
+            pass
+        return tag
+
+
+# ---- compat2020 结束 ----------------------------------------------------------------
+
 WCFG = wcfg_load()
 
 # 井的编号：AA-01、室内-A-01 这种。改过名的图纸里也能找到
@@ -1019,6 +1172,8 @@ def _export_pdf(sheets, folder):
     ids = List[DB.ElementId]()
     for s in ordered:
         ids.Add(s.Id)
+    if not hasattr(DB, 'PDFExportOptions'):
+        return False, u"这个 Revit 版本（2022 以前）没有直接导出 PDF 的功能，只导出了 DWG；PDF 请用「打印」到 PDF 打印机。"
     o = DB.PDFExportOptions()
     o.Combine = True
     base = _safe_name(ordered[0].Name)
@@ -1083,7 +1238,7 @@ def _titleblock_sheet_ids():
     ids = set()
     for tb in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_TitleBlocks).WhereElementIsNotElementType():
         try:
-            ids.add(tb.OwnerViewId.Value)
+            ids.add(thl_eid(tb.OwnerViewId))
         except Exception:
             pass
     return ids
@@ -1104,10 +1259,10 @@ def _file_stems(sheets, mode):
         stem = {u'num_name': u'%s_%s' % (num, nm), u'num': num}.get(mode, nm)
         stem = _safe_name(stem)
         used[stem] = used.get(stem, 0) + 1
-        out[s.Id.Value] = stem
+        out[thl_eid(s.Id)] = stem
     for s in sheets:
-        if used[out[s.Id.Value]] > 1:
-            out[s.Id.Value] = _safe_name(u'%s_%s' % (out[s.Id.Value], getattr(s, 'SheetNumber', None) or s.Id.Value))
+        if used[out[thl_eid(s.Id)]] > 1:
+            out[thl_eid(s.Id)] = _safe_name(u'%s_%s' % (out[thl_eid(s.Id)], getattr(s, 'SheetNumber', None) or thl_eid(s.Id)))
     return out
 
 
@@ -1143,9 +1298,9 @@ def _well_zone_items(sheets_all, well_sheets):
     每个分区一项，里面是这个分区的井对应的井大样图纸。图纸对应哪口井：
     取图纸上第一个平面视图裁剪框中心最近的那口井（相距 10 米内才算）。"""
     cand = list(well_sheets)
-    seen = set(x.Id.Value for x in cand)
+    seen = set(thl_eid(x.Id) for x in cand)
     for x in sheets_all:
-        if x.Id.Value not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
+        if thl_eid(x.Id) not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
             cand.append(x)
     if not cand:
         return []
@@ -1199,9 +1354,9 @@ def _zone_scope_items(sheets_all, well_sheets):
     """按范围框分区：每个范围框一项，里面是「平面视图裁剪框中心落在这个范围框里」的井大样图纸。
     范围框用它的外包盒判断（斜放的范围框边缘可能多选，导出前请看一眼清单）。"""
     cand = list(well_sheets)
-    seen = set(x.Id.Value for x in cand)
+    seen = set(thl_eid(x.Id) for x in cand)
     for x in sheets_all:      # 改过名的井大样（Manhole Details / 井大样）也算
-        if x.Id.Value not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
+        if thl_eid(x.Id) not in seen and (u'Manhole Details' in (x.Name or u'') or u'井大样' in (x.Name or u'')):
             cand.append(x)
     if not cand:
         return []
@@ -1218,10 +1373,10 @@ def _zone_scope_items(sheets_all, well_sheets):
     for nm, bb in sorted(boxes, key=lambda t: wcfg_natural_key(t[0])):
         inside = [s for s, c in centers if c is not None and bb.Min.X <= c[0] <= bb.Max.X and bb.Min.Y <= c[1] <= bb.Max.Y]
         inside.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
-        in_any.update(x.Id.Value for x in inside)
+        in_any.update(thl_eid(x.Id) for x in inside)
         # 所有范围框都列出来（0 张的也列，选了会提示没有图纸），免得看不到某个分区
         out.append((u'范围框「%s」的井大样（%d 张）' % (nm, len(inside)), inside))
-    rest = [s for s, c in centers if s.Id.Value not in in_any]
+    rest = [s for s, c in centers if thl_eid(s.Id) not in in_any]
     if rest:
         rest.sort(key=lambda x: wcfg_natural_key(x.SheetNumber))
         out.append((u'不在任何范围框内的井大样（%d 张，含没有平面视图的）' % len(rest), rest))
@@ -1632,7 +1787,7 @@ def _export_dwg_batches(sheets, folder, stems, opt, pb, report, slim=(False, Fal
         try:
             ids = List[DB.ElementId]([x.Id for x in chunk])
             if len(chunk) == 1:
-                doc.Export(folder, stems[chunk[0].Id.Value], ids, opt)
+                doc.Export(folder, stems[thl_eid(chunk[0].Id)], ids, opt)
             else:
                 doc.Export(folder, tag, ids, opt)
         except Exception as ex:
@@ -1649,7 +1804,7 @@ def _export_dwg_batches(sheets, folder, stems, opt, pb, report, slim=(False, Fal
         sec = (_time.time() - t0) / max(1, len(chunk))
         new = [n for n in os.listdir(folder) if n not in before and n.lower().endswith(u'.dwg')]
         for x in chunk:
-            stem = stems[x.Id.Value]
+            stem = stems[thl_eid(x.Id)]
             target = os.path.join(folder, stem + u'.dwg')
             src = None
             if len(chunk) == 1:
@@ -1731,7 +1886,7 @@ def _export_pdf_each(sheets, folder, stems):
     for x in sheets:
         o = DB.PDFExportOptions()
         o.Combine = True
-        o.FileName = stems[x.Id.Value]
+        o.FileName = stems[thl_eid(x.Id)]
         try:
             if doc.Export(pdf_dir, List[DB.ElementId]([x.Id]), o):
                 n += 1
@@ -1759,17 +1914,17 @@ def _export_coord_copies(sheets, folder, stems, s, pb, report, slim):
     pairs = _plan_views_on(sheets)
     cnt = {}
     for sh, v in pairs:
-        cnt[sh.Id.Value] = cnt.get(sh.Id.Value, 0) + 1
+        cnt[thl_eid(sh.Id)] = cnt.get(thl_eid(sh.Id), 0) + 1
     opt = _dwg_options(dict(s, coords=u'shared'))
     done = []
     for sh, v in pairs:
         if pb.cancelled:
             break
-        stem = stems[sh.Id.Value] + u'_坐标'
-        if cnt[sh.Id.Value] > 1:
+        stem = stems[thl_eid(sh.Id)] + u'_坐标'
+        if cnt[thl_eid(sh.Id)] > 1:
             stem += u'_' + _safe_name(v.Name)
         sub = []
-        done += _export_dwg_batches([v], folder, {v.Id.Value: stem}, opt, pb, sub, slim)
+        done += _export_dwg_batches([v], folder, {thl_eid(v.Id): stem}, opt, pb, sub, slim)
         for x, fn, size, res in sub:
             report.append((x, fn, size, res, u'共享坐标（%s 的平面）' % (sh.SheetNumber or u'')))
     return done
@@ -1802,12 +1957,12 @@ def main():
         for x in sheets_all:
             mk = _well_mark(x)
             if mk:
-                marks[x.Id.Value] = mk
+                marks[thl_eid(x.Id)] = mk
                 well.append(x)
-        well.sort(key=lambda x: wcfg_well_sort_key(marks[x.Id.Value], WCFG))
+        well.sort(key=lambda x: wcfg_well_sort_key(marks[thl_eid(x.Id)], WCFG))
 
         def mk_of(x):
-            return marks.get(x.Id.Value, u"")
+            return marks.get(thl_eid(x.Id), u"")
 
         items = _scope_items(sheets_all, well, mk_of)
         s, idx = _dialog(_load_settings(), items, lambda t: _match_marks(t, well, mk_of))
@@ -1845,7 +2000,7 @@ def main():
 
         # 导出前检查图框：没有图框、或图框类别在图纸上被隐藏的，先告诉你
         has_tb = _titleblock_sheet_ids()
-        no_frame = [x for x in targets if isinstance(x, DB.ViewSheet) and (x.Id.Value not in has_tb or _frame_hidden(x))]
+        no_frame = [x for x in targets if isinstance(x, DB.ViewSheet) and (thl_eid(x.Id) not in has_tb or _frame_hidden(x))]
         if no_frame:
             names = u'\n'.join(u'  %s  %s' % (x.SheetNumber, x.Name) for x in no_frame[:15])
             pick = forms.CommandSwitchWindow.show(
@@ -1855,8 +2010,8 @@ def main():
             if not pick or pick.startswith(u'取消'):
                 return
             if pick.startswith(u'跳过'):
-                bad = set(x.Id.Value for x in no_frame)
-                targets = [x for x in targets if x.Id.Value not in bad]
+                bad = set(thl_eid(x.Id) for x in no_frame)
+                targets = [x for x in targets if thl_eid(x.Id) not in bad]
                 if not targets:
                     return
 
@@ -1864,10 +2019,10 @@ def main():
         report = []
         dwg_targets = targets
         if s[u'skip_existing']:
-            dwg_targets = [x for x in targets if not os.path.exists(os.path.join(folder, stems[x.Id.Value] + u'.dwg'))]
+            dwg_targets = [x for x in targets if not os.path.exists(os.path.join(folder, stems[thl_eid(x.Id)] + u'.dwg'))]
             for x in targets:
                 if x not in dwg_targets:
-                    report.append((x, stems[x.Id.Value] + u'.dwg', os.path.getsize(os.path.join(folder, stems[x.Id.Value] + u'.dwg')), u'已存在，跳过'))
+                    report.append((x, stems[thl_eid(x.Id)] + u'.dwg', os.path.getsize(os.path.join(folder, stems[thl_eid(x.Id)] + u'.dwg')), u'已存在，跳过'))
 
         t_start = _time.time()
         exported = []
