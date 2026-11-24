@@ -36,3 +36,8 @@ obj2020/
 dist2020/
 THL.Host2020/bin/
 THL.Host2020/obj/
+
+# exe 安装程序的中间产物
+setup/exe/bin/
+setup/exe/obj/
+setup/exe/payload.zip

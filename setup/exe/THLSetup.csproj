@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 天河落宿主安装程序：一个 exe，内含 Revit 2020（net472）和 Revit 2026（net8 / net10）三套宿主。
+       用 .NET Framework 4.7.2 编译：Windows 10/11 自带，不用另装运行库。 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>THL-Setup</AssemblyName>
+    <RootNamespace>THLSetup</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>thl.ico</ApplicationIcon>
+    <Company>didi</Company>
+    <Product>天河落 THL 安装程序</Product>
+    <Copyright>© 2026 didi · tianheluo.com</Copyright>
+    <Version>0.2.5</Version>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <EmbeddedResource Include="payload.zip" LogicalName="payload.zip" />
+  </ItemGroup>
+</Project>
