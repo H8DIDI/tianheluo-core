@@ -99,7 +99,7 @@ public static class ScheduleService
 
             foreach (var e in elems)
             {
-                var row = new List<string> { e.Id.Value.ToString() };
+                var row = new List<string> { e.Id.V().ToString() };
                 foreach (var c in cols) row.Add(ValueText(FindParam(doc, e, c.Field)));
                 sh.Rows.Add(row);
             }
@@ -148,11 +148,12 @@ public static class ScheduleService
                 var row = sh.Rows[r];
                 if (row.Count == 0 || !long.TryParse(row[0], out var id)) continue;
                 plan.Rows++;
-                var e = doc.GetElement(new ElementId(id));
+                var e = doc.GetElement(EidCompat.MakeEid(id));
                 if (e == null) { plan.Issues.Add($"「{sh.Name}」第 {r + 1} 行：找不到构件 {id}（可能已被删除）"); continue; }
 
-                foreach (var (c, col) in colMap)
+                foreach (var kv in colMap)
                 {
+                    var c = kv.Key; var col = kv.Value;
                     if (!col.Editable) continue;
                     if (c < flags.Count && flags[c] == "RO") continue;
                     var p = FindParam(doc, e, col.Field);
@@ -176,7 +177,11 @@ public static class ScheduleService
             if (p.StorageType == StorageType.Integer)
                 return int.TryParse(cell.Replace(",", ""), out var i) && i == p.AsInteger();
             if (p.StorageType != StorageType.Double) return false;
+#if NETFRAMEWORK
+            if (!UnitFormatUtils.TryParse(doc.GetUnits(), p.Definition.UnitType, cell.Replace(",", ""), out double v)) return false;
+#else
             if (!UnitFormatUtils.TryParse(doc.GetUnits(), p.Definition.GetDataType(), cell.Replace(",", ""), out double v)) return false;
+#endif
             return Math.Abs(v - p.AsDouble()) <= 1e-6 * Math.Max(1.0, Math.Abs(v));
         }
         catch { return false; }
@@ -196,11 +201,11 @@ public static class ScheduleService
                     ? ch.Param.Set(ch.New)
                     : ch.Param.SetValueString(ch.New);
                 if (ok) res.Ok++;
-                else res.Failed.Add($"{ch.ScheduleName} · {ch.Element.Id.Value} · {ch.Field}：值「{ch.New}」无法写入（格式不对或参数受限）");
+                else res.Failed.Add($"{ch.ScheduleName} · {ch.Element.Id.V()} · {ch.Field}：值「{ch.New}」无法写入（格式不对或参数受限）");
             }
             catch (Exception ex)
             {
-                res.Failed.Add($"{ch.ScheduleName} · {ch.Element.Id.Value} · {ch.Field}：{ex.Message}");
+                res.Failed.Add($"{ch.ScheduleName} · {ch.Element.Id.V()} · {ch.Field}：{ex.Message}");
             }
         }
         if (tx.Commit() != TransactionStatus.Committed)

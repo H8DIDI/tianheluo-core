@@ -6,10 +6,12 @@ try {
         Write-Host "  [!] 请先关闭 Revit，再运行卸载。" -ForegroundColor Yellow
         exit 2
     }
-    $dest = Join-Path $AppData "Autodesk\Revit\Addins\2026"
-    $a = Join-Path $dest "THL.addin"; $d = Join-Path $dest "THL"
-    if (Test-Path -LiteralPath $a) { Remove-Item -LiteralPath $a -Force }
-    if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+    foreach ($y in @("2026", "2020")) {
+        $dest = Join-Path $AppData "Autodesk\Revit\Addins\$y"
+        $a = Join-Path $dest "THL.addin"; $d = Join-Path $dest "THL"
+        if (Test-Path -LiteralPath $a) { Remove-Item -LiteralPath $a -Force }
+        if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+    }
     Write-Host "  宿主已卸载。" -ForegroundColor Green
     Write-Host "  已安装的插件仍保留在 $AppData\Tianheluo，如需清除请手动删除该文件夹。"
     exit 0

@@ -189,7 +189,7 @@ public static class DuctSnapEngine
         {
             try
             {
-                var el = doc.GetElement(new ElementId(edit.BankId));
+                var el = doc.GetElement(EidCompat.MakeEid(edit.BankId));
                 if (el?.Location is not LocationCurve lc) throw new InvalidOperationException("不是线状构件");
                 lc.Curve = Line.CreateBound(edit.Start, edit.End);
                 changed.Add((edit, lc));
@@ -248,8 +248,8 @@ public static class DuctSnapEngine
             var bb = fi.get_BoundingBox(null);
             if (bb is null) continue;
             double x0 = bb.Min.X * MmPerFoot, x1 = bb.Max.X * MmPerFoot, y0 = bb.Min.Y * MmPerFoot, y1 = bb.Max.Y * MmPerFoot;
-            string key = $"{doc.PathName}|{fi.Id.Value}|{x0:0.0}|{y0:0.0}|{x1:0.0}|{y1:0.0}";
-            list.Add(new WellBox(fi.Id.Value, fam, x0, x1, y0, y1, fi, key));
+            string key = $"{doc.PathName}|{fi.Id.V()}|{x0:0.0}|{y0:0.0}|{x1:0.0}|{y1:0.0}";
+            list.Add(new WellBox(fi.Id.V(), fam, x0, x1, y0, y1, fi, key));
         }
         return list;
     }
@@ -263,13 +263,13 @@ public static class DuctSnapEngine
             if (rules.Exclude.Any(k => fam.Contains(k, StringComparison.Ordinal))) continue;
             if (!rules.DuctKeywords.Any(k => fam.Contains(k, StringComparison.Ordinal))) continue;
             if (e.Location is not LocationCurve lc || lc.Curve is not Line line || !line.IsBound) continue;
-            all.Add((e.Id.Value, new BankRec(e.Id.Value, fam, line.GetEndPoint(0), line.GetEndPoint(1))));
+            all.Add((e.Id.V(), new BankRec(e.Id.V(), fam, line.GetEndPoint(0), line.GetEndPoint(1))));
         }
 
         // If the user selected some banks, check only those. A selection without banks means the whole model.
         if (selection is { Count: > 0 })
         {
-            var picked = all.Where(t => selection.Any(id => id.Value == t.Id)).Select(t => t.Rec).ToList();
+            var picked = all.Where(t => selection.Any(id => id.V() == t.Id)).Select(t => t.Rec).ToList();
             if (picked.Count > 0)
             {
                 rep.SelectionUsed = true;
@@ -502,7 +502,7 @@ public static class DuctSnapEngine
             bool keepEnd = !skip.Contains((e.BankId, 1));
             if (keepStart && keepEnd) { result.Add(e); continue; }
             if (!keepStart && !keepEnd) continue;
-            if (doc.GetElement(new ElementId(e.BankId))?.Location is not LocationCurve orig) continue;
+            if (doc.GetElement(EidCompat.MakeEid(e.BankId))?.Location is not LocationCurve orig) continue;
             var start = keepStart ? e.Start : orig.Curve.GetEndPoint(0);
             var end = keepEnd ? e.End : orig.Curve.GetEndPoint(1);
             result.Add(new BankEdit(e.BankId, start, end));

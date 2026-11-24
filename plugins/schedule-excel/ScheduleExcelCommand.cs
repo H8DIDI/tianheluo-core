@@ -85,7 +85,7 @@ public class ScheduleExcelCommand : IExternalCommand
         var sb = new StringBuilder();
         sb.AppendLine($"将修改 {plan.Changes.Count} 个单元格，涉及 {plan.ElementsAffected} 个构件。");
         sb.AppendLine("示例：");
-        foreach (var c in plan.Changes.Take(8)) sb.AppendLine($"  {c.Element.Id.Value} · {c.Field}：「{Short(c.Old)}」→「{Short(c.New)}」");
+        foreach (var c in plan.Changes.Take(8)) sb.AppendLine($"  {c.Element.Id.V()} · {c.Field}：「{Short(c.Old)}」→「{Short(c.New)}」");
         if (plan.Changes.Count > 8) sb.AppendLine($"  …… 还有 {plan.Changes.Count - 8} 项");
         if (plan.Issues.Count > 0) sb.AppendLine($"\n另有 {plan.Issues.Count} 个提示（已跳过）：\n  " + string.Join("\n  ", plan.Issues.Take(5)));
         sb.AppendLine("\n写入在一个操作里完成，Ctrl+Z 可整体撤销。");

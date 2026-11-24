@@ -17,8 +17,8 @@ public static class TagLayout
 
     const string CropNote = "标注超出视图裁剪框";
 
-    static double Ft(double mm) => UnitUtils.ConvertToInternalUnits(mm, UnitTypeId.Millimeters);
-    static double Mm(double ft) => UnitUtils.ConvertFromInternalUnits(ft, UnitTypeId.Millimeters);
+    static double Ft(double mm) => mm / 304.8;
+    static double Mm(double ft) => ft * 304.8;
 
     /// <summary>Element ids whose tag is closer than minGapMm to another tag in the view (bounding boxes in plan).</summary>
     public static HashSet<long> OverlappingElements(Document doc, Autodesk.Revit.DB.View view, double minGapMm = 0)
@@ -36,8 +36,8 @@ public static class TagLayout
             for (int j = i + 1; j < boxes.Count; j++)
             {
                 if (!Overlaps(boxes[i].Box, boxes[j].Box, gap)) continue;
-                foreach (var id in boxes[i].Tag.GetTaggedLocalElementIds()) result.Add(id.Value);
-                foreach (var id in boxes[j].Tag.GetTaggedLocalElementIds()) result.Add(id.Value);
+                foreach (var id in boxes[i].Tag.TaggedIds()) result.Add(id.V());
+                foreach (var id in boxes[j].Tag.TaggedIds()) result.Add(id.V());
             }
         return result;
     }
@@ -107,7 +107,7 @@ public static class TagLayout
         int moved = 0;
         foreach (var tag in tags)
         {
-            var ids = tag.GetTaggedLocalElementIds().ToList();
+            var ids = tag.TaggedIds().ToList();
             if (ids.Count != 1) continue;                       // multi-element tags are left alone
             var el = doc.GetElement(ids[0]);
             if (el == null) continue;
@@ -132,8 +132,8 @@ public static class TagLayout
             if (overlaps.Count == 0) break;
             foreach (var tag in tags)
             {
-                var ids = tag.GetTaggedLocalElementIds().ToList();
-                if (ids.Count != 1 || !overlaps.Contains(ids[0].Value)) continue;
+                var ids = tag.TaggedIds().ToList();
+                if (ids.Count != 1 || !overlaps.Contains(ids[0].V())) continue;
                 var el = doc.GetElement(ids[0]);
                 if (el == null) continue;
                 var centre = CentreOf(el, view);
@@ -163,11 +163,11 @@ public static class TagLayout
         {
             var head = tag.TagHeadPosition;
             bool outsideCrop = crop != null && !InsideCrop(crop, head);
-            foreach (var id in tag.GetTaggedLocalElementIds())
+            foreach (var id in tag.TaggedIds())
             {
                 var el = doc.GetElement(id);
                 if (el == null) continue;
-                if (!notes.TryGetValue(id.Value, out var list)) notes[id.Value] = list = new List<string>();
+                if (!notes.TryGetValue(id.V(), out var list)) notes[id.V()] = list = new List<string>();
 
                 double distFt = DistanceToElement(el, head, view);
                 if (distFt > maxLeader)

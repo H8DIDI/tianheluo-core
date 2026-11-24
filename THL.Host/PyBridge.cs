@@ -179,8 +179,13 @@ public static class PyBridge
 
     public static string? PickFolder(string title)
     {
+#if NETFRAMEWORK
+        using (var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = title })
+            return dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK ? dlg.SelectedPath : null;
+#else
         var dlg = new OpenFolderDialog { Title = title };
         return dlg.ShowDialog() == true ? dlg.FolderName : null;
+#endif
     }
 
     // ---- 进度条（非模态；update 时处理界面消息，让窗口能刷新、能点取消） ----

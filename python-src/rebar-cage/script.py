@@ -36,6 +36,7 @@ MAX_STIRRUP_MM = 400.0
 
 
 # @include _shared/form_fit.py
+# @include _shared/compat2020.py
 
 
 def _eid(x):
@@ -149,7 +150,7 @@ def available_diameters():
     """项目里有的钢筋直径（mm，升序去重）。"""
     ds = set()
     for t in _bar_types():
-        ds.add(round(t.BarNominalDiameter * 304.8, 1))
+        ds.add(round(thl2_bar_dia(t) * 304.8, 1))
     return sorted(ds)
 
 
@@ -159,13 +160,13 @@ def _pick_bar_type(d_mm):
     types = _bar_types()
     if not types:
         return None, 0.0
-    same = [t for t in types if abs(t.BarNominalDiameter - target) < 1e-5]
+    same = [t for t in types if abs(thl2_bar_dia(t) - target) < 1e-5]
     if same:
         pref = [t for t in same if u'400' in t.Name]
         t = (pref or same)[0]
     else:
-        t = min(types, key=lambda x: abs(x.BarNominalDiameter - target))
-    return t, t.BarNominalDiameter / MM_TO_FT
+        t = min(types, key=lambda x: abs(thl2_bar_dia(x) - target))
+    return t, thl2_bar_dia(t) / MM_TO_FT
 
 
 def _pick_hook_135():

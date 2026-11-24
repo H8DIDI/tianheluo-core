@@ -58,6 +58,7 @@ DEFAULTS = {
 
 # @include _shared/form_fit.py
 # @include _shared/xlsx_lite.py
+# @include _shared/compat2020.py
 
 
 # ---------------------------------------------------------------- 设置
@@ -289,13 +290,13 @@ def build_rows(s):
             rows.append(row_for(no, desc, p, tf, _eid_int(e.Id), how))
     if s.get('add_pbp'):
         try:
-            bp = DB.BasePoint.GetProjectBasePoint(doc)
+            bp = thl2_base_point(doc, False)
             rows.append(row_for(u'PBP', u'项目基点 Project Base Point', bp.Position, tf, _eid_int(bp.Id), u'参考'))
         except Exception:
             pass
     if s.get('add_survey'):
         try:
-            sp = DB.BasePoint.GetSurveyPoint(doc)
+            sp = thl2_base_point(doc, True)
             rows.append(row_for(u'SP', u'测量点 Survey Point', sp.Position, tf, _eid_int(sp.Id), u'参考'))
         except Exception:
             pass

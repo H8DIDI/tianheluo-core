@@ -55,7 +55,7 @@ public static class Cutter
         using var tg = new TransactionGroup(doc, "排管井处断开"); tg.Start();
         foreach (var pl in plans)
         {
-            var e = doc.GetElement(new ElementId(pl.BankId)); if (e?.Location is not LocationCurve lc || lc.Curve is not Line ln) { failed.Add($"{pl.BankId}：找不到"); continue; }
+            var e = doc.GetElement(EidCompat.MakeEid(pl.BankId)); if (e?.Location is not LocationCurve lc || lc.Curve is not Line ln) { failed.Add($"{pl.BankId}：找不到"); continue; }
             var p = ln.GetEndPoint(0); var q = ln.GetEndPoint(1); double e0 = e.get_Parameter(P0).AsDouble(), e1 = e.get_Parameter(P1).AsDouble();
             var pre = new Writer.DropWarnings(); using var t = new Transaction(doc, "断开");
             try
@@ -73,7 +73,7 @@ public static class Cutter
                 }
                 if (t.Commit() == TransactionStatus.Committed)
                 {
-                    cut++; items.Add(new { id = pl.BankId, p = new[] { p.X, p.Y, p.Z }, q = new[] { q.X, q.Y, q.Z }, e0, e1, news = els.Skip(1).Select(x => x.Id.Value).ToArray() });
+                    cut++; items.Add(new { id = pl.BankId, p = new[] { p.X, p.Y, p.Z }, q = new[] { q.X, q.Y, q.Z }, e0, e1, news = els.Skip(1).Select(x => x.Id.V()).ToArray() });
                 }
                 else failed.Add($"{pl.BankId}：被回滚");
             }
@@ -96,13 +96,13 @@ public static class Cutter
         using var tg = new TransactionGroup(doc, "排管井处断开·还原"); tg.Start();
         foreach (var it in d.RootElement.GetProperty("items").EnumerateArray())
         {
-            long id = it.GetProperty("id").GetInt64(); var e = doc.GetElement(new ElementId(id)); if (e is null) { failed.Add($"{id}：找不到"); continue; }
+            long id = it.GetProperty("id").GetInt64(); var e = doc.GetElement(EidCompat.MakeEid(id)); if (e is null) { failed.Add($"{id}：找不到"); continue; }
             var pp = it.GetProperty("p").EnumerateArray().Select(x => x.GetDouble()).ToArray(); var qq = it.GetProperty("q").EnumerateArray().Select(x => x.GetDouble()).ToArray();
             var pre = new Writer.DropWarnings(); using var t = new Transaction(doc, "还原断开");
             try
             {
                 t.Start(); var fo = t.GetFailureHandlingOptions(); fo.SetFailuresPreprocessor(pre); t.SetFailureHandlingOptions(fo);
-                foreach (var nid in it.GetProperty("news").EnumerateArray()) { var ne = doc.GetElement(new ElementId(nid.GetInt64())); if (ne is not null) doc.Delete(ne.Id); }
+                foreach (var nid in it.GetProperty("news").EnumerateArray()) { var ne = doc.GetElement(EidCompat.MakeEid(nid.GetInt64())); if (ne is not null) doc.Delete(ne.Id); }
                 ((LocationCurve)e.Location).Curve = Line.CreateBound(new XYZ(pp[0], pp[1], pp[2]), new XYZ(qq[0], qq[1], qq[2]));
                 AllowJoin(e, 0); AllowJoin(e, 1);
                 e.get_Parameter(P0).Set(it.GetProperty("e0").GetDouble()); e.get_Parameter(P1).Set(it.GetProperty("e1").GetDouble());

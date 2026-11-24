@@ -185,9 +185,9 @@ public static class TagCheckEngine
         foreach (IndependentTag tag in new FilteredElementCollector(doc, view.Id).OfClass(typeof(IndependentTag)).Cast<IndependentTag>())
         {
             string fam = FamilyOf(doc, tag.GetTypeId());
-            foreach (var id in tag.GetTaggedLocalElementIds())
+            foreach (var id in tag.TaggedIds())
             {
-                if (!tagsOnElement.TryGetValue(id.Value, out var list)) tagsOnElement[id.Value] = list = new List<string>();
+                if (!tagsOnElement.TryGetValue(id.V(), out var list)) tagsOnElement[id.V()] = list = new List<string>();
                 list.Add(fam);
             }
         }
@@ -199,7 +199,7 @@ public static class TagCheckEngine
         {
             string fam = FamilyOf(doc, tag.GetTypeId());
             if (fam.Length == 0) continue;
-            foreach (var id in tag.GetTaggedLocalElementIds())
+            foreach (var id in tag.TaggedIds())
             {
                 var el = doc.GetElement(id);
                 if (el == null) continue;
@@ -234,7 +234,7 @@ public static class TagCheckEngine
                 var allowedSet = new HashSet<string>(allowed);
                 string expected = allowed.Count == 0 ? "（模型里没有这类构件的标记，请在标准文件里指定）" : string.Join("、", allowed);
 
-                tagsOnElement.TryGetValue(e.Id.Value, out var tags);
+                tagsOnElement.TryGetValue(e.Id.V(), out var tags);
                 string status, current = tags == null ? "" : string.Join("、", tags);
                 if (tags == null || tags.Count == 0)
                     status = "漏标";
@@ -245,7 +245,7 @@ public static class TagCheckEngine
 
                 rows.Add(new TagRow
                 {
-                    ElementId = e.Id.Value, Mark = mark, Category = catName, Family = family,
+                    ElementId = e.Id.V(), Mark = mark, Category = catName, Family = family,
                     Status = status, Current = current, Expected = expected,
                 });
             }

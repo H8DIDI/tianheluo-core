@@ -25,7 +25,11 @@ public static class SolverRunner
             File.WriteAllText(sc, JsonSerializer.Serialize(scene, new JsonSerializerOptions { IncludeFields = true }));
             File.WriteAllText(ru, JsonSerializer.Serialize(rules));
             var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = System.Text.Encoding.UTF8, WorkingDirectory = Path.GetDirectoryName(exe)! };
+            #if NETFRAMEWORK
+            psi.Arguments = string.Join(" ", new[] { sc, ru, rs, mode }.Select(a => "\"" + a.Replace("\"", "\\\"") + "\""));
+#else
             psi.ArgumentList.Add(sc); psi.ArgumentList.Add(ru); psi.ArgumentList.Add(rs); psi.ArgumentList.Add(mode);
+#endif
             using var p = Process.Start(psi)!; string? err = null;
             p.OutputDataReceived += (_, e) =>
             {
@@ -33,7 +37,13 @@ public static class SolverRunner
                 if (t.StartsWith("P|")) progress(t[2..]); else if (t.StartsWith("L|")) log(t[2..]); else if (t.StartsWith("E|")) err = t[2..];
             };
             p.BeginOutputReadLine(); p.ErrorDataReceived += (_, _) => { }; p.BeginErrorReadLine();
-            using (ct.Register(() => { try { p.Kill(true); } catch { } }))
+            using (ct.Register(() => { try {
+#if NETFRAMEWORK
+                p.Kill();
+#else
+                p.Kill(true);
+#endif
+            } catch { } }))
                 p.WaitForExit();
             ct.ThrowIfCancellationRequested();
             if (p.ExitCode != 0 || !File.Exists(rs)) throw new InvalidOperationException("求解进程失败（代码 " + p.ExitCode + "）：" + (err ?? "无输出"));

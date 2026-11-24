@@ -46,7 +46,11 @@ public static class HostUpdater
 {
     public static Version Current => Norm(typeof(HostUpdater).Assembly.GetName().Version ?? new Version(0, 0, 0));
     /// <summary>当前宿主是哪套编译：Revit 2026.5+ 是 net10，2026.0~2026.4 是 net8。</summary>
+    #if NETFRAMEWORK
+    public static string Build => "net472"; // Revit 2020 宿主
+#else
     public static string Build => Environment.Version.Major >= 10 ? "net10" : "net8";
+#endif
 
     public static string UpdatesDir => Path.Combine(Store.Root, "updates");
     static string PendingPath => Path.Combine(UpdatesDir, "pending.json");
@@ -86,7 +90,7 @@ public static class HostUpdater
         var bytes = await Store.ReadBytesAsync(full);
 
         progress?.Invoke("正在校验…");
-        var actual = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        var actual = Store.Sha256Hex(bytes);
         if (!string.Equals(actual, asset.Sha256.Trim(), StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("更新包校验失败（SHA256 不一致），已放弃。可能是下载损坏或被篡改。");
 
@@ -171,7 +175,7 @@ public static class HostUpdater
             File.WriteAllText(script, txt, new System.Text.UTF8Encoding(true));
 
             var args = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script}\" " +
-                       $"-RevitPid {Environment.ProcessId} -Staging \"{p.Staging}\" -Target \"{TargetDir}\" " +
+                       $"-RevitPid {System.Diagnostics.Process.GetCurrentProcess().Id} -Staging \"{p.Staging}\" -Target \"{TargetDir}\" " +
                        $"-Version \"{p.Version}\" -Log \"{Path.Combine(Store.Root, "logs", "update.log")}\" " +
                        $"-Backup \"{Path.Combine(UpdatesDir, "backup")}\" -Pending \"{PendingPath}\"";
             Process.Start(new ProcessStartInfo("powershell.exe", args) { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });

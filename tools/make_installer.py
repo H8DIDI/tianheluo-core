@@ -5,11 +5,12 @@ import detzip
 root = pathlib.Path(__file__).resolve().parent.parent
 out = root / "dist/THL-Host.zip"
 BUILDS = {"net8": "net8.0-windows", "net10": "net10.0-windows"}
+# Revit 2020 版宿主（net472）在单独的项目里编译
+BUILD_DIRS = {"net472": root / "THL.Host2020/bin/Release/net472"}
 with detzip.create(out) as z:
-    for key, tfm in BUILDS.items():
-        rel = root / "THL.Host/bin/Release" / tfm
+    for key, rel in [(k, root / "THL.Host/bin/Release" / t) for k, t in BUILDS.items()] + list(BUILD_DIRS.items()):
         detzip.write(z, rel / "THL.addin", f"{key}/THL.addin")
-        for f in sorted(list(rel.glob("*.dll")) + list(rel.glob("*.deps.json"))):
+        for f in sorted(list(rel.glob("*.dll")) + list(rel.glob("*.deps.json")) + list(rel.glob("THL.Host.pdb"))):
             detzip.write(z, f, f"{key}/THL/{f.name}")
         lib = rel / "lib"
         for f in sorted(lib.rglob("*")):

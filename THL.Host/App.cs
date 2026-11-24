@@ -51,6 +51,9 @@ public class App : IExternalApplication
         try { Directory.CreateDirectory(Store.PluginsDir); } catch { }
         try { HostUpdater.CleanupIfApplied(); } catch { }
         _asmPath = Assembly.GetExecutingAssembly().Location;
+#if NETFRAMEWORK
+        InstallDependencyResolver();
+#endif
 
         app.CreateRibbonTab(TabName);
         var hub = app.CreateRibbonPanel(TabName, "天河落");
@@ -66,6 +69,32 @@ public class App : IExternalApplication
         return Result.Succeeded;
     }
 
+
+#if NETFRAMEWORK
+    /// <summary>
+    /// .NET Framework 不会按“版本号不同但名字相同”自动重定向（Revit 没有给我们的 DLL 配 binding redirect）：
+    /// IronPython、System.Text.Json 各自引用的 System.Memory 等版本略有差别时会报“找不到程序集”。
+    /// 这里按名字从宿主目录兜底加载，保证随宿主一起部署的依赖都能用。
+    /// </summary>
+    static void InstallDependencyResolver()
+    {
+        var dir = Path.GetDirectoryName(_asmPath)!;
+        AppDomain.CurrentDomain.AssemblyResolve += (_, args) =>
+        {
+            try
+            {
+                var name = new AssemblyName(args.Name).Name;
+                if (name.EndsWith(".resources", StringComparison.OrdinalIgnoreCase)) return null;
+                var f = Path.Combine(dir, name + ".dll");
+                if (!File.Exists(f)) return null;
+                foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                    if (string.Equals(a.GetName().Name, name, StringComparison.OrdinalIgnoreCase) && !a.IsDynamic) return a;
+                return Assembly.LoadFrom(f);
+            }
+            catch { return null; }
+        };
+    }
+#endif
 
     public Result OnShutdown(UIControlledApplication app)
     {

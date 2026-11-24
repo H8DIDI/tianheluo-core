@@ -80,6 +80,7 @@ SCHEDULE_SPECS = [
 # @include _shared/xlsx_lite.py
 # @include _shared/settings_ui.py
 # @include _shared/compat.py
+# @include _shared/compat2020.py
 WCFG = wcfg_load()
 DEPTH_SET = os.path.join(OUT_DIR, u'井深统计设置.json')
 DEPTH_DEFAULTS = {
@@ -254,7 +255,7 @@ def _num_mm(p):
         if p.StorageType == DB.StorageType.Double:
             v = p.AsDouble()
             try:
-                if p.Definition.GetDataType() == DB.SpecTypeId.Length:
+                if thl2_is_length(p):
                     return v * FT_TO_MM
             except Exception:
                 pass
@@ -561,7 +562,7 @@ def _add_one(e, res):
     if _eid(e.Category.Id) == int(DB.BuiltInCategory.OST_Rebar):
         lvl = _level_name(e)
         t = doc.GetElement(e.GetTypeId())
-        d_ft = t.BarNominalDiameter if t is not None else 0.0
+        d_ft = thl2_bar_dia(t)
         dia = round(d_ft * FT_TO_MM, 1)
         bars = int(e.NumberOfBarPositions) if int(e.NumberOfBarPositions) > 0 else 1
         length_m = e.TotalLength * FT_TO_M

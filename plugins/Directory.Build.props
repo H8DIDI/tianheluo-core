@@ -2,12 +2,19 @@
   <!-- 继承仓库根目录的可复现构建设置 -->
   <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(Revit2020)'!='1'">net8.0-windows</TargetFramework>
+    <!-- Revit 2020 版：dotnet build -p:Revit2020=1 → .NET Framework 4.7.2、引用本机 Revit 2020 的 API，输出到 bin2020 / obj2020 -->
+    <TargetFramework Condition="'$(Revit2020)'=='1'">net472</TargetFramework>
     <PlatformTarget>x64</PlatformTarget>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <RevitVersion>2026</RevitVersion>
+    <RevitVersion Condition="'$(Revit2020)'!='1'">2026</RevitVersion>
+    <RevitVersion Condition="'$(Revit2020)'=='1'">2020</RevitVersion>
+    <BaseOutputPath Condition="'$(Revit2020)'=='1'">bin2020\</BaseOutputPath>
+    <BaseIntermediateOutputPath Condition="'$(Revit2020)'=='1'">obj2020\</BaseIntermediateOutputPath>
+    <DefaultItemExcludes Condition="'$(Revit2020)'=='1'">$(DefaultItemExcludes);obj\**;bin\**</DefaultItemExcludes>
+    <DefaultItemExcludes Condition="'$(Revit2020)'!='1'">$(DefaultItemExcludes);obj2020\**;bin2020\**</DefaultItemExcludes>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <Company>didi</Company>
@@ -16,8 +23,20 @@
     <Copyright>© 2026 didi · tianheluo.com</Copyright>
   </PropertyGroup>
   <!-- 插件由宿主在自己的加载上下文里读入，.NET 8 编译的插件在 .NET 8 / .NET 10 的 Revit 里都能运行 -->
-  <ItemGroup>
+  <ItemGroup Condition="'$(Revit2020)'!='1'">
     <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="2026.0.4" PrivateAssets="all" ExcludeAssets="runtime" />
     <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="2026.0.4" PrivateAssets="all" ExcludeAssets="runtime" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Revit2020)'=='1'">
+    <Reference Include="RevitAPI"><HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="RevitAPIUI"><HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <Compile Include="$(MSBuildThisFileDirectory)_shared\Net472Compat.cs" Link="Net472Compat.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)_shared\EidCompat.cs" Link="EidCompat.cs" />
   </ItemGroup>
 </Project>

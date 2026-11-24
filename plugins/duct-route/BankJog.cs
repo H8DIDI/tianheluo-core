@@ -16,7 +16,7 @@ public static partial class Jogger
 {
     static readonly BuiltInParameter BP0 = BuiltInParameter.STRUCTURAL_BEAM_END0_ELEVATION, BP1 = BuiltInParameter.STRUCTURAL_BEAM_END1_ELEVATION;
 
-    public static bool IsBankLike(Element e) => e is FamilyInstance && e.Category?.Id.Value == (long)BuiltInCategory.OST_StructuralFraming && e.Location is LocationCurve { Curve: Line };
+    public static bool IsBankLike(Element e) => e is FamilyInstance && e.Category?.Id.V() == (long)BuiltInCategory.OST_StructuralFraming && e.Location is LocationCurve { Curve: Line };
 
     /// <summary>Everything that touches the bank, except the wells at its ends and the neighbour pieces that share an end point.</summary>
     static List<Element> BankObstacles(Document doc, Element f, XYZ p0, XYZ p1)
@@ -58,7 +58,7 @@ public static partial class Jogger
             var bb = h.get_BoundingBox(null)!; double a = double.MaxValue, b = double.MinValue;
             foreach (var x in new[] { bb.Min.X, bb.Max.X }) foreach (var y in new[] { bb.Min.Y, bb.Max.Y })
             { var q = new XYZ(x, y, p0.Z) - p0; double t = q.DotProduct(u); a = Math.Min(a, t); b = Math.Max(b, t); double l = q.DotProduct(nrm); lmax = Math.Max(lmax, l); lmin = Math.Min(lmin, l); }
-            tmin = Math.Min(tmin, Math.Max(a, 0)); tmax = Math.Max(tmax, Math.Min(b, L)); top = Math.Max(top, bb.Max.Z); bot = Math.Min(bot, bb.Min.Z); obs.Add((h.Id.Value, h.Category?.Name ?? ""));
+            tmin = Math.Min(tmin, Math.Max(a, 0)); tmax = Math.Max(tmax, Math.Min(b, L)); top = Math.Max(top, bb.Max.Z); bot = Math.Min(bot, bb.Min.Z); obs.Add((h.Id.V(), h.Category?.Name ?? ""));
         }
         double margin = o.MarginM / Ft, ta = Math.Max(tmin - margin, 0), tb = Math.Min(tmax + margin, L);
         var vs = new List<BankVertex>(); string way; double amount;
@@ -116,7 +116,7 @@ public static partial class Jogger
         var clean = new List<BankVertex>();
         foreach (var v in vs) if (clean.Count == 0 || new XYZ(v.X - clean[^1].X, v.Y - clean[^1].Y, 0).GetLength() > 0.05 || Math.Abs(v.E - clean[^1].E) > 1e-4) clean.Add(v);
         if (clean.Count < 2) { error = "没有需要改的"; return null; }
-        return new BankPlan(f.Id.Value, p0, p1, e0, e1, clean, obs, sum);
+        return new BankPlan(f.Id.V(), p0, p1, e0, e1, clean, obs, sum);
     }
 
     /// <summary>Cuts each bank into the pieces of its plan; one backup file (format of 井处断开) holds the whole batch.</summary>
@@ -129,7 +129,7 @@ public static partial class Jogger
         using var tg = new TransactionGroup(doc, "排管绕行"); tg.Start();
         foreach (var pl in plans)
         {
-            var e = doc.GetElement(new ElementId(pl.Id)); if (e is null) { failed.Add($"{pl.Id}：找不到"); continue; }
+            var e = doc.GetElement(EidCompat.MakeEid(pl.Id)); if (e is null) { failed.Add($"{pl.Id}：找不到"); continue; }
             var pre = new Writer.DropWarnings(); using var t = new Transaction(doc, "排管绕行");
             try
             {
@@ -143,7 +143,7 @@ public static partial class Jogger
                     if (i > 0) Cutter.NoJoin(els[i], 0); if (i < n - 1) Cutter.NoJoin(els[i], 1);
                 }
                 if (t.Commit() == TransactionStatus.Committed)
-                { ok++; items.Add(new { id = pl.Id, p = new[] { pl.P0.X, pl.P0.Y, pl.P0.Z }, q = new[] { pl.P1.X, pl.P1.Y, pl.P1.Z }, e0 = pl.E0, e1 = pl.E1, news = els.Skip(1).Select(x => x.Id.Value).ToArray() }); }
+                { ok++; items.Add(new { id = pl.Id, p = new[] { pl.P0.X, pl.P0.Y, pl.P0.Z }, q = new[] { pl.P1.X, pl.P1.Y, pl.P1.Z }, e0 = pl.E0, e1 = pl.E1, news = els.Skip(1).Select(x => x.Id.V()).ToArray() }); }
                 else failed.Add($"{pl.Id}：被回滚");
             }
             catch (Exception ex) { try { t.RollBack(); } catch { } failed.Add($"{pl.Id}：{ex.Message}"); }
@@ -162,9 +162,9 @@ public static partial class Jogger
             var own = g.ToHashSet();
             foreach (var id in g)
             {
-                var e = doc.GetElement(new ElementId(id)); if (e is null || !IsBankLike(e)) continue;
+                var e = doc.GetElement(EidCompat.MakeEid(id)); if (e is null || !IsBankLike(e)) continue;
                 var ln = (Line)((LocationCurve)e.Location).Curve;
-                var hits = BankObstacles(doc, e, ln.GetEndPoint(0), ln.GetEndPoint(1)).Where(h => !own.Contains(h.Id.Value)).Select(h => h.Id.Value).ToList();
+                var hits = BankObstacles(doc, e, ln.GetEndPoint(0), ln.GetEndPoint(1)).Where(h => !own.Contains(h.Id.V())).Select(h => h.Id.V()).ToList();
                 if (hits.Count > 0) res.Add((id, hits));
             }
         }

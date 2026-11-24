@@ -19,7 +19,7 @@ public static class GeneralCheck
 
     public sealed record Clash(long Id, string Category, string System, List<(long other, string category, string name)> With);
 
-    public static bool IsMember(Element e) => e.Category is not null && Mep.Contains((BuiltInCategory)e.Category.Id.Value);
+    public static bool IsMember(Element e) => e.Category is not null && Mep.Contains((BuiltInCategory)e.Category.Id.V());
 
     public static List<Clash> Run(Document doc, IEnumerable<ElementId> ids, int max = 400, Action<string>? log = null)
     {
@@ -27,11 +27,11 @@ public static class GeneralCheck
         var filter = new ElementMulticategoryFilter(Hits);
         foreach (var id in ids)
         {
-            var e = doc.GetElement(id); if (e is null || !(IsMember(e) || e.Category?.Id.Value == (long)BuiltInCategory.OST_StructuralFraming)) continue;
+            var e = doc.GetElement(id); if (e is null || !(IsMember(e) || e.Category?.Id.V() == (long)BuiltInCategory.OST_StructuralFraming)) continue;
             if (++n > max) { log?.Invoke($"只检查前 {max} 个构件"); break; }
             var hit = new FilteredElementCollector(doc).WherePasses(filter).WherePasses(new ElementIntersectsElementFilter(e)).ToElements()
-                .Where(o => o.Id != e.Id && !IsSameRun(e, o)).Select(o => (o.Id.Value, o.Category?.Name ?? "", o.Name)).ToList();
-            if (hit.Count > 0) res.Add(new Clash(e.Id.Value, e.Category?.Name ?? "", SystemOf(e), hit));
+                .Where(o => o.Id != e.Id && !IsSameRun(e, o)).Select(o => (o.Id.V(), o.Category?.Name ?? "", o.Name)).ToList();
+            if (hit.Count > 0) res.Add(new Clash(e.Id.V(), e.Category?.Name ?? "", SystemOf(e), hit));
         }
         return res;
     }

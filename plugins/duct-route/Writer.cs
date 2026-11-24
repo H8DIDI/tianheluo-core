@@ -22,7 +22,7 @@ public static class Writer
             foreach (var f in fa.GetFailureMessages())
             {
                 if (f.GetSeverity() == FailureSeverity.Warning) fa.DeleteWarning(f);
-                else { Errors.Add(f.GetDescriptionText()); foreach (var id in f.GetFailingElementIds()) FailingIds.Add(id.Value); }
+                else { Errors.Add(f.GetDescriptionText()); foreach (var id in f.GetFailingElementIds()) FailingIds.Add(id.V()); }
             }
             // An error Revit cannot ignore would open a dialog and freeze the session: roll that one element back quietly instead.
             return Errors.Count > 0 ? FailureProcessingResult.ProceedWithRollBack : FailureProcessingResult.Continue;
@@ -40,10 +40,10 @@ public static class Writer
             {
                 foreach (Reference r in d.References)
                 {
-                    long id = r.ElementId.Value;
+                    long id = r.ElementId.V();
                     if (!wanted.Contains(id)) continue;
                     if (!map.TryGetValue(id, out var l)) map[id] = l = new List<long>();
-                    l.Add(d.Id.Value);
+                    l.Add(d.Id.V());
                 }
             }
             catch { }
@@ -86,7 +86,7 @@ public static class Writer
         var bk = new List<object>();
         foreach (var b in list)
         {
-            var e = doc.GetElement(new ElementId(b.Id)); if (e is null) continue;
+            var e = doc.GetElement(EidCompat.MakeEid(b.Id)); if (e is null) continue;
             bk.Add(new { id = b.Id, end0 = e.get_Parameter(P0).AsDouble(), end1 = e.get_Parameter(P1).AsDouble() });
         }
         File.WriteAllText(file, JsonSerializer.Serialize(new { doc = doc.Title, time = DateTime.Now, items = bk }));
@@ -96,7 +96,7 @@ public static class Writer
         tg.Start();
         foreach (var b in list)
         {
-            var e = doc.GetElement(new ElementId(b.Id)); if (e is null) { failed.Add($"{b.Id}：找不到"); continue; }
+            var e = doc.GetElement(EidCompat.MakeEid(b.Id)); if (e is null) { failed.Add($"{b.Id}：找不到"); continue; }
             var p0 = e.get_Parameter(P0); var p1 = e.get_Parameter(P1);
             double n0 = p0.AsDouble() + (b.Z0 - b.O0) / Ft, n1 = p1.AsDouble() + (b.Z1 - b.O1) / Ft;
             if (Math.Abs(n0 - p0.AsDouble()) < 1e-6 && Math.Abs(n1 - p1.AsDouble()) < 1e-6) { same++; continue; }
@@ -122,7 +122,7 @@ public static class Writer
 
     static void Block(Document doc, long bankId, DropWarnings pre, Dictionary<long, List<long>> blocked, Dictionary<long, List<long>> dimMap)
     {
-        var dims = pre.FailingIds.Where(i => doc.GetElement(new ElementId(i)) is Dimension).Distinct().ToList();
+        var dims = pre.FailingIds.Where(i => doc.GetElement(EidCompat.MakeEid(i)) is Dimension).Distinct().ToList();
         if (dims.Count == 0 && dimMap.TryGetValue(bankId, out var all)) dims = all;
         if (dims.Count > 0) blocked[bankId] = dims;
     }
@@ -154,7 +154,7 @@ public static class Writer
         using var tg = new TransactionGroup(doc, "排管竖向避让·还原"); tg.Start();
         foreach (var it in d.RootElement.GetProperty("items").EnumerateArray())
         {
-            long id = it.GetProperty("id").GetInt64(); var e = doc.GetElement(new ElementId(id)); if (e is null) { failed.Add($"{id}：找不到"); continue; }
+            long id = it.GetProperty("id").GetInt64(); var e = doc.GetElement(EidCompat.MakeEid(id)); if (e is null) { failed.Add($"{id}：找不到"); continue; }
             if (dimMap.ContainsKey(id)) { var cur0 = e.get_Parameter(P0).AsDouble(); var cur1 = e.get_Parameter(P1).AsDouble(); if (Math.Abs(cur0 - it.GetProperty("end0").GetDouble()) < 1e-6 && Math.Abs(cur1 - it.GetProperty("end1").GetDouble()) < 1e-6) { ok++; continue; } failed.Add($"{id}：有尺寸标注引用它，没有还原"); continue; }
             var pre = new DropWarnings(); using var t = new Transaction(doc, "还原");
             try
@@ -178,13 +178,13 @@ public static class DimTools
         Directory.CreateDirectory(Writer.BackupDir);
         string file = Path.Combine(Writer.BackupDir, $"dims-{DateTime.Now:yyyyMMdd-HHmmss}.json"); var rec = new List<object>(); var ids = dimIds.Distinct().ToList();
         foreach (var id in ids)
-            if (doc.GetElement(new ElementId(id)) is Dimension d)
+            if (doc.GetElement(EidCompat.MakeEid(id)) is Dimension d)
             {
                 var v = doc.GetElement(d.OwnerViewId);
                 // some dimensions (spot dimensions, multi-segment ones) throw on Origin / ValueString: keep what can be read
                 string? text = null; long[]? refs = null; double[]? origin = null;
                 try { text = d.ValueString; } catch { }
-                try { refs = d.References.Cast<Reference>().Select(r => r.ElementId.Value).ToArray(); } catch { }
+                try { refs = d.References.Cast<Reference>().Select(r => r.ElementId.V()).ToArray(); } catch { }
                 try { origin = new[] { d.Origin.X, d.Origin.Y, d.Origin.Z }; } catch { }
                 rec.Add(new { id, view = v?.Name, type = d.DimensionType?.Name, text, refs, origin });
             }
@@ -194,7 +194,7 @@ public static class DimTools
         foreach (var id in ids)
         {
             using var t = new Transaction(doc, "删标注");
-            try { t.Start(); doc.Delete(new ElementId(id)); if (t.Commit() == TransactionStatus.Committed) n++; } catch { try { t.RollBack(); } catch { } }
+            try { t.Start(); doc.Delete(EidCompat.MakeEid(id)); if (t.Commit() == TransactionStatus.Committed) n++; } catch { try { t.RollBack(); } catch { } }
         }
         tg.Assimilate();
         return (n, file);
