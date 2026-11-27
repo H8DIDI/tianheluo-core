@@ -1,0 +1,32 @@
+<Project>
+  <!-- 天河落 AutoCAD 插件公共设置：每个插件编两份
+       net48          → AutoCAD 2018~2024（按 2018 接口编译，NuGet AutoCAD.NET 22.0.0，只编译不分发）
+       net8.0-windows → AutoCAD 2025+（引用本机 AutoCAD 2026 程序集）
+       打包：python tools/pack_acad.py → dist-acad/<id>_<ver>.thlp（plugin.json + net48\ + net8\） -->
+  <Import Project="..\Directory.Build.props" />
+  <PropertyGroup>
+    <TargetFrameworks>net8.0-windows;net48</TargetFrameworks>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <AcadDir>C:\Program Files\Autodesk\AutoCAD 2026</AcadDir>
+    <DefineConstants>$(DefineConstants);THL_PLUGIN</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <Reference Include="acdbmgd"><HintPath>$(AcadDir)\acdbmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="accoremgd"><HintPath>$(AcadDir)\accoremgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="acmgd"><HintPath>$(AcadDir)\acmgd.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <PackageReference Include="AutoCAD.NET" Version="22.0.0" ExcludeAssets="runtime" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="*.cs" />
+    <Compile Include="..\_shared\*.cs" />
+  </ItemGroup>
+</Project>

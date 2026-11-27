@@ -1,0 +1,13 @@
+{
+  "id": "dwg-underlay",
+  "name": "套图",
+  "version": "0.1.0",
+  "description": "把建筑 CAD 底图套回管综 DWG：① 从瘦身前的原图取回底图，按原位置作为外部参照（或块）套入；② 套任意建筑 DWG，可按原坐标、自动对位（和参照图里的同一张底图匹配，求旋转/缩放/平移）或两点对位。",
+  "category": "出图",
+  "acad": "2018+",
+  "hostApi": 1,
+  "dll": "ThlDwgUnderlay.dll",
+  "entry": "Thl.Acad.Underlay.Plugin",
+  "glyph": "套",
+  "color": "#14B8A6"
+}

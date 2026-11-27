@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 套图：把建筑 CAD 底图按坐标重新套进（瘦身后的）管综 DWG。 -->
+  <PropertyGroup><AssemblyName>ThlDwgUnderlay</AssemblyName><RootNamespace>Thl.Acad.Underlay</RootNamespace></PropertyGroup>
+</Project>

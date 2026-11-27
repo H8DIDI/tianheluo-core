@@ -1,0 +1,13 @@
+{
+  "id": "dwg-slim",
+  "name": "DWG 瘦身",
+  "version": "0.1.0",
+  "description": "Revit 导出的 DWG 太大：去掉导入的 CAD 底图、井只留外壁/内壁/井盖外框、去掉出图看不见的碎图形、短直线连成多段线、几何相同的块合并成一份，另存为「原名_瘦身.dwg」（原图不动）。可处理当前图，也可批量选文件。",
+  "category": "出图",
+  "acad": "2018+",
+  "hostApi": 1,
+  "dll": "ThlDwgSlimAcad.dll",
+  "entry": "Thl.Acad.DwgSlim.Plugin",
+  "glyph": "瘦",
+  "color": "#2F8CFF"
+}

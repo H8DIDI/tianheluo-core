@@ -1,0 +1,13 @@
+{
+  "id": "dwg-tidy",
+  "name": "出图美化",
+  "version": "0.1.0",
+  "description": "Revit 导出的 DWG 一键规范成能直接套图框出图的样子：缺字体换成 gbenor+gbcbig（修问号乱码）、虚线点划线按纸面长度重排、删重叠重复线、屏幕亮白纸看不清的颜色加深、场地/地形/底图淡显变细（规则表可改）、可选随层与文字遮罩、清理审核。也能批量处理和给导出后处理链调用。",
+  "category": "出图",
+  "acad": "2018+",
+  "hostApi": 1,
+  "dll": "ThlDwgTidy.dll",
+  "entry": "Thl.Acad.Tidy.Plugin",
+  "glyph": "美",
+  "color": "#8B5CF6"
+}

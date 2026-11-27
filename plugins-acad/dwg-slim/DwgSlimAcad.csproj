@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- DWG 瘦身（AutoCAD 里点按钮用）。核心算法直接编译 ..\..\dwgslim\Slim.cs（和 Revit 导出后台用的 THLSLIM 是同一份）。 -->
+  <PropertyGroup><AssemblyName>ThlDwgSlimAcad</AssemblyName><RootNamespace>Thl.Acad.DwgSlim</RootNamespace></PropertyGroup>
+  <ItemGroup><Compile Include="..\..\dwgslim\Slim.cs" /></ItemGroup>
+</Project>

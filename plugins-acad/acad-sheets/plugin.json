@@ -1,0 +1,13 @@
+{
+  "id": "acad-sheets",
+  "name": "图集管理",
+  "version": "0.1.0",
+  "description": "出图一条龙：从真实图框 DWG 学习图签字段 → 图框按外部参照插入布局，图名/图号/设计/日期等在表格里批量填写；模型空间框选或按命名视图一次建多张图纸（自动视口、比例、居中、锁定、冻结图层）；图纸列表排序、批量编号、生成目录；勾选的图纸按顺序打成一个 PDF。",
+  "category": "出图",
+  "acad": "2018+",
+  "hostApi": 1,
+  "dll": "ThlSheetManager.dll",
+  "entry": "Thl.Acad.Sheets.Plugin",
+  "glyph": "图",
+  "color": "#F59E0B"
+}

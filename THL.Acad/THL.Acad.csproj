@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 天河落 · AutoCAD 宿主。一个 THL.bundle 同时带两套：
+       net48           → AutoCAD 2018~2024（.NET Framework 4.8，按 2018 的接口编译：NuGet AutoCAD.NET 22.0.0，向上兼容）
+       net8.0-windows  → AutoCAD 2025 及以上（.NET 8，引用本机 AutoCAD 2026 的程序集）
+       商店/插件中心/自更新的代码与 Revit 宿主共用（..\THL.Host\*.cs），差异用 #if THL_ACAD。 -->
+  <PropertyGroup>
+    <TargetFrameworks>net8.0-windows;net48</TargetFrameworks>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>THL.Host</RootNamespace>
+    <AssemblyName>THL.Acad</AssemblyName>
+    <DefineConstants>$(DefineConstants);THL_ACAD</DefineConstants>
+    <Company>didi</Company>
+    <Authors>didi</Authors>
+    <Product>天河落 THL</Product>
+    <Copyright>© 2026 didi · tianheluo.com</Copyright>
+    <Description>天河落 THL：AutoCAD 插件宿主</Description>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <InformationalVersion>0.1.0</InformationalVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AcadDir>C:\Program Files\Autodesk\AutoCAD 2026</AcadDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="*.cs" />
+    <Compile Include="..\THL.Host\Store.cs;..\THL.Host\Update.cs;..\THL.Host\LauncherWindow.cs;..\THL.Host\Icons.cs;..\THL.Host\LogoGeometry.cs" />
+    <!-- 自更新脚本：沿用宿主里的资源名，内容是 AutoCAD 版（替换整个 THL.bundle） -->
+    <EmbeddedResource Include="apply-update-acad.ps1" LogicalName="THL.Host.apply-update.ps1" />
+    <None Include="PackageContents.xml" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <Reference Include="acdbmgd"><HintPath>$(AcadDir)\acdbmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="accoremgd"><HintPath>$(AcadDir)\accoremgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="acmgd"><HintPath>$(AcadDir)\acmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="AdWindows"><HintPath>$(AcadDir)\AdWindows.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)'=='net48'">
+    <Compile Include="..\THL.Host2020\Compat\Net472Compat.cs" />
+    <PackageReference Include="AutoCAD.NET" Version="22.0.0" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="System" />
+    <Using Include="System.Collections.Generic" />
+    <Using Include="System.Linq" />
+    <Using Include="System.Threading" />
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+    <Using Include="System.Threading.Tasks" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 图集管理：图框外部参照、图签批量填写、框选建视口、图纸列表/编号/目录、批量打印 PDF。 -->
+  <PropertyGroup><AssemblyName>ThlSheetManager</AssemblyName><RootNamespace>Thl.Acad.Sheets</RootNamespace><UseWPF>true</UseWPF></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Wizard\*.cs" />
+    <!-- 一键出图向导直接调用瘦身、美化的核心（同一份源码） -->
+    <Compile Include="..\..\dwgslim\Slim.cs" />
+    <Compile Include="..\dwg-tidy\Tidy.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+  </ItemGroup>
+</Project>

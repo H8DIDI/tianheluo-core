@@ -46,7 +46,9 @@ public static class HostUpdater
 {
     public static Version Current => Norm(typeof(HostUpdater).Assembly.GetName().Version ?? new Version(0, 0, 0));
     /// <summary>当前宿主是哪套编译：Revit 2026.5+ 是 net10，2026.0~2026.4 是 net8。</summary>
-    #if NETFRAMEWORK
+#if THL_ACAD
+    public static string Build => "acad"; // AutoCAD 宿主：一个更新包同时含 net48 和 net8 两套
+#elif NETFRAMEWORK
     public static string Build => "net472"; // Revit 2020 宿主
 #else
     public static string Build => Environment.Version.Major >= 10 ? "net10" : "net8";
@@ -56,8 +58,13 @@ public static class HostUpdater
     static string PendingPath => Path.Combine(UpdatesDir, "pending.json");
     /// <summary>宿主 DLL 所在目录（…\Addins\2026\THL）。</summary>
     public static string HostDir => Path.GetDirectoryName(typeof(HostUpdater).Assembly.Location)!;
+#if THL_ACAD
+    /// <summary>AutoCAD：THL.bundle 目录（DLL 在 THL.bundle\Contents\net8 或 net48）。</summary>
+    public static string TargetDir => Directory.GetParent(HostDir)!.Parent!.FullName;
+#else
     /// <summary>.addin 所在目录（…\Addins\2026）。</summary>
     public static string TargetDir => Directory.GetParent(HostDir)!.FullName;
+#endif
 
     static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
@@ -113,9 +120,17 @@ public static class HostUpdater
                     e.ExtractToFile(dest, true);
                 }
             }
+#if THL_ACAD
+            // AutoCAD 更新包 = 整个 THL.bundle 的内容：PackageContents.xml + Contents\net48\ + Contents\net8\
+            var dll = Path.Combine(staging, "Contents", AcadInfo.Fx, "THL.Acad.dll");
+            if (!File.Exists(dll) || !File.Exists(Path.Combine(staging, "PackageContents.xml"))
+                || !File.Exists(Path.Combine(staging, "Contents", "net48", "THL.Acad.dll")) || !File.Exists(Path.Combine(staging, "Contents", "net8", "THL.Acad.dll")))
+                throw new InvalidDataException("更新包内容不完整（缺少 PackageContents.xml 或 net48/net8 的 THL.Acad.dll）");
+#else
             var dll = Path.Combine(staging, "THL", "THL.Host.dll");
             if (!File.Exists(dll) || !File.Exists(Path.Combine(staging, "THL.addin")))
                 throw new InvalidDataException("更新包内容不完整（缺少 THL.Host.dll 或 THL.addin）");
+#endif
             var asmVer = Norm(AssemblyName.GetAssemblyName(dll).Version ?? new Version(0, 0, 0));
             if (asmVer != Norm(Version.Parse(rel.Version)))
                 throw new InvalidDataException($"更新包里的程序版本（{asmVer}）与 host.json 声明（{rel.Version}）不一致");
@@ -124,7 +139,11 @@ public static class HostUpdater
 
         var pending = new PendingUpdate { Version = rel.Version, Build = Build, Staging = staging, Created = DateTime.UtcNow.ToString("o") };
         File.WriteAllText(PendingPath, JsonSerializer.Serialize(pending, Json));
+#if THL_ACAD
+        progress?.Invoke($"v{rel.Version} 已下载，关闭 AutoCAD 后自动安装。");
+#else
         progress?.Invoke($"v{rel.Version} 已下载，关闭 Revit 后自动安装。");
+#endif
         return pending;
     }
 

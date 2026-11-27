@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 出图美化：Revit 导出 DWG 规范化（图层、文字、线型、颜色、清理），导出后直接套图框出图。 -->
+  <PropertyGroup><AssemblyName>ThlDwgTidy</AssemblyName><RootNamespace>Thl.Acad.Tidy</RootNamespace></PropertyGroup>
+</Project>

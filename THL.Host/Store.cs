@@ -13,7 +13,12 @@ public sealed class Manifest
     [JsonPropertyName("version")] public string Version { get; set; } = "0.0.0";
     [JsonPropertyName("description")] public string Description { get; set; } = "";
     [JsonPropertyName("category")] public string Category { get; set; } = "";
+#if THL_ACAD
+    /// <summary>AutoCAD 宿主：支持的 AutoCAD 版本（"2018+"、"2025-2026"），写在 plugin.json 的 acad 字段。没写 = 不是 AutoCAD 插件。</summary>
+    [JsonPropertyName("acad")] public string Revit { get; set; } = "";
+#else
     [JsonPropertyName("revit")] public string Revit { get; set; } = "2026";
+#endif
     /// <summary>插件所需的宿主接口版本（缺省 1）。高于宿主支持的版本时拒绝安装/运行，而不是悄悄出错。</summary>
     [JsonPropertyName("hostApi")] public int HostApi { get; set; } = 1;
     /// <summary>主 DLL 文件名（在插件目录内）</summary>
@@ -36,7 +41,12 @@ public sealed class Installed
     public Manifest Manifest { get; init; } = new();
     public string Dir { get; init; } = "";
     public bool Enabled { get; set; } = true;
+#if THL_ACAD
+    /// <summary>AutoCAD 插件包里按运行时分两份：net48\（2018~2024）、net8\（2025+）。</summary>
+    public string DllPath => Path.Combine(Dir, AcadInfo.Fx, Manifest.Dll);
+#else
     public string DllPath => Path.Combine(Dir, Manifest.Dll);
+#endif
     public string MainFile => Manifest.IsPython ? Manifest.Script : Manifest.Dll;
 }
 
@@ -60,7 +70,11 @@ public sealed class CatalogItem
     [JsonPropertyName("author")] public string Author { get; set; } = "";
     public bool IsCommunity => string.Equals(Tier, "community", StringComparison.OrdinalIgnoreCase);
     /// <summary>支持的 Revit 版本，写法同 plugin.json 的 revit（"2020"、"2020,2026"、"2020-2026"、"2024+"）。缺省按 2026。</summary>
+#if THL_ACAD
+    [JsonPropertyName("acad")] public string Revit { get; set; } = "";
+#else
     [JsonPropertyName("revit")] public string Revit { get; set; } = "2026";
+#endif
     /// <summary>一句话看懂：【动作】对象 → 结果（网站 content/plugins/&lt;id&gt;.json 写的，清单里带下来）。</summary>
     [JsonPropertyName("pitch")] public Pitch? Pitch { get; set; }
     /// <summary>改名前的旧名字：搜旧名也能搜到。</summary>
@@ -91,7 +105,10 @@ public static class Store
     /// <summary>用户数据目录。可用环境变量 THL_HOME 覆盖（测试用）。</summary>
     public static readonly string Root =
         Environment.GetEnvironmentVariable("THL_HOME")
-#if NETFRAMEWORK
+#if THL_ACAD
+        // AutoCAD 宿主：独立的数据目录（AutoCAD 插件和 Revit 插件互不相通）
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Tianheluo", "AutoCAD");
+#elif NETFRAMEWORK
         // Revit 2020 宿主用独立的数据目录：2026 版插件（.NET 8/10）不能在 2020 里运行，两边不能共用一份已装插件
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Tianheluo", "Revit2020");
 #else
@@ -104,14 +121,18 @@ public static class Store
 
     public sealed class Config
     {
-#if NETFRAMEWORK
+#if THL_ACAD
+        [JsonPropertyName("catalogUrl")] public string CatalogUrl { get; set; } = "https://tianheluo.com/pluginsacad.json";
+        [JsonPropertyName("hostUpdateUrl")] public string HostUpdateUrl { get; set; } = "https://tianheluo.com/hostacad.json";
+#elif NETFRAMEWORK
         // Revit 2020 宿主：单独的商店清单和宿主更新地址（2026 的插件 / 宿主更新包不能用在 2020）
         [JsonPropertyName("catalogUrl")] public string CatalogUrl { get; set; } = "https://tianheluo.com/plugins2020.json";
 #else
         [JsonPropertyName("catalogUrl")] public string CatalogUrl { get; set; } = "https://tianheluo.com/plugins.json";
 #endif
         /// <summary>宿主最新版本信息（可改成本地路径或内网地址，便于离线/测试）。</summary>
-#if NETFRAMEWORK
+#if THL_ACAD
+#elif NETFRAMEWORK
         [JsonPropertyName("hostUpdateUrl")] public string HostUpdateUrl { get; set; } = "https://tianheluo.com/host2020.json";
 #else
         [JsonPropertyName("hostUpdateUrl")] public string HostUpdateUrl { get; set; } = "https://tianheluo.com/host.json";
@@ -124,7 +145,11 @@ public static class Store
     public const int MaxSlots = 12;
 
     /// <summary>这个宿主跑在哪个 Revit 年份上：net472 版 = 2020，其余 = 2026。</summary>
-#if NETFRAMEWORK
+#if THL_ACAD
+    /// <summary>AutoCAD 宿主：当前 AutoCAD 年份（运行时取）。</summary>
+    public static int HostRevitYear => AcadInfo.Year;
+    public const string HostAppName = "AutoCAD";
+#elif NETFRAMEWORK
     public const int HostRevitYear = 2020;
 #else
     public const int HostRevitYear = 2026;
@@ -134,7 +159,11 @@ public static class Store
     public static bool SupportsRevit(string? spec, int year = 0)
     {
         if (year == 0) year = HostRevitYear;
+#if THL_ACAD
+        if (string.IsNullOrWhiteSpace(spec)) return false;   // 没写 acad 字段 = 不是 AutoCAD 插件
+#else
         if (string.IsNullOrWhiteSpace(spec)) spec = "2026";
+#endif
         foreach (var raw in spec!.Split(new[] { ',', ';', ' ', '、', '，' }, StringSplitOptions.RemoveEmptyEntries))
         {
             var t = raw.Trim();
@@ -225,7 +254,13 @@ public static class Store
         Manifest m;
         using (var s = mfEntry.Open()) m = JsonSerializer.Deserialize<Manifest>(s, Json) ?? throw new InvalidDataException("plugin.json 无法解析");
         if (!ValidId(m.Id)) throw new InvalidDataException("插件 id 只能包含字母、数字、- 和 _");
+#if THL_ACAD
+        if (!SupportsRevit(m.Revit)) throw new InvalidDataException(string.IsNullOrWhiteSpace(m.Revit)
+            ? $"「{m.Name}」不是 AutoCAD 插件（Revit 插件请在 Revit 的天河落插件中心安装）。"
+            : $"「{m.Name}」不支持 AutoCAD {HostRevitYear}（适用版本：{m.Revit}）。");
+#else
         if (!SupportsRevit(m.Revit)) throw new InvalidDataException($"「{m.Name}」不支持 Revit {HostRevitYear}（适用版本：{m.Revit}）。");
+#endif
         if (m.HostApi > HostApiVersion) throw new InvalidDataException($"「{m.Name}」需要更新的宿主（插件接口 v{m.HostApi}，当前宿主支持 v{HostApiVersion}）。请先在插件中心更新宿主。");
         if (m.IsPython) { if (string.IsNullOrWhiteSpace(m.Script)) throw new InvalidDataException("plugin.json 缺少 script"); }
         else if (string.IsNullOrWhiteSpace(m.Dll) || string.IsNullOrWhiteSpace(m.Entry)) throw new InvalidDataException("plugin.json 缺少 dll 或 entry");
@@ -247,7 +282,11 @@ public static class Store
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                 e.ExtractToFile(dest, overwrite: true);
             }
+#if THL_ACAD
+            var main = Path.Combine(AcadInfo.Fx, m.Dll);
+#else
             var main = m.IsPython ? m.Script : m.Dll;
+#endif
             if (!File.Exists(Path.Combine(staging, main))) throw new InvalidDataException("插件包里找不到 " + main);
 
             // 热更新：宿主每次运行都是从内存加载 DLL，所以磁盘文件可以直接替换

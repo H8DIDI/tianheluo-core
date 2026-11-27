@@ -160,7 +160,11 @@ public sealed class LauncherWindow : Window
         {
             var run = MakeButton("运行", true); run.IsEnabled = p.Enabled; run.Click += (_, _) => Run(p);
             var toggle = MakeButton(p.Enabled ? "停用" : "启用", false);
+#if THL_ACAD
+            toggle.Click += (_, _) => { Store.SetEnabled(p.Manifest.Id, !p.Enabled); Flash("已" + (p.Enabled ? "停用" : "启用") + "「" + p.Manifest.Name + "」。"); App.SyncRibbon(); Render(); };
+#else
             toggle.Click += (_, _) => { Store.SetEnabled(p.Manifest.Id, !p.Enabled); Flash("已" + (p.Enabled ? "停用" : "启用") + "「" + p.Manifest.Name + "」。功能区按钮在重启 Revit 后更新。"); Render(); };
+#endif
             var del = MakeButton("卸载", false);
             del.Click += (_, _) =>
             {
@@ -271,7 +275,11 @@ public sealed class LauncherWindow : Window
         var pending = HostUpdater.Pending();
         if (pending != null)
         {
+#if THL_ACAD
+            _bannerText.Text = $"宿主更新 v{pending.Version} 已下载，关闭 AutoCAD 后会自动安装（当前 v{HostUpdater.Current}）。";
+#else
             _bannerText.Text = $"宿主更新 v{pending.Version} 已下载，关闭 Revit 后会自动安装（当前 v{HostUpdater.Current}）。";
+#endif
             _bannerBtn.Visibility = Visibility.Collapsed; _banner.Visibility = Visibility.Visible; return;
         }
         if (_hostRelease != null && HostUpdater.IsNewer(_hostRelease.Version))

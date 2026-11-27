@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- AutoCAD 后台瘦身命令（THLSLIM），在 accoreconsole 里 NETLOAD 运行。
+       net8.0-windows：AutoCAD 2025 及以上（.NET 8）；net48：AutoCAD 2018~2024（.NET Framework，按 2018 的接口编译，向上兼容）。 -->
+  <PropertyGroup>
+    <TargetFrameworks>net8.0-windows;net48</TargetFrameworks>
+    <AssemblyName>ThlDwgSlim</AssemblyName>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <PlatformTarget>x64</PlatformTarget>
+    <AcadDir>C:\Program Files\Autodesk\AutoCAD 2026</AcadDir>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <Reference Include="acdbmgd"><HintPath>$(AcadDir)\acdbmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="accoremgd"><HintPath>$(AcadDir)\accoremgd.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <!-- Autodesk 官方 NuGet 包：22.0.0 = AutoCAD 2018 的托管接口（只用来编译，不随包分发） -->
+    <PackageReference Include="AutoCAD.NET.Core" Version="22.0.0" ExcludeAssets="runtime" />
+    <PackageReference Include="AutoCAD.NET.Model" Version="22.0.0" ExcludeAssets="runtime" />
+  </ItemGroup>
+</Project>
