@@ -89,7 +89,7 @@ namespace Thl.Acad.Sheets.Wizard
                     if (p1.Status != PromptStatus.OK) break;
                     var p2 = ed.GetCorner(new PromptCornerOptions("\n对角点", p1.Value));
                     if (p2.Status != PromptStatus.OK) break;
-                    var nm = ed.GetString(new PromptStringOptions($"\n名称（如 F栋）<分区{start + list.Count + 1}>") { AllowSpaces = true });
+                    var nm = ed.GetString(new PromptStringOptions($"\n名称（如 1号楼）<分区{start + list.Count + 1}>") { AllowSpaces = true });
                     if (nm.Status == PromptStatus.Cancel) break;
                     var name = string.IsNullOrWhiteSpace(nm.StringResult) ? "分区" + (start + list.Count + 1) : nm.StringResult.Trim();
                     list.Add(Zone.Rect(name, p1.Value.X, p1.Value.Y, p2.Value.X, p2.Value.Y));

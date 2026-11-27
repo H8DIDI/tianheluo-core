@@ -314,7 +314,7 @@ namespace Thl.Acad.Sheets.Wizard
             _numPreview.Left = 560; _numPreview.Top = y + 3; p.Controls.Add(_numPreview);
             EventHandler pv = (_, __) => { ReadScheme(); _numPreview.Text = "例：" + _s.Number(0) + "、" + _s.Number(1) + " …"; };
             _tbPrefix.TextChanged += pv; _nDigits.ValueChanged += pv; _nStart.ValueChanged += pv;
-            L(p, "图号规则参考：报审图号一般是「项目-专业-图类-序号」，例如 XX-ELV-SL-002-SD-001。前缀写到序号前一位为止。", 60, y + 36, false, Color.DimGray);
+            L(p, "图号规则参考：报审图号一般是「项目-专业-图类-序号」，例如 XM-JPS-PM-001。前缀写到序号前一位为止。", 60, y + 36, false, Color.DimGray);
             L(p, "这一页的选择会记住，下次打开就是这些。图例中文名、美化规则、方案导入导出在左下角「设置…」。", 0, 500, false, Color.DimGray);
         }
 

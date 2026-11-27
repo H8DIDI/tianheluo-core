@@ -42,6 +42,7 @@ namespace Thl.Acad.Sheets.Wizard
             _tabs.TabPages.Add(TidyPage());
             _tabs.TabPages.Add(SchemePage());
             WizardForm.FitDpi(this);
+            Shown += (_, __) => { _lg.ClearSelection(); _rg.ClearSelection(); };
         }
 
         public void ShowTab(int i) => _tabs.SelectedIndex = i;

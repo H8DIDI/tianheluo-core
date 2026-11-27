@@ -253,7 +253,7 @@ namespace Thl.Acad.Sheets
             if (a.TryGetValue("pdf", out var pdf))
             {
                 var rows = Sheets.Read(doc.Database, FrameTemplate.All()).Where(r => Args.B(a, "pdfall", false) || !r.TitleRef.IsNull).ToList();
-                log(Sheets.PlotPdf(doc, rows, pdf, null, log));
+                log(Sheets.PlotPdf(doc, rows, pdf, a.TryGetValue("pdfctb", out var pc) ? new PlotOpts { Device = null, Ctb = pc } : null, log));
             }
             if (Args.B(a, "ui", false))
                 using (var f = new SheetForm(doc)) Ui.Show(f, "acad-sheets");
@@ -377,7 +377,7 @@ namespace Thl.Acad.Sheets
             B("上移", "调整图纸顺序（写入后布局选项卡、目录、PDF 都按这个顺序）。", (_, __) => Move(-1));
             B("下移", "", (_, __) => Move(1));
             B("按图号排序", "按图号自然顺序排列。", (_, __) => SortByNumber());
-            B("批量编号…", "按规则给勾选的图纸编图号和张号，如 ELV-SL-002-SD-{n:000}、{i:00} OF {total:00}。", (_, __) => NumberDlg());
+            B("批量编号…", "按规则给勾选的图纸编图号和张号，如 XM-JPS-PM-{n:000}、{i:00} OF {total:00}。", (_, __) => NumberDlg());
             B("统一填写…", "项目名称、设计、校对、审核、日期等全套相同的信息一次填到勾选的图纸。", (_, __) => FillAllDlg());
             B("生成目录", "新建/更新「图纸目录」布局：带图框，表格列出全部图纸。", (_, __) => MakeToc());
             B("写入图纸", "把表格里改过的内容写到各布局的图签，并按表格顺序排布局选项卡。", (_, __) => WriteBack(), 0).Font = new System.Drawing.Font(Font, FontStyle.Bold);
@@ -602,7 +602,7 @@ namespace Thl.Acad.Sheets
                 if (r1.Checked)
                 {
                     zones = Zones.FromLayer(_doc.Database, Zones.Layer);
-                    if (zones.Count == 0) { MessageBox.Show(this, $"图层「{Zones.Layer}」上没有闭合多段线。\n先在模型空间用 PLINE / RECTANG 在这个图层画出各楼栋的范围，并在每个范围里写上名称（如 F栋），或选「现在到图上框选」。", "分区出图"); return; }
+                    if (zones.Count == 0) { MessageBox.Show(this, $"图层「{Zones.Layer}」上没有闭合多段线。\n先在模型空间用 PLINE / RECTANG 在这个图层画出各楼栋的范围，并在每个范围里写上名称（如 1号楼），或选「现在到图上框选」。", "分区出图"); return; }
                 }
                 else if (r2.Checked)
                 {
@@ -669,17 +669,10 @@ namespace Thl.Acad.Sheets
             var rows = ExcelSync.Scan(_doc, _tpls, m => msgs.Add(m));
             var changes = ExcelSync.Diff(rows, path);
             if (changes.Count == 0) { MessageBox.Show(this, "表格和图里一样，没有要改的。", "图集管理"); return; }
-            using (var f = Ui.NewForm($"导入预览：{changes.Count} 处改动", 760, 520))
+            using (var f = new Wizard.ImportPreviewForm(changes.Select(c => (c.Row.Locator, c.Field, c.Old, c.New)).ToList()))
             {
-                Ui.Label(f, "确认后会先把原文件（最近一次保存的版本）复制成「原名.THL备份-时间.dwg」，再写入：", 12, 10, 730, Color.DimGray);
-                var lv = new ListView { Left = 12, Top = 40, Width = 736, Height = 420, View = View.Details, FullRowSelect = true, CheckBoxes = true };
-                lv.Columns.Add("位置", 220); lv.Columns.Add("字段", 110); lv.Columns.Add("旧", 190); lv.Columns.Add("新", 190);
-                foreach (var c in changes) lv.Items.Add(new ListViewItem(new[] { c.Row.Locator, c.Field, c.Old.Replace("\n", " "), c.New.Replace("\n", " ") }) { Checked = true, Tag = c });
-                f.Controls.Add(lv);
-                var ok = Ui.Btn(f, "写入勾选的改动", 520, 474, 130); ok.DialogResult = DialogResult.OK;
-                var cancel = Ui.Btn(f, "取消", 658, 474, 90); cancel.DialogResult = DialogResult.Cancel;
                 if (f.ShowDialog(this) != DialogResult.OK) return;
-                var sel = lv.Items.Cast<ListViewItem>().Where(i => i.Checked).Select(i => (ExcelSync.Change)i.Tag).ToList();
+                var sel = f.Selected.Select(i => changes[i]).ToList();
                 var res = ExcelSync.Apply(_doc, sel, m => msgs.Add(m));
                 Reload();
                 Status(res.Replace("\n", " "));
@@ -770,7 +763,7 @@ namespace Thl.Acad.Sheets
                 var tbSheet = new TextBox { Left = 100, Top = 117, Width = 200, Text = _st.TryGetValue("sheetrule", out var sr) ? sr : "{i:00} OF {total:00}" };
                 f.Controls.Add(tbSheet);
                 var ckSheet = Ui.Check(f, "同时编张号", 316, 118, true);
-                Ui.Label(f, "{n} {n:000} = 起始号起递增（:000 = 补零到 3 位）；{i} {i:00} = 第几张；{total} = 共几张；{图名} 等 = 字段值。\n例：ELV-SL-002-SD-{n:000}-1、第{i}张 共{total}张", 14, 156, 530, Color.DimGray).Height = 48;
+                Ui.Label(f, "{n} {n:000} = 起始号起递增（:000 = 补零到 3 位）；{i} {i:00} = 第几张；{total} = 共几张；{图名} 等 = 字段值。\n例：XM-JPS-PM-{n:000}、第{i}张 共{total}张", 14, 156, 530, Color.DimGray).Height = 48;
                 if (_tpl != null && _tpl.Note.Length > 0) Ui.Label(f, "图框里的图号说明：" + _tpl.Note.Replace("\n", " "), 14, 206, 530, Color.SteelBlue).Height = 40;
                 var preview = Ui.Label(f, "", 14, 250, 530, Color.DarkGreen);
                 void Pv()

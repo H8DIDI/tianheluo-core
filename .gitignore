@@ -44,4 +44,6 @@ setup/exe/payload.zip
 
 # AutoCAD 宿主/插件打包产物（tools/pack_acad.py 生成）
 dist-acad/
+
+# AutoCAD 打印时写在当前目录的日志（含图纸路径、图号，不要提交）
 plot.log
