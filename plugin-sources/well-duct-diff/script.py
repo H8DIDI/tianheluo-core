@@ -1,0 +1,1143 @@
+# -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+__title__ = '井接入排管\n高差更新'
+__author__ = 'didi'
+__doc__ = ('统计每口电井（TELCO、LV、ELV、11kV）接入的各根排管的管底标高，把「最高管底 − 最低管底」的最大高差写进井的参数，'
+           '并给出高差分段（0-500、500-725、725-1000，往后每档 250mm）和接入排管数。\n'
+           '写入三个井参数：接入排管最大高差（长度）、接入高差分段（文字）、接入排管数（整数）；参数不存在会自动新建（常规模型实例参数），'
+           '也可以一键建好「井接入排管高差明细表」。排管挪了、改了标高，再点一次就更新，明细表跟着变。\n'
+           '只写这三个参数，不动井和排管。运行前先告诉你有几口井会变，确认后才写；被别人占用或本地文件已过期的井会跳过并列出来。\n'
+           '管底按排管在井范围内的真实高度算（带坡度的按坡度插值）；穿过井的、进到井里的、离井壁不到 200mm 的排管都算接入；'
+           '室内井、临时构件不参与。分段边界、参数名等在「设置…」里改（文档\\KaifaTools\\井接入排管高差设置.json）。')
+
+import io
+import os
+import math
+import json
+import tempfile
+import uuid
+import traceback
+import clr
+import System
+clr.AddReference('RevitAPI')
+clr.AddReference('System.Windows.Forms')
+from Autodesk.Revit import DB
+from pyrevit import revit, forms
+import System.Windows.Forms as WF
+
+# ---- form_fit（天河落共用片段，打包时内联进脚本）--------------------------------
+# 让手工摆坐标的 WinForms 窗口在高分屏（125%、150% 缩放）上不截字、能拖大小。
+# 插件窗口原来都按 100% 缩放的像素写死：缩放 150% 时字变大了框没变，文字就被截掉。
+#   1. 按屏幕 DPI 等比放大全部控件（.NET 不管的列表列宽、表格行高另外放大）；
+#   2. 放不下的说明文字、勾选项自动换行，下面的控件依次下移；
+#   3. 固定边框改成可拖动：列表/表格/预览区跟着窗口变大，底部按钮贴底，右侧按钮贴右，输入框横向拉伸；
+#   4. 不超过屏幕可用区域，屏幕太小时出滚动条。
+# 用法：form.ShowDialog() 之前调用 ff_fit(form)。已经可拖动、自己排好版的窗口只做第 1 步。
+import clr as _ff_clr
+_ff_clr.AddReference('System.Windows.Forms')
+_ff_clr.AddReference('System.Drawing')
+import System.Windows.Forms as _FFW
+import System.Drawing as _FFD
+
+_FF_DOCK_NONE = getattr(_FFW.DockStyle, 'None')
+_FF_SCALE_NONE = getattr(_FFW.AutoScaleMode, 'None')
+_FF_A = _FFW.AnchorStyles
+_FF_FIXED = (_FFW.FormBorderStyle.FixedDialog, _FFW.FormBorderStyle.FixedSingle,
+             _FFW.FormBorderStyle.Fixed3D, _FFW.FormBorderStyle.FixedToolWindow)
+_FF_WRAP_FLAGS = (_FFW.TextFormatFlags.WordBreak | _FFW.TextFormatFlags.TextBoxControl)
+
+
+def _ff_kids(parent):
+    return [c for c in parent.Controls]
+
+
+def _ff_walk(parent):
+    for c in parent.Controls:
+        yield c
+        for x in _ff_walk(c):
+            yield x
+
+
+def _ff_dpi(f):
+    try:
+        d = float(f.DeviceDpi)
+        if d > 0:
+            return d
+    except Exception:
+        pass
+    g = f.CreateGraphics()
+    try:
+        return float(g.DpiX)
+    finally:
+        g.Dispose()
+
+
+def _ff_scale(f, k):
+    """整窗等比放大。窗口自己设了 AutoScaleDimensions 的（会自动缩放）不重复放大。"""
+    try:
+        # 只有写明了设计时的 DPI（AutoScaleDimensions，且和当前不同）窗口才会自己缩放；
+        # 只设 AutoScaleMode 不设它，Revit 里其实不会缩放
+        asd = f.AutoScaleDimensions
+        if f.AutoScaleMode != _FF_SCALE_NONE and not asd.IsEmpty and \
+                abs(asd.Width - f.CurrentAutoScaleDimensions.Width) > 0.5:
+            return False
+    except Exception:
+        pass
+    mn, mx = f.MinimumSize, f.MaximumSize
+    f.MinimumSize = _FFD.Size.Empty
+    f.MaximumSize = _FFD.Size.Empty
+    f.AutoScaleMode = _FF_SCALE_NONE
+    f.Scale(_FFD.SizeF(k, k))      # 控件位置/大小、表格布局的固定列宽、最小最大尺寸由 .NET 一起放大
+    if not mn.IsEmpty:
+        f.MinimumSize = _FFD.Size(int(mn.Width * k), int(mn.Height * k))
+    if not mx.IsEmpty:
+        f.MaximumSize = _FFD.Size(int(mx.Width * k), int(mx.Height * k))
+    for c in _ff_walk(f):
+        try:
+            if isinstance(c, _FFW.ListView):
+                for col in c.Columns:
+                    if col.Width > 0:
+                        col.Width = int(col.Width * k)
+            elif isinstance(c, _FFW.DataGridView):
+                for col in c.Columns:
+                    if col.AutoSizeMode != _FFW.DataGridViewAutoSizeColumnMode.Fill:
+                        col.Width = int(col.Width * k)
+                        if col.MinimumWidth > 2:
+                            col.MinimumWidth = max(2, int(col.MinimumWidth * k))
+                c.RowTemplate.Height = int(c.RowTemplate.Height * k)
+                for r in c.Rows:
+                    r.Height = max(r.Height, c.RowTemplate.Height)
+                if c.ColumnHeadersHeightSizeMode != _FFW.DataGridViewColumnHeadersHeightSizeMode.AutoSize:
+                    c.ColumnHeadersHeight = int(c.ColumnHeadersHeight * k)
+                if c.RowHeadersVisible:
+                    c.RowHeadersWidth = max(4, int(c.RowHeadersWidth * k))
+        except Exception:
+            pass
+    return True
+
+
+def _ff_absolute(parent):
+    """容器里的控件是手工摆坐标的（不是表格/流式布局、也不是停靠）。"""
+    if isinstance(parent, (_FFW.TableLayoutPanel, _FFW.FlowLayoutPanel)):
+        return False
+    kids = _ff_kids(parent)
+    return bool(kids) and all(c.Dock == _FF_DOCK_NONE for c in kids)
+
+
+def _ff_grow(ctrl, delta, f):
+    """ctrl 变高了 delta：它下面的兄弟控件下移，父容器跟着变高（一直传到窗口）。"""
+    parent = ctrl.Parent
+    if parent is None or delta <= 0:
+        return
+    old_bottom = ctrl.Bottom - delta
+    for s in _ff_kids(parent):
+        if s is not ctrl and s.Dock == _FF_DOCK_NONE and s.Top >= old_bottom - 3:
+            s.Top += delta
+    if isinstance(parent, _FFW.Form):
+        parent.ClientSize = _FFD.Size(parent.ClientSize.Width, parent.ClientSize.Height + delta)
+    elif getattr(parent, 'AutoScroll', False) or parent.Dock != _FF_DOCK_NONE or isinstance(parent, _FFW.TabPage):
+        return
+    else:
+        parent.Height += delta
+        _ff_grow(parent, delta, f)
+
+
+def _ff_reflow(parent, k, f):
+    """放不下的文字：自动换行、加高，下面的控件顺延；按钮文字放不下就加宽。"""
+    if not _ff_absolute(parent):
+        for c in _ff_kids(parent):
+            if c.Controls.Count:
+                _ff_reflow(c, k, f)
+        return
+    for c in sorted(_ff_kids(parent), key=lambda x: (x.Top, x.Left)):
+        text = c.Text or u''
+        try:
+            if isinstance(c, (_FFW.Label, _FFW.CheckBox, _FFW.RadioButton)) and text and not isinstance(c, _FFW.LinkLabel):
+                pw = parent.ClientSize.Width
+                if c.AutoSize:
+                    one = _FFW.TextRenderer.MeasureText(text, c.Font)
+                    if c.Left + one.Width <= pw - 2:
+                        continue
+                    c.AutoSize = False
+                    c.Width = max(40, pw - c.Left - int(8 * k))
+                    c.Height = one.Height + int(4 * k)
+                box = int(20 * k) if isinstance(c, (_FFW.CheckBox, _FFW.RadioButton)) else int(2 * k)
+                avail = max(20, c.Width - box - c.Padding.Horizontal - 2)
+                need = _FFW.TextRenderer.MeasureText(text, c.Font, _FFD.Size(avail, 100000), _FF_WRAP_FLAGS).Height
+                need += c.Padding.Vertical + int(4 * k)
+                if need > c.Height + 1:
+                    delta = need - c.Height
+                    c.Height = need
+                    if isinstance(c, (_FFW.CheckBox, _FFW.RadioButton)):
+                        c.CheckAlign = _FFD.ContentAlignment.TopLeft
+                        c.TextAlign = _FFD.ContentAlignment.TopLeft
+                    _ff_grow(c, delta, f)
+            elif isinstance(c, _FFW.Button) and text and not c.AutoSize:
+                need = _FFW.TextRenderer.MeasureText(text, c.Font).Width + int(18 * k)
+                if need > c.Width:
+                    d = need - c.Width
+                    if c.Left > parent.ClientSize.Width // 2:
+                        c.Left -= d
+                    c.Width = need
+            elif c.Controls.Count and not isinstance(c, (_FFW.DataGridView, _FFW.ListView, _FFW.NumericUpDown, _FFW.ComboBox)):
+                _ff_reflow(c, k, f)
+        except Exception:
+            pass
+
+
+def _ff_is_grow(c):
+    if isinstance(c, (_FFW.ListView, _FFW.DataGridView, _FFW.TreeView, _FFW.ListBox, _FFW.RichTextBox,
+                      _FFW.PictureBox, _FFW.TabControl, _FFW.SplitContainer)):
+        return True
+    if isinstance(c, _FFW.TextBox) and c.Multiline:
+        return True
+    if isinstance(c, _FFW.Panel) and not isinstance(c, (_FFW.FlowLayoutPanel, _FFW.TableLayoutPanel)):
+        return bool(c.AutoScroll) or c.Controls.Count == 0      # 可滚动的内容区，或代码自绘的预览区
+    return False
+
+
+def _ff_has(a, flag):
+    return int(a & flag) != 0
+
+
+def _ff_vover(a, b):
+    return a.Top < b.Bottom and b.Top < a.Bottom
+
+
+def _ff_anchor(parent, k, vertical=True):
+    """按位置给控件定锚点：最大的列表/表格/预览区随窗口变大，它下面的控件贴底；贴右边的拉伸或贴右。"""
+    if not _ff_absolute(parent):
+        return
+    cw, ch = parent.ClientSize.Width, parent.ClientSize.Height
+    kids = _ff_kids(parent)
+    edge = max(int(30 * k), int(cw * 0.05))
+    grow = None
+    if vertical:
+        cand = [c for c in kids if _ff_is_grow(c) and c.Width * c.Height >= 0.10 * cw * ch]
+        if cand:
+            grow = max(cand, key=lambda c: c.Width * c.Height)
+    rows_grow = [c for c in kids if grow is not None and c is not grow and _ff_is_grow(c) and _ff_vover(c, grow)
+                 and c.Height >= grow.Height * 0.6]
+    for c in kids:
+        a = _FF_A.Top
+        if vertical:
+            if c is grow or c in rows_grow:
+                a = _FF_A.Top | _FF_A.Bottom
+            elif grow is not None and c.Top >= grow.Bottom - 2:
+                a = _FF_A.Bottom
+            elif grow is None and isinstance(c, _FFW.Button) and c.Top >= ch - int(64 * k):
+                a = _FF_A.Bottom
+        right_gap = cw - c.Right
+        right_of = [o for o in kids if o is not c and o.Left >= c.Right - 2 and _ff_vover(o, c)]
+        small = isinstance(c, (_FFW.Button, _FFW.CheckBox, _FFW.RadioButton)) or c.Width < cw * 0.25
+        if right_of and not small and all(isinstance(o, _FFW.Button) or o.Width < cw * 0.3 for o in right_of) \
+                and cw - max(o.Right for o in right_of) <= edge and not any(o in rows_grow or o is grow for o in right_of):
+            a |= _FF_A.Left | _FF_A.Right
+        elif right_gap <= edge and not small and c.Width >= cw * 0.3:
+            a |= _FF_A.Left | _FF_A.Right
+        elif c.Left > cw * 0.5 and (right_gap <= edge or isinstance(c, _FFW.Button) or
+                                    any(o.Right >= cw - edge for o in right_of)):
+            a |= _FF_A.Right
+        else:
+            a |= _FF_A.Left
+        c.Anchor = a
+        stretched_w = _ff_has(a, _FF_A.Left) and _ff_has(a, _FF_A.Right)
+        stretched_h = _ff_has(a, _FF_A.Top) and _ff_has(a, _FF_A.Bottom)
+        if isinstance(c, _FFW.TabControl):
+            for p in c.TabPages:
+                _ff_anchor(p, k, True)
+        elif isinstance(c, _FFW.SplitContainer):
+            _ff_anchor(c.Panel1, k, True)
+            _ff_anchor(c.Panel2, k, True)
+        elif (stretched_w or stretched_h) and isinstance(c, (_FFW.Panel, _FFW.GroupBox)) \
+                and not isinstance(c, (_FFW.TableLayoutPanel, _FFW.FlowLayoutPanel)):
+            _ff_anchor(c, k, stretched_h and not getattr(c, 'AutoScroll', False))
+
+
+def ff_fit(f):
+    """在 ShowDialog() 前调用。出错时什么都不改，窗口照常弹出。"""
+    try:
+        k = _ff_dpi(f) / 96.0
+        fixed = f.FormBorderStyle in _FF_FIXED
+        if k > 1.01:
+            _ff_scale(f, k)
+        if fixed:
+            _ff_reflow(f, max(k, 1.0), f)
+            _ff_anchor(f, max(k, 1.0), True)
+            f.FormBorderStyle = _FFW.FormBorderStyle.Sizable
+            f.SizeGripStyle = _FFW.SizeGripStyle.Show
+            f.MaximizeBox = True
+        try:
+            wa = _FFW.Screen.FromPoint(_FFW.Cursor.Position).WorkingArea
+        except Exception:
+            wa = _FFW.Screen.PrimaryScreen.WorkingArea
+        design = f.ClientSize
+        if fixed:
+            f.AutoScrollMinSize = design      # 屏幕放不下时出滚动条，控件不挤在一起
+            f.AutoScroll = True
+            f.MinimumSize = _FFD.Size(min(f.Width, wa.Width), min(f.Height, wa.Height))
+        if f.Width > wa.Width or f.Height > wa.Height:
+            f.AutoScroll = True
+            f.Size = _FFD.Size(min(f.Width, wa.Width), min(f.Height, wa.Height))
+            if not f.MinimumSize.IsEmpty:
+                f.MinimumSize = _FFD.Size(min(f.MinimumSize.Width, wa.Width), min(f.MinimumSize.Height, wa.Height))
+    except Exception:
+        pass
+    return f
+# ---- form_fit 结束 ----------------------------------------------------------------
+
+# ---- settings_ui（天河落共用片段，打包时内联进脚本）-----------------------------
+# 图形化「设置」窗口：每个参数一行（中文名、输入框/下拉框/勾选、单位和说明），保存、恢复默认、取消。
+# 依赖 form_fit（插件里要先 include _shared/form_fit.py）。
+# 用法：su_fields_dialog(标题, 说明, 字段列表, 当前值, 默认值) -> 新值字典 或 None（取消）。
+# 字段 dict：key、label、kind（header 分组标题 / num 数字 / text 文本 / list 逗号分隔的列表 / choice 下拉（只能选）/
+#           combo 下拉（可选可手填）/ bool 勾选 / palette 颜色列表「R,G,B; R,G,B」/ lines 多行文本，每行一项，rows 行高）、hint 说明、
+#           choices [(值, 显示文字), ...]、min、max、int（数字取整）。
+import re as _su_re
+import clr as _su_clr
+_su_clr.AddReference('System.Windows.Forms')
+_su_clr.AddReference('System.Drawing')
+import System.Windows.Forms as _SUW
+import System.Drawing as _SUD
+import System.Diagnostics as _SUDG
+
+
+def su_open_file(path):
+    """用记事本打开设置文件。"""
+    try:
+        _SUDG.Process.Start(u"notepad.exe", path)
+    except Exception:
+        pass
+
+
+def _su_split(text):
+    return [x.strip() for x in _su_re.split(u"[,，;；\\n\\r]+", text or u"") if x.strip()]
+
+
+def _su_to_text(fld, val):
+    kind = fld.get(u"kind", u"text")
+    if kind == u"list":
+        return u", ".join(u"%s" % x for x in (val or []))
+    if kind == u"lines":
+        return u"\r\n".join(u"%s" % x for x in (val or []))
+    if kind == u"palette":
+        return u"; ".join(u"%d,%d,%d" % tuple(c[:3]) for c in (val or []))
+    if kind == u"num":
+        try:
+            v = float(val)
+            return (u"%d" % v) if v == int(v) else (u"%g" % v)
+        except Exception:
+            return u"" if val is None else u"%s" % val
+    return u"" if val is None else u"%s" % val
+
+
+def su_fields_dialog(title, intro, fields, values, defaults=None, extra_buttons=None, width=680, height=640):
+    """弹出设置窗口。extra_buttons: [(按钮文字, 回调)]，回调不带参数（如「用记事本打开文件」）。返回新值 dict 或 None。"""
+    f = _SUW.Form()
+    f.Text = title
+    f.Font = _SUD.Font(u"Microsoft YaHei UI", 9.0)
+    f.StartPosition = _SUW.FormStartPosition.CenterScreen
+    f.FormBorderStyle = _SUW.FormBorderStyle.FixedDialog
+    f.MaximizeBox = False
+    f.MinimizeBox = False
+    f.ClientSize = _SUD.Size(width, height)
+    lb = _SUW.Label()
+    lb.Text = intro
+    lb.Location = _SUD.Point(14, 10)
+    lb.Size = _SUD.Size(width - 28, 44)
+    f.Controls.Add(lb)
+    panel = _SUW.Panel()
+    panel.Location = _SUD.Point(10, 58)
+    panel.Size = _SUD.Size(width - 20, height - 58 - 54)
+    panel.AutoScroll = True
+    panel.BorderStyle = _SUW.BorderStyle.FixedSingle
+    f.Controls.Add(panel)
+
+    ctrls = {}
+    y = 8
+    for fld in fields:
+        kind = fld.get(u"kind", u"text")
+        if kind == u"header":
+            l = _SUW.Label()
+            l.Text = fld[u"label"]
+            l.Font = _SUD.Font(f.Font, _SUD.FontStyle.Bold)
+            l.Location = _SUD.Point(6, y + 6)
+            l.Size = _SUD.Size(width - 60, 22)
+            panel.Controls.Add(l)
+            y += 34
+            continue
+        l = _SUW.Label()
+        l.Text = fld[u"label"]
+        l.Location = _SUD.Point(6, y + 3)
+        l.Size = _SUD.Size(250, 34)
+        panel.Controls.Add(l)
+        key = fld[u"key"]
+        if kind in (u"choice", u"combo"):
+            c = _SUW.ComboBox()
+            c.DropDownStyle = _SUW.ComboBoxStyle.DropDownList if kind == u"choice" else _SUW.ComboBoxStyle.DropDown
+            for _v, _t in fld.get(u"choices", []):
+                c.Items.Add(_t)
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, 24)
+        elif kind == u"bool":
+            c = _SUW.CheckBox()
+            c.Text = fld.get(u"bool_text", u"启用")
+            c.Location = _SUD.Point(264, y + 2)
+            c.Size = _SUD.Size(width - 310, 22)
+        elif kind == u"lines":
+            c = _SUW.TextBox()
+            c.Multiline = True
+            c.ScrollBars = _SUW.ScrollBars.Both
+            c.WordWrap = False
+            c.AcceptsReturn = True
+            c.Font = _SUD.Font(u"Consolas", 9.0)
+            rows = int(fld.get(u"rows", 6))
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, rows * 18 + 8)
+        else:
+            c = _SUW.TextBox()
+            c.Location = _SUD.Point(264, y)
+            c.Size = _SUD.Size(width - 310, 24)
+        panel.Controls.Add(c)
+        ctrls[key] = c
+        y += (int(fld.get(u"rows", 6)) * 18 + 14) if kind == u"lines" else 30
+        if fld.get(u"hint"):
+            h = _SUW.Label()
+            h.Text = fld[u"hint"]
+            h.ForeColor = _SUD.Color.FromArgb(110, 110, 110)
+            h.Location = _SUD.Point(264, y - 2)
+            h.Size = _SUD.Size(width - 310, 34)
+            panel.Controls.Add(h)
+            y += 36
+        y += 6
+
+    def put(fld, val):
+        c = ctrls.get(fld[u"key"])
+        if c is None:
+            return
+        kind = fld.get(u"kind", u"text")
+        if kind == u"bool":
+            c.Checked = bool(val)
+        elif kind in (u"choice", u"combo"):
+            chs = fld.get(u"choices", [])
+            idx = [i for i, (v, t) in enumerate(chs) if v == val]
+            if idx:
+                c.SelectedIndex = idx[0]
+            elif kind == u"combo":
+                c.Text = u"" if val is None else u"%s" % val
+            elif chs:
+                c.SelectedIndex = 0
+        else:
+            c.Text = _su_to_text(fld, val)
+
+    def get(fld):
+        """读控件的值并校验；不合格抛 ValueError(说明)。"""
+        c = ctrls[fld[u"key"]]
+        kind = fld.get(u"kind", u"text")
+        name = fld[u"label"]
+        if kind == u"bool":
+            return bool(c.Checked)
+        if kind == u"choice":
+            chs = fld.get(u"choices", [])
+            return chs[c.SelectedIndex][0] if 0 <= c.SelectedIndex < len(chs) else None
+        if kind == u"combo":
+            txt = (c.Text or u"").strip()
+            for v, t in fld.get(u"choices", []):
+                if t == txt:
+                    return v
+            return txt
+        txt = (c.Text or u"").strip()
+        if kind == u"num":
+            try:
+                v = float(txt)
+            except Exception:
+                raise ValueError(u"「%s」要填数字。" % name)
+            if fld.get(u"min") is not None and v < fld[u"min"]:
+                raise ValueError(u"「%s」不能小于 %s。" % (name, fld[u"min"]))
+            if fld.get(u"max") is not None and v > fld[u"max"]:
+                raise ValueError(u"「%s」不能大于 %s。" % (name, fld[u"max"]))
+            return int(round(v)) if fld.get(u"int") else v
+        if kind == u"list":
+            return _su_split(txt)
+        if kind == u"lines":
+            return [x.strip() for x in (c.Text or u"").splitlines() if x.strip()]
+        if kind == u"palette":
+            out = []
+            for part in [x.strip() for x in _su_re.split(u"[;；\n\r]+", txt) if x.strip()]:
+                nums = [x for x in _su_re.split(u"[ ,]+", part) if x]
+                try:
+                    rgb = [int(x) for x in nums[:3]]
+                except Exception:
+                    rgb = []
+                if len(rgb) != 3 or any(n < 0 or n > 255 for n in rgb):
+                    raise ValueError(u"「%s」里「%s」不是有效的颜色，格式是 R,G,B（0–255），多个颜色用分号隔开。" % (name, part))
+                out.append(rgb)
+            if not out:
+                raise ValueError(u"「%s」至少要有一个颜色。" % name)
+            return out
+        if fld.get(u"required") and not txt:
+            raise ValueError(u"「%s」不能为空。" % name)
+        return txt
+
+    for fld in fields:
+        if fld.get(u"kind") != u"header":
+            put(fld, values.get(fld[u"key"]))
+
+    result = {u"v": None}
+    b_ok = _SUW.Button()
+    b_ok.Text = u"保存"
+    b_ok.Name = u"su_ok"
+    b_ok.Location = _SUD.Point(width - 200, height - 44)
+    b_ok.Size = _SUD.Size(88, 30)
+    b_ca = _SUW.Button()
+    b_ca.Text = u"取消"
+    b_ca.Name = u"su_cancel"
+    b_ca.Location = _SUD.Point(width - 100, height - 44)
+    b_ca.Size = _SUD.Size(88, 30)
+    f.Controls.Add(b_ok)
+    f.Controls.Add(b_ca)
+    f.CancelButton = b_ca
+    bx = 14
+    if defaults:
+        b_def = _SUW.Button()
+        b_def.Text = u"恢复默认"
+        b_def.Name = u"su_default"
+        b_def.Location = _SUD.Point(bx, height - 44)
+        b_def.Size = _SUD.Size(88, 30)
+        f.Controls.Add(b_def)
+        bx += 96
+
+        def _on_def(s, e):
+            for fld in fields:
+                if fld.get(u"kind") != u"header" and fld[u"key"] in defaults:
+                    put(fld, defaults[fld[u"key"]])
+        b_def.Click += _on_def
+    for text, cb in (extra_buttons or []):
+        b = _SUW.Button()
+        b.Text = text
+        b.Location = _SUD.Point(bx, height - 44)
+        b.Size = _SUD.Size(130, 30)
+        f.Controls.Add(b)
+        bx += 138
+        b.Click += (lambda s, e, cb=cb: cb())
+
+    def _on_ok(s, e):
+        out = {}
+        try:
+            for fld in fields:
+                if fld.get(u"kind") != u"header":
+                    out[fld[u"key"]] = get(fld)
+        except ValueError as ex:
+            _SUW.MessageBox.Show(u"%s" % ex, title)
+            return
+        result[u"v"] = out
+        f.Close()
+    b_ok.Click += _on_ok
+    b_ca.Click += (lambda s, e: f.Close())
+    ff_fit(f).ShowDialog()
+    return result[u"v"]
+
+# ---- compat（天河落共用片段，打包时内联进脚本）---------------------------------
+# 让同一份插件脚本在 Revit 2020 和 Revit 2026 里都能跑（中间的 2021–2025 大体按功能探测，同样适用）。
+# 原则：不用「年份」判断，用「这个 API 在不在」判断（hasattr），Autodesk 以后再改名也不用来改版本表。
+#   thl_eid(x)      ElementId → 整数（2024 起新增 .Value，更早只有 .IntegerValue；2026 已删 .IntegerValue）
+#   thl_make_eid(n) 整数 → ElementId（2024 起要 Int64）
+#   thl_bic(cat)    Category → BuiltInCategory 枚举（Category.BuiltInCategory 是 2022 起才有的）
+#   THL_HAS_*       有没有某个新功能，没有的时候脚本走降级写法，别硬调（硬调会 AttributeError）
+# 名字都带 thl_ 前缀，是为了不和插件里常见的局部变量名 eid / bic 撞上（局部变量会盖住同名函数）。
+import clr as _cp_clr
+import System as _cp_System
+from Autodesk.Revit import DB as _cpDB
+
+THL_HAS_ID_VALUE = hasattr(_cpDB.ElementId, 'Value')                       # 2024+
+THL_HAS_CAT_BIC = hasattr(_cpDB.Category, 'BuiltInCategory')               # 2022+
+THL_HAS_FORGE_TYPES = hasattr(_cpDB, 'SpecTypeId') and hasattr(_cpDB, 'GroupTypeId')   # 2022+ / 2024+
+THL_HAS_PDF_EXPORT = hasattr(_cpDB, 'PDFExportOptions')                    # 2022+
+THL_HAS_TOPOSOLID = hasattr(_cpDB.BuiltInCategory, 'OST_Toposolid')        # 2024+
+THL_HAS_SHEET_COLLECTION = hasattr(_cpDB, 'SheetCollection')               # 2025+
+
+
+def thl_eid(x):
+    """ElementId → 整数；None 或不是 ElementId 返回 -1。"""
+    if x is None:
+        return -1
+    if THL_HAS_ID_VALUE:
+        try:
+            return int(x.Value)
+        except AttributeError:
+            pass
+    try:
+        return int(x.IntegerValue)
+    except AttributeError:
+        return int(x)
+
+
+def thl_make_eid(n):
+    """整数 → ElementId。"""
+    n = int(n)
+    if THL_HAS_ID_VALUE:
+        return _cpDB.ElementId(_cp_System.Int64(n))
+    return _cpDB.ElementId(n)
+
+
+def thl_bic(cat):
+    """Category → DB.BuiltInCategory 枚举值；自定义类别（ID 为正数）返回 None。"""
+    if cat is None:
+        return None
+    if THL_HAS_CAT_BIC:
+        try:
+            return cat.BuiltInCategory
+        except Exception:
+            return None
+    v = thl_eid(cat.Id)
+    if v >= 0:
+        return None
+    try:
+        return _cp_System.Enum.ToObject(_cpDB.BuiltInCategory, v)
+    except Exception:
+        return None
+
+
+def thl_bic_by_name(name):
+    """按名字取 BuiltInCategory（如 'OST_Toposolid'）；这个版本没有就返回 None，不报错。"""
+    return getattr(_cpDB.BuiltInCategory, name, None)
+
+doc = revit.doc
+TITLE = '井接入排管高差更新'
+FT = 304.8
+CFG_FILE = os.path.join(System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments),
+                        'KaifaTools', '井接入排管高差设置.json')
+DEFAULTS = {
+    '说明': ('井接入排管高差更新的设置。band_edges_mm=前几档的上限（mm，如 500,725,1000），之后每档加 band_step_mm；'
+            'gap_mm=排管端头离井壁多远以内仍算接入；param_diff/param_band/param_count=写入的三个参数名；'
+            'skip_marks_containing=井号或族名含这些字的不统计（室内井）；schedule_name=明细表名字。'),
+    'band_edges_mm': [500, 725, 1000],
+    'band_step_mm': 250,
+    'gap_mm': 200,
+    'param_diff': '接入排管最大高差',
+    'param_band': '接入高差分段',
+    'param_count': '接入排管数',
+    'skip_marks_containing': ['室内'],
+    'schedule_name': '井接入排管高差明细表',
+}
+
+
+def save_cfg(c):
+    d = os.path.dirname(CFG_FILE)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    txt = json.dumps(c, ensure_ascii=False, indent=1)
+    if not isinstance(txt, type('')):
+        txt = txt.decode('utf-8')
+    with io.open(CFG_FILE, 'w', encoding='utf-8') as f:
+        f.write(txt)
+
+
+def load_cfg():
+    c = json.loads(json.dumps(DEFAULTS))
+    try:
+        if (not os.path.isfile(CFG_FILE)) or os.path.getsize(CFG_FILE) == 0:
+            save_cfg(c)
+            return c
+        with io.open(CFG_FILE, 'r', encoding='utf-8') as f:
+            u = json.load(f)
+        if isinstance(u, dict):
+            for k, v in u.items():
+                if k in c and k != '说明':
+                    c[k] = v
+    except Exception:
+        pass
+    return c
+
+
+def settings_fields():
+    return [
+        {'kind': 'header', 'label': '分段'},
+        {'key': 'band_step_mm', 'label': '边界之后每档多少 mm', 'kind': 'num', 'min': 10, 'max': 5000,
+         'hint': '默认 250：0-500、500-725、725-1000 之后是 1000-1250、1250-1500…（前几档的边界在设置文件里改 band_edges_mm）'},
+        {'kind': 'header', 'label': '接入判定'},
+        {'key': 'gap_mm', 'label': '管头离井壁多远以内算接入（mm）', 'kind': 'num', 'min': 0, 'max': 1000},
+        {'kind': 'header', 'label': '写入的参数名'},
+        {'key': 'param_diff', 'label': '最大高差（长度）', 'kind': 'text'},
+        {'key': 'param_band', 'label': '高差分段（文字）', 'kind': 'text'},
+        {'key': 'param_count', 'label': '接入排管数（整数）', 'kind': 'text'},
+        {'key': 'schedule_name', 'label': '明细表名字', 'kind': 'text'},
+    ]
+
+
+def open_settings():
+    c = load_cfg()
+    res = su_fields_dialog('井接入排管高差 设置', '改完点保存立即生效。', settings_fields(), c, DEFAULTS,
+                           extra_buttons=[('用记事本打开文件', lambda: su_open_file(CFG_FILE))])
+    if res is None:
+        return False
+    out = json.loads(json.dumps(c))
+    out.update(res)
+    save_cfg(out)
+    return True
+
+
+# ============================================================
+# 井与排管的识别（规则同「施工体检」）
+# ============================================================
+
+def well_kind(fam):
+    if fam.startswith('LV-'):
+        return 'LV'
+    if fam.startswith('ELE-EM'):
+        return 'EM'
+    if fam.startswith('ELE-TELCO') or fam == 'TELCO' or fam.startswith('TELCO-'):
+        return 'TELCO'
+    if fam == 'ELV PIT' or fam.startswith('ELV-MANHOLE'):
+        return 'ELV'
+    return None
+
+
+def pipe_sys(fam, tname):
+    both = fam + '|' + tname
+    if '雨水' in both or '排水' in both:
+        return None
+    if 'TELCO' in both:
+        return 'TELCO'
+    if '11KV' in both or '275KV' in both:
+        return 'EM'
+    if fam.startswith('ELV'):
+        return 'ELV'
+    if fam.startswith('LV') or 'ELE-LV' in tname:
+        return 'LV'
+    return None
+
+
+def _txt(e, bip):
+    try:
+        p = e.get_Parameter(bip)
+        return (p.AsString() or '') if p is not None else ''
+    except Exception:
+        return ''
+
+
+def is_temp(e):
+    return ('临时' in _txt(e, DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+            or '临时' in _txt(e, DB.BuiltInParameter.ALL_MODEL_MARK) or '临时' in e.Name)
+
+
+def _solids(e, lvl):
+    opt = DB.Options()
+    opt.DetailLevel = lvl
+    out = []
+    ge = e.get_Geometry(opt)
+    if ge is None:
+        return out
+    for g in ge:
+        items = g.GetInstanceGeometry() if isinstance(g, DB.GeometryInstance) else [g]
+        for s in items:
+            if isinstance(s, DB.Solid) and s.Volume > 1e-6:
+                out.append(s)
+    return out
+
+
+def collect_wells(cfg):
+    wells = []
+    skip_words = cfg.get('skip_marks_containing') or []
+    n_indoor = 0
+    for e in DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType():
+        if not isinstance(e, DB.FamilyInstance):
+            continue
+        fam = e.Symbol.FamilyName
+        kind = well_kind(fam)
+        if kind is None or is_temp(e):
+            continue
+        mk = _txt(e, DB.BuiltInParameter.ALL_MODEL_MARK).strip()
+        if any((w in mk) or (w in fam) for w in skip_words):
+            n_indoor += 1
+            continue
+        tr = e.GetTotalTransform()
+        inv = tr.Inverse
+        lp = e.Location.Point if isinstance(e.Location, DB.LocationPoint) else tr.Origin
+        sl = _solids(e, DB.ViewDetailLevel.Medium) or _solids(e, DB.ViewDetailLevel.Fine)
+        lx, ly, wx, wy = [], [], [], []
+        for s in sl:
+            for ed in s.Edges:
+                for p in ed.Tessellate():
+                    q = inv.OfPoint(p)
+                    lx.append(q.X)
+                    ly.append(q.Y)
+                    wx.append(p.X)
+                    wy.append(p.Y)
+        if not lx:
+            continue
+        wells.append({'e': e, 'id': thl_eid(e.Id), 'mark': mk, 'kind': kind, 'top': lp.Z, 'inv': inv, 'hits': [],
+                      'lbox': (min(lx), min(ly), max(lx), max(ly)), 'wbox': (min(wx), min(wy), max(wx), max(wy))})
+    return wells, n_indoor
+
+
+def collect_pipes():
+    pipes = []
+    for cat in (DB.BuiltInCategory.OST_StructuralFraming, DB.BuiltInCategory.OST_Conduit):
+        for e in DB.FilteredElementCollector(doc).OfCategory(cat).WhereElementIsNotElementType():
+            lc = e.Location
+            if not isinstance(lc, DB.LocationCurve):
+                continue
+            et = doc.GetElement(e.GetTypeId())
+            fam = et.FamilyName if et is not None else ''
+            sy = pipe_sys(fam, e.Name)
+            if sy is None or is_temp(e):
+                continue
+            a = lc.Curve.GetEndPoint(0)
+            b = lc.Curve.GetEndPoint(1)
+            if cat == DB.BuiltInCategory.OST_Conduit:
+                d = e.get_Parameter(DB.BuiltInParameter.RBS_CONDUIT_OUTER_DIAM_PARAM)
+                if d is None or d.AsDouble() <= 0:
+                    d = e.get_Parameter(DB.BuiltInParameter.RBS_CONDUIT_DIAMETER_PARAM)
+                zoff = -(d.AsDouble() / 2 if d is not None else 0)
+            else:
+                # 定位线不一定在管底，用包围盒最低点反推修正量（排管一般是底对齐，修正量为 0）
+                bb = e.get_BoundingBox(None)
+                zoff = (bb.Min.Z - min(a.Z, b.Z)) if bb is not None else 0
+            pipes.append({'sys': sy, 'a': a, 'b': b, 'zoff': zoff})
+    return pipes
+
+
+def _clip(p0, p1, box):
+    t0, t1 = 0.0, 1.0
+    dx = p1.X - p0.X
+    dy = p1.Y - p0.Y
+    for pp, q in ((-dx, p0.X - box[0]), (dx, box[2] - p0.X), (-dy, p0.Y - box[1]), (dy, box[3] - p0.Y)):
+        if abs(pp) < 1e-9:
+            if q < 0:
+                return None
+            continue
+        t = q / pp
+        if pp < 0:
+            if t > t1:
+                return None
+            if t > t0:
+                t0 = t
+        else:
+            if t < t0:
+                return None
+            if t < t1:
+                t1 = t
+    return (t0, t1)
+
+
+def _boxdist(q, box):
+    dx = max(box[0] - q.X, 0, q.X - box[2])
+    dy = max(box[1] - q.Y, 0, q.Y - box[3])
+    return math.sqrt(dx * dx + dy * dy)
+
+
+def match(wells, pipes, gap_mm):
+    """给每口井填 hits = 接入排管的管底高度列表（ft）。"""
+    TIGHT = 50.0 / FT
+    GAP = float(gap_mm) / FT
+    bysys = {}
+    for w in wells:
+        bysys.setdefault(w['kind'], []).append(w)
+    for p in pipes:
+        cands = bysys.get(p['sys'], [])
+        a, b = p['a'], p['b']
+        pminx, pmaxx = min(a.X, b.X) - 4, max(a.X, b.X) + 4
+        pminy, pmaxy = min(a.Y, b.Y) - 4, max(a.Y, b.Y) + 4
+        touched = set()
+        near = []
+        for w in cands:
+            wb = w['wbox']
+            if wb[2] < pminx or wb[0] > pmaxx or wb[3] < pminy or wb[1] > pmaxy:
+                continue
+            near.append(w)
+            la = w['inv'].OfPoint(a)
+            lb = w['inv'].OfPoint(b)
+            bx = w['lbox']
+            t = _clip(la, lb, (bx[0] - TIGHT, bx[1] - TIGHT, bx[2] + TIGHT, bx[3] + TIGHT))
+            if t is None:
+                continue
+            zm = a.Z + (b.Z - a.Z) * (t[0] + t[1]) / 2.0     # 井范围内管段中点
+            bot = zm + p['zoff']
+            if bot >= w['top']:
+                continue                                      # 管在井盖面以上，不是井里的管
+            w['hits'].append(bot)
+            touched.add(w['id'])
+        for q in (a, b):
+            best, bd = None, 1e9
+            for w in near:
+                d = _boxdist(w['inv'].OfPoint(q), w['lbox'])
+                if d < bd:
+                    bd, best = d, w
+            if best is not None and TIGHT < bd <= GAP and best['id'] not in touched:
+                best['hits'].append(q.Z + p['zoff'])
+
+
+def band_of(n, diff_mm, cfg):
+    """分段名带两位序号前缀，明细表按它排序就是从小到大。"""
+    if n == 0:
+        return '00 无接入排管'
+    if n == 1:
+        return '00 单根接入'
+    edges = sorted(cfg['band_edges_mm'])
+    lo = 0
+    for i, hi in enumerate(edges):
+        if diff_mm < hi:
+            return '%02d %d-%d' % (i + 1, lo, hi)
+        lo = hi
+    step = float(cfg['band_step_mm'])
+    k = int((diff_mm - lo) // step)
+    a = int(lo + k * step)
+    return '%02d %d-%d' % (len(edges) + 1 + k, a, int(a + step))
+
+
+def compute(cfg):
+    wells, n_indoor = collect_wells(cfg)
+    match(wells, collect_pipes(), cfg['gap_mm'])
+    rows = []
+    for w in wells:
+        h = w['hits']
+        n = len(h)
+        diff = round((max(h) - min(h)) * FT, 1) if n >= 2 else 0.0      # 先取整到 0.1mm 再分段，避免正好 1000 的被浮点误差分进低一档
+        rows.append({'e': w['e'], 'id': w['id'], 'mark': w['mark'], 'kind': w['kind'], 'n': n, 'diff': diff,
+                     'band': band_of(n, diff, cfg)})
+    return rows, n_indoor
+
+
+# ============================================================
+# 参数与写入
+# ============================================================
+
+GEN = DB.BuiltInCategory.OST_GenericModel
+
+
+def _bound(name):
+    it = doc.ParameterBindings.ForwardIterator()
+    while it.MoveNext():
+        if it.Key.Name == name:
+            return True
+    return False
+
+
+def ensure_params(cfg):
+    """三个参数缺哪个建哪个（常规模型实例共享参数，写临时共享参数文件，用完还原用户原来的共享参数文件路径）。返回新建的名字。"""
+    want = [(cfg['param_diff'], 'LENGTH'), (cfg['param_band'], 'TEXT'), (cfg['param_count'], 'INTEGER')]
+    need = [(n, t) for n, t in want if not _bound(n)]
+    if not need:
+        return []
+    app = doc.Application
+    old = app.SharedParametersFilename
+    tmp = os.path.join(tempfile.gettempdir(), 'thl_well_duct_diff_sp.txt')
+    text = ('# This is a Revit shared parameter file.\n# Do not edit manually.\n'
+            '*META\tVERSION\tMINVERSION\nMETA\t2\t1\n*GROUP\tID\tNAME\nGROUP\t1\t井排管高差\n'
+            '*PARAM\tGUID\tNAME\tDATATYPE\tDATACATEGORY\tGROUP\tVISIBLE\tDESCRIPTION\tUSERMODIFIABLE\tHIDEWHENNOVALUE\n')
+    for n, ty in need:
+        text += 'PARAM\t{}\t{}\t{}\t\t1\t1\t\t1\t0\n'.format(uuid.uuid4(), n, ty)
+    with io.open(tmp, 'w', encoding='utf-16', newline='\n') as f:        # 共享参数文件必须 UTF-16 + LF
+        f.write(text)
+    t = DB.Transaction(doc, '新建井接入排管高差参数')
+    t.Start()
+    try:
+        app.SharedParametersFilename = tmp
+        grp = app.OpenSharedParameterFile().Groups.get_Item('井排管高差')
+        for n, ty in need:
+            cats = app.Create.NewCategorySet()
+            cats.Insert(doc.Settings.Categories.get_Item(GEN))
+            doc.ParameterBindings.Insert(grp.Definitions.get_Item(n), app.Create.NewInstanceBinding(cats), DB.GroupTypeId.Data)
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+    finally:
+        try:
+            app.SharedParametersFilename = old
+        except Exception:
+            pass
+    return [n for n, ty in need]
+
+
+def current_vals(r, cfg):
+    e = r['e']
+    pd, pb, pn = e.LookupParameter(cfg['param_diff']), e.LookupParameter(cfg['param_band']), e.LookupParameter(cfg['param_count'])
+    return pd, pb, pn
+
+
+def changed(r, cfg):
+    pd, pb, pn = current_vals(r, cfg)
+    if pd is None or pb is None or pn is None:
+        return True
+    try:
+        return (abs(pd.AsDouble() * FT - r['diff']) > 0.5 or (pb.AsString() or '') != r['band'] or pn.AsInteger() != r['n'])
+    except Exception:
+        return True
+
+
+class _Fail(DB.IFailuresPreprocessor):
+    def __init__(self, ids):
+        self.ids = ids
+
+    def PreprocessFailures(self, fa):
+        rb = False
+        for f in fa.GetFailureMessages():
+            if f.GetSeverity() == DB.FailureSeverity.Warning:
+                fa.DeleteWarning(f)          # 例如「已经在组编辑模式外修改了组」，允许
+                continue
+            rb = True
+            try:
+                for i in f.GetFailingElementIds():
+                    self.ids.add(int(thl_eid(i)))
+            except Exception:
+                pass
+        return DB.FailureProcessingResult.ProceedWithRollBack if rb else DB.FailureProcessingResult.Continue
+
+
+def apply(rows, cfg):
+    todo = [r for r in rows if changed(r, cfg)]
+    blocked = set()
+    st = None
+    n = 0
+    for _attempt in range(8):
+        ids = set()
+        t = DB.Transaction(doc, '井接入排管高差更新')
+        fho = t.GetFailureHandlingOptions()
+        fho.SetFailuresPreprocessor(_Fail(ids))
+        t.SetFailureHandlingOptions(fho)
+        t.Start()
+        n = 0
+        try:
+            for r in todo:
+                if r['id'] in blocked:
+                    continue
+                pd, pb, pn = current_vals(r, cfg)
+                if pd is None or pb is None or pn is None or pd.IsReadOnly:
+                    continue
+                pd.Set(r['diff'] / FT)
+                pb.Set(r['band'])
+                pn.Set(int(r['n']))
+                n += 1
+            st = t.Commit()
+        except Exception:
+            t.RollBack()
+            raise
+        if str(st) == 'Committed' or not ids:
+            break
+        blocked |= ids
+    names = dict((r['id'], r['mark']) for r in rows)
+    return str(st) == 'Committed', n, [names.get(i, str(i)) for i in sorted(blocked)]
+
+
+# ============================================================
+# 明细表
+# ============================================================
+
+def make_schedule(cfg):
+    name = cfg['schedule_name']
+    for v in DB.FilteredElementCollector(doc).OfClass(DB.ViewSchedule):
+        if v.Name == name:
+            return False, name
+    t = DB.Transaction(doc, '建井接入排管高差明细表')
+    t.Start()
+    try:
+        vs = DB.ViewSchedule.CreateSchedule(doc, DB.ElementId(GEN))
+        vs.Name = name
+        sd = vs.Definition
+        avail = {}
+        for sf in sd.GetSchedulableFields():
+            avail[sf.GetName(doc)] = sf
+        fam = sd.AddField(avail['族'])
+        mark = sd.AddField(avail['标记'])
+        if '分区' in avail:
+            sd.AddField(avail['分区'])
+        n = sd.AddField(avail[cfg['param_count']])
+        diff = sd.AddField(avail[cfg['param_diff']])
+        bnd = sd.AddField(avail[cfg['param_band']])
+        fam.ColumnHeading = '井类型'
+        mark.ColumnHeading = '井号'
+        diff.ColumnHeading = '最大高差(mm)'
+        bnd.ColumnHeading = '高差分段'
+        sd.AddFilter(DB.ScheduleFilter(n.FieldId, DB.ScheduleFilterType.GreaterThanOrEqual, 2))
+        sd.AddFilter(DB.ScheduleFilter(mark.FieldId, DB.ScheduleFilterType.NotContains, '室内'))
+        sd.AddFilter(DB.ScheduleFilter(fam.FieldId, DB.ScheduleFilterType.NotContains, '室内'))
+        s1 = DB.ScheduleSortGroupField(bnd.FieldId)
+        s1.ShowHeader = True
+        s1.ShowFooter = True
+        s1.ShowBlankLine = False
+        sd.AddSortGroupField(s1)
+        sd.AddSortGroupField(DB.ScheduleSortGroupField(diff.FieldId, DB.ScheduleSortOrder.Descending))
+        sd.IsItemized = True
+        sd.ShowGrandTotal = True
+        sd.ShowGrandTotalCount = True
+        sd.ShowGrandTotalTitle = True
+        try:
+            fo = DB.FormatOptions()
+            fo.UseDefault = False
+            fo.SetUnitTypeId(DB.UnitTypeId.Millimeters)
+            fo.Accuracy = 1.0
+            diff.SetFormatOptions(fo)
+        except Exception:
+            pass
+        t.Commit()
+        return True, name
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+
+
+def summary(rows):
+    cnt = {}
+    for r in rows:
+        cnt[r['band']] = cnt.get(r['band'], 0) + 1
+    return '\n'.join('  {}：{} 口'.format(k, cnt[k]) for k in sorted(cnt))
+
+
+def main():
+    try:
+        cfg = load_cfg()
+        while True:
+            pick = forms.CommandSwitchWindow.show(
+                ['更新高差数据（重新算并写入井参数）', '只建「井接入排管高差明细表」', '⚙ 设置…'], message=TITLE)
+            if pick == '⚙ 设置…':
+                if open_settings():
+                    cfg = load_cfg()
+                continue
+            break
+        if not pick:
+            return
+        if pick.startswith('只建'):
+            ensure_params(cfg)
+            made, nm = make_schedule(cfg)
+            forms.alert(('已建好明细表「{}」。先点「更新高差数据」把值写进去。'.format(nm)) if made else '明细表「{}」已经有了，没有重复建。'.format(nm), title=TITLE)
+            return
+        rows, n_indoor = compute(cfg)
+        if not rows:
+            forms.alert('没有找到电井（常规模型里 TELCO / LV / ELV / 11kV 族的井）。', title=TITLE)
+            return
+        new_params = [] if all(_bound(cfg[k]) for k in ('param_diff', 'param_band', 'param_count')) else ['（会新建参数）']
+        diff_rows = [r for r in rows if changed(r, cfg)]
+        txt = '共 {} 口井参与统计（室内井 {} 口不算）。\n{}\n\n需要写入/更新：{} 口。{}'.format(
+            len(rows), n_indoor, summary(rows), len(diff_rows), ('\n' + new_params[0]) if new_params else '')
+        if not diff_rows and not new_params:
+            forms.alert(txt + '\n\n数据已经是最新的，不用更新。', title=TITLE)
+            return
+        txt += '\n\n只写三个参数，不动井和排管。确定吗？'
+        if WF.MessageBox.Show(txt, TITLE, WF.MessageBoxButtons.OKCancel, WF.MessageBoxIcon.Question) != WF.DialogResult.OK:
+            return
+        created = ensure_params(cfg)
+        ok, n, blocked = apply(rows, cfg)
+        msg = ('完成：更新 {} 口井。'.format(n)) if ok else '提交没有成功，没有任何改动。'
+        if created:
+            msg += '\n新建了参数：{}。'.format('、'.join(created))
+        if blocked:
+            msg += '\n以下 {} 口井被跳过（别人占用或你的文件已过期，先「重新载入最新」再点一次）：{}'.format(len(blocked), '、'.join(blocked[:12]))
+        has_sched = any(v.Name == cfg['schedule_name'] for v in DB.FilteredElementCollector(doc).OfClass(DB.ViewSchedule))
+        if not has_sched:
+            msg += '\n\n项目里还没有「{}」，要建一张吗？'.format(cfg['schedule_name'])
+            if WF.MessageBox.Show(msg, TITLE, WF.MessageBoxButtons.YesNo, WF.MessageBoxIcon.Question) == WF.DialogResult.Yes:
+                make_schedule(cfg)
+                forms.alert('已建好明细表「{}」。'.format(cfg['schedule_name']), title=TITLE)
+            return
+        msg += '\n明细表会自动刷新。不满意可以 Ctrl+Z 撤销。'
+        forms.alert(msg, title=TITLE)
+    except Exception as ex:
+        forms.alert('发生错误：\n{}\n\n{}'.format(ex, traceback.format_exc()), title=TITLE)
+
+
+if __name__ == '__main__':
+    main()
