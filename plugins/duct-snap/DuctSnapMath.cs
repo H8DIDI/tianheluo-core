@@ -130,6 +130,19 @@ public static class DuctSnapMath
         return null;
     }
 
+    /// <summary>
+    /// The target box for the ends: the cavity shrunk by <paramref name="intoMm"/> on every side, so an end snapped to it
+    /// sits that far past the inner wall face, inside the well. Never shrinks below a 2 mm box (small wells keep a target).
+    /// </summary>
+    public static Cavity Inset(Cavity c, double intoMm)
+    {
+        if (intoMm <= 0) return c;
+        double maxD = Math.Min(c.XRight - c.XLeft, c.YTop - c.YBottom) / 2 - 1;
+        double d = Math.Min(intoMm, maxD);
+        if (d <= 0) return c;
+        return new Cavity(c.XLeft + d, c.XRight - d, c.YBottom + d, c.YTop - d);
+    }
+
     /// <summary>Rotates a plan point about the origin by theta (radians, counter-clockwise).</summary>
     public static Pt2 Rotate(Pt2 p, double theta)
     {

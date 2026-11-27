@@ -188,6 +188,24 @@ var inFrame = DuctSnapMath.FindCavity(turned.Select(f => DuctSnapMath.RotateFace
 Check("turned well: cavity read in its own frame is the 3 m square",
     inFrame is { } tw && Near(tw.XLeft, 0, 0.5) && Near(tw.XRight, 3000, 0.5) && Near(tw.YBottom, 0, 0.5) && Near(tw.YTop, 3000, 0.5), $"{inFrame}");
 
+// ---- 伸进井内壁 50 mm: the target is the cavity shrunk by 50 on every side ----
+var into = DuctSnapMath.Inset(box, 50);
+Check("inset 50: target box is 50..2950", into == new Cavity(50, 2950, 50, 2950), $"{into}");
+d = DuctSnapMath.Classify(new Pt2(3000, 1500), far, into, lim);
+Check("into 50: end flush with the inner wall -> Extend 50 more", d.Kind == SnapKind.Extend && Near(d.T, -50), $"{d.Kind} {d.T:0.0}");
+d = DuctSnapMath.Classify(new Pt2(3120, 1500), far, into, lim);
+Check("into 50: 120 short of the wall -> Extend 170", d.Kind == SnapKind.Extend && Near(d.T, -170), $"{d.Kind} {d.T:0.0}");
+d = DuctSnapMath.Classify(new Pt2(2970, 1500), far, into, lim);
+Check("into 50: 30 past the wall -> Extend 20 more", d.Kind == SnapKind.Extend && Near(d.T, -20), $"{d.Kind} {d.T:0.0}");
+d = DuctSnapMath.Classify(new Pt2(2900, 1500), far, into, lim);
+Check("into 50: 100 past the wall -> Trim back 50", d.Kind == SnapKind.Trim && Near(d.T, 50), $"{d.Kind} {d.T:0.0}");
+d = DuctSnapMath.Classify(new Pt2(2952, 1500), far, into, lim);
+Check("into 50: already 48 past (within tolerance) -> Fit", d.Kind == SnapKind.Fit, $"{d.Kind} {d.T:0.0}");
+Check("inset on a tiny 60 mm cavity keeps a 2 mm target", DuctSnapMath.Inset(new Cavity(0, 60, 0, 60), 50) == new Cavity(29, 31, 29, 31));
+Check("inset 0 = flush with the inner wall (old behaviour)", DuctSnapMath.Inset(box, 0) == box);
+var rulesDefault = new DuctSnapRules();
+Check("default rule: 50 mm into the well", Near(rulesDefault.IntoWallMm, 50));
+
 Console.WriteLine();
 Console.WriteLine(failed == 0 ? "ALL PASS" : $"{failed} FAILED");
 return failed == 0 ? 0 : 1;

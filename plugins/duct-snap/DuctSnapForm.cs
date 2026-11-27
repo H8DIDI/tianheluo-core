@@ -33,6 +33,7 @@ public sealed class DuctSnapForm : Form
     private readonly TextBox _search = new();
     private string _summaryBase = "";
     private readonly CheckBox _pin = new();
+    private readonly NumericUpDown _into = new();
 
     public Action<DuctSnapRequest>? Requested { get; set; }
 
@@ -135,7 +136,17 @@ public sealed class DuctSnapForm : Form
         root.Controls.Add(_notes, 0, 3);
 
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 8) };
-        buttons.Controls.Add(Btn("重新检查", () => Requested?.Invoke(new DuctSnapRequest(DuctSnapRequestKind.Recheck))));
+        // 伸进井内壁的长度：改了点「重新检查」生效（同时写回规则文件，下次打开还在）
+        buttons.Controls.Add(new Label { AutoSize = true, Text = "端头伸进井内壁", Padding = new Padding(0, 8, 0, 0) });
+        _into.Minimum = 0;
+        _into.Maximum = 1000;
+        _into.Increment = 10;
+        _into.Width = 64;
+        _into.Margin = new Padding(3, 5, 3, 3);
+        _into.Value = (decimal)Math.Clamp(DuctSnapRules.Load(out _).IntoWallMm, 0, 1000);
+        buttons.Controls.Add(_into);
+        buttons.Controls.Add(new Label { AutoSize = true, Text = "mm（0=贴平内壁）", Padding = new Padding(0, 8, 12, 0) });
+        buttons.Controls.Add(Btn("重新检查", () => { SaveInto(); Requested?.Invoke(new DuctSnapRequest(DuctSnapRequestKind.Recheck)); }));
         buttons.Controls.Add(Btn("执行贴合…", ApplyWithConfirm));
         buttons.Controls.Add(Btn("定位到选中的排管", Jump));
         buttons.Controls.Add(Btn("导出 CSV", ExportCsv));
@@ -238,6 +249,12 @@ public sealed class DuctSnapForm : Form
 
     private void ApplyWithConfirm()
     {
+        var saved = DuctSnapRules.Load(out _).IntoWallMm;
+        if (Math.Abs(saved - (double)_into.Value) >= 0.01)
+        {
+            _notes.Text = $"「端头伸进井内壁」改成了 {_into.Value} mm，请先点「重新检查」看新结果，再执行。\n" + _notes.Text;
+            return;
+        }
         var excluded = _report.Rows.Where(r => r.Status == "可修改" && !r.Checked).Select(r => (r.BankId, r.EndIndex)).ToList();
         int chosen = _report.Rows.Count(r => r.Status == "可修改" && r.Checked);
         if (chosen == 0)
@@ -264,6 +281,21 @@ public sealed class DuctSnapForm : Form
         {
             _notes.Text = "导出失败：" + ex.Message + "\n" + _notes.Text;
         }
+    }
+
+    /// <summary>Writes the 伸进内壁 box back to the rules file when it differs (the engine reads the file on every run).</summary>
+    private void SaveInto()
+    {
+        try
+        {
+            var rules = DuctSnapRules.Load(out var err);
+            if (err is not null) return;                       // never overwrite a file the user is editing by hand
+            double v = (double)_into.Value;
+            if (Math.Abs(rules.IntoWallMm - v) < 0.01) return;
+            rules.IntoWallMm = v;
+            DuctSnapRules.Save(rules);
+        }
+        catch { }
     }
 
     private void OpenRules()

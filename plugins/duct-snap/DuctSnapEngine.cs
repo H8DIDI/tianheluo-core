@@ -91,7 +91,7 @@ public static class DuctSnapEngine
                         // The bank runs inside the wall: move the end along the bank to the nearest inner wall face ahead of it.
                         var cavInside = CavityOf(inside, rules);
                         var toPlane = cavInside is { } ci
-                            ? DuctSnapMath.DistanceToInnerPlane(InFrame(pts[k], ci), InFrame(pts[1 - k], ci), ci.Local, rules.ToleranceMm)
+                            ? DuctSnapMath.DistanceToInnerPlane(InFrame(pts[k], ci), InFrame(pts[1 - k], ci), Target(ci, rules), rules.ToleranceMm)
                             : null;
                         // Trim (positive) may be long: the excess lies in the wall. Extend (negative) must be short: the end
                         // is already at the well, so a long move means it belongs to a different place.
@@ -155,6 +155,7 @@ public static class DuctSnapEngine
             }
         }
 
+        rep.Notes.Add(rules.IntoWallMm > 0 ? $"目标：排管端头伸进井内壁 {rules.IntoWallMm:0} mm（已贴平内壁的也会再伸进去）。" : "目标：排管端头贴平井内壁。");
         if (rep.BanksNearWells == 0) rep.Notes.Add("没有找到靠近井的排管端点（检查井族前缀设置）。");
         int noCav = rep.Rows.Count(r => r.Kind == SnapKind.NoCavity);
         if (noCav > 0) rep.Notes.Add($"有 {noCav} 个端点靠近的井无法识别内壁（已列为需人工）。");
@@ -302,7 +303,7 @@ public static class DuctSnapEngine
             var cf = CavityOf(w, rules);
             var dec = cf is null
                 ? new SnapDecision(SnapKind.NoCavity, 0)
-                : DuctSnapMath.Classify(InFrame(end, cf), InFrame(other, cf), cf.Local, rules.Limits);
+                : DuctSnapMath.Classify(InFrame(end, cf), InFrame(other, cf), Target(cf, rules), rules.Limits);
             if (dec.Kind == SnapKind.Unrelated) continue;
             int rank = Rank(dec.Kind);
             double abs = Math.Abs(dec.T);
@@ -347,6 +348,9 @@ public static class DuctSnapEngine
         CavityCache[w.Key] = frame;
         return frame;
     }
+
+    /// <summary>Where the ends go: the inner cavity shrunk by IntoWallMm, so each end reaches that far past the inner wall.</summary>
+    private static Cavity Target(CavityFrame f, DuctSnapRules rules) => DuctSnapMath.Inset(f.Local, rules.IntoWallMm);
 
     /// <summary>A plan point in the well's own frame (the same frame as its cavity).</summary>
     private static Pt2 InFrame(Pt2 p, CavityFrame f) => DuctSnapMath.Rotate(p, -f.Theta);
