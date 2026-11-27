@@ -14,6 +14,7 @@ public sealed class DuctSnapRules
     public double MaxTrimMm { get; set; } = 2500;        // an end inside the well is trimmed back to the inner face on the bank side, up to this distance (about the well size)
     public double MaxEdgeTrimMm { get; set; } = 2500;    // a bank running inside a well's wall is trimmed back to the well's edge if the excess is this long or less
     public double ToleranceMm { get; set; } = 5;         // within this distance the end already sits on the wall: no change
+    public double IntoWallMm { get; set; } = 50;         // how far the end goes past the inner wall face, into the well (0 = flush with the inner wall)
     public double MinLengthMm { get; set; } = 500;       // a bank shorter than this after the change is not edited
     public double MinFaceAreaM2 { get; set; } = 0.2;     // wall faces smaller than this are ignored (small wells have ~0.6 m2 inner faces)
     public double FaceAreaRatio { get; set; } = 0.4;     // ...and so are faces below this share of the largest wall face
